@@ -1,0 +1,1166 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+
+// ===========================================================================
+//  FRC MOTION GEOMETRY: the builders behind the rotating parts
+// ---------------------------------------------------------------------------
+//  FRC Gear, FRC Pulley, FRC Sprocket, FRC Shaft and FRC Spacer are declared
+//  in the FRC Toolkit tab and do their work here.
+// ===========================================================================
+
+// ################################# GEAR #################################
+
+export enum FRCGearStandard
+{
+    annotation { "Name" : "20 DP, 14.5 deg (FRC)" }  DP20,
+    annotation { "Name" : "32 DP, 20 deg (light)" }  DP32,
+    annotation { "Name" : "10 DP, 20 deg (heavy)" }  DP10,
+    annotation { "Name" : "Metric module (20 deg)" } MODULE,
+    annotation { "Name" : "Custom diametral pitch" } CUSTOM_DP
+}
+
+export enum FRCGearKind
+{
+    annotation { "Name" : "Spur gear" } SPUR,
+    annotation { "Name" : "Rack" }      RACK
+}
+
+/**
+ * One involute tooth flank, root fillet to tip. Real teeth are not trapezoids:
+ * the flank is a true involute, the tip is an arc on the outside circle, and
+ * the root blends into the root circle. All three are built here.
+ *
+ * Verified against the WCP 20 DP steel gear drawings: every listed part number
+ * from 14T to 38T matches PD = N/DP and OD = (N+2)/DP exactly.
+ */
+export function frcGearOutline(N is number, DP is ValueWithUnits, PA is ValueWithUnits,
+    center is Vector) returns array
+{
+    const rp = N / (2 * DP);
+    const rb = rp * cos(PA);
+    const ro = (N + 2) / (2 * DP);
+    const rr = (N - 2.5) / (2 * DP);
+    const half = (PI / (2 * N)) * radian;
+    const invPA = frcInv(PA);
+    var npts = floor((1800 / N - 12) / 2);
+    if (npts < 4)
+        npts = 4;
+    if (npts > 14)
+        npts = 14;
+    const rstart = max(rb, rr);
+    const aS = acos(max(min(rb / rstart, 1), -1));
+    const phS = half + invPA - frcInv(aS);
+    const dth = (0.30 / DP / rr) * radian;          // standard full-depth root fillet
+    const step = (360 * degree) / N;
+
+    var pts = [];
+    for (var k = 0; k < N; k += 1)
+    {
+        const th = step * k;
+        const P0 = center + vector(cos(th - phS), sin(th - phS)) * rstart;
+        const P1 = center + vector(cos(th - phS), sin(th - phS)) * rr;
+        const P2 = center + vector(cos(th - phS - dth), sin(th - phS - dth)) * rr;
+        // t = 0 is P0 itself, and the involute loop below emits P0 as its own
+        // first point. Running this loop down to i = 0 drew that point twice
+        // and put a zero length segment in the polyline, so it stops at 1/3.
+        for (var i = 2; i >= 1; i -= 1)
+        {
+            const t = i / 3;
+            pts = append(pts, P0 * (1 - t) * (1 - t) + P1 * 2 * (1 - t) * t + P2 * t * t);
+        }
+        for (var i = 0; i <= npts; i += 1)
+        {
+            const r = rstart + (ro - rstart) * i / npts;
+            const a = acos(max(min(rb / r, 1), -1));
+            const ph = half + invPA - frcInv(a);
+            pts = append(pts, center + vector(cos(th - ph), sin(th - ph)) * r);
+        }
+        const aTip = acos(max(min(rb / ro, 1), -1));
+        const pTip = half + invPA - frcInv(aTip);
+        for (var i = 1; i <= 2; i += 1)
+        {
+            const t = th - pTip + (2 * pTip) * i / 3;
+            pts = append(pts, center + vector(cos(t), sin(t)) * ro);
+        }
+        for (var i = npts; i >= 0; i -= 1)
+        {
+            const r = rstart + (ro - rstart) * i / npts;
+            const a = acos(max(min(rb / r, 1), -1));
+            const ph = half + invPA - frcInv(a);
+            pts = append(pts, center + vector(cos(th + ph), sin(th + ph)) * r);
+        }
+        const Q0 = center + vector(cos(th + phS), sin(th + phS)) * rstart;
+        const Q1 = center + vector(cos(th + phS), sin(th + phS)) * rr;
+        const Q2 = center + vector(cos(th + phS + dth), sin(th + phS + dth)) * rr;
+        for (var i = 1; i <= 3; i += 1)
+        {
+            const t = i / 3;
+            pts = append(pts, Q0 * (1 - t) * (1 - t) + Q1 * 2 * (1 - t) * t + Q2 * t * t);
+        }
+        const aEnd = phS + dth;
+        const aNxt = step - aEnd;
+        // The root arc has to reach i = 3, its own end point, which is the next
+        // tooth's P2. The leading fillet loop above walks back from t = 2/3 and
+        // never emits P2 itself, so stopping this arc at i = 2 left that
+        // point out of the outline altogether: the polyline jumped from two
+        // thirds along the root straight to the next fillet and cut the corner,
+        // adding material at the root. Exactly one of the two loops may emit
+        // that point, since drawing it twice would put a zero length segment in
+        // the polyline.
+        for (var i = 1; i <= 3; i += 1)
+        {
+            const t = th + aEnd + (aNxt - aEnd) * i / 3;
+            pts = append(pts, center + vector(cos(t), sin(t)) * rr);
+        }
+    }
+    return pts;
+}
+
+/** Straight-sided rack: the involute at infinite radius. */
+export function frcRackOutline(nTeeth is number, DP is ValueWithUnits, PA is ValueWithUnits,
+    baseThickness is ValueWithUnits) returns array
+{
+    const p = PI / DP;
+    const a = 1 / DP;
+    const b = 1.25 / DP;
+    const t = p / 2;
+    const dxa = a * tan(PA);
+    const dxb = b * tan(PA);
+    var top = [];
+    for (var k = 0; k < nTeeth; k += 1)
+    {
+        const x0 = k * p;
+        top = append(top, vector(x0 - t / 2 - dxb, -b));
+        top = append(top, vector(x0 - t / 2 + dxa, a));
+        top = append(top, vector(x0 + t / 2 - dxa, a));
+        top = append(top, vector(x0 + t / 2 + dxb, -b));
+    }
+    const xEnd = top[size(top) - 1][0];
+    const xStart = top[0][0];
+    top = append(top, vector(xEnd, -b - baseThickness));
+    top = append(top, vector(xStart, -b - baseThickness));
+    return top;
+}
+
+export function frcGearBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face, a hole, a vertex or a mate connector to place the gear.", ["location"]);
+
+    // Pattern and mirror support. The picked face, hole, vertex or mate
+    // connector is what places the gear, so it is the reference the pattern
+    // transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    // Diametral pitch carries units of 1/length, which is what makes every
+    // radius come out as a length rather than a bare number.
+    var DP = 20 / inch;
+    var PA = 14.5 * degree;
+    var label = "20 DP";
+    if (definition.standard == FRCGearStandard.DP32)
+    {
+        DP = 32 / inch; PA = 20 * degree; label = "32 DP";
+    }
+    else if (definition.standard == FRCGearStandard.DP10)
+    {
+        DP = 10 / inch; PA = 20 * degree; label = "10 DP";
+    }
+    else if (definition.standard == FRCGearStandard.MODULE)
+    {
+        DP = 1 / definition.module; PA = 20 * degree;
+        label = "module " ~ roundToPrecision(definition.module / millimeter, 3);
+    }
+    else if (definition.standard == FRCGearStandard.CUSTOM_DP)
+    {
+        DP = definition.customDP / inch; PA = definition.customPA;
+        label = "" ~ definition.customDP ~ " DP";
+    }
+
+    const N = definition.teeth;
+    const sk = newSketchOnPlane(context, id + "sk", { "sketchPlane" : pl });
+    var pd = 0 * inch;
+    var od = 0 * inch;
+
+    if (definition.kind == FRCGearKind.SPUR)
+    {
+        const pts = frcGearOutline(N, DP, PA, vector(0, 0) * inch);
+        skPolyline(sk, "gear", { "points" : append(pts, pts[0]) });
+        frcAddBore(sk, "bore", vector(0, 0) * inch, definition);
+        pd = N / DP;
+        od = (N + 2) / DP;
+    }
+    else
+    {
+        const pts = frcRackOutline(N, DP, PA, definition.rackBack);
+        skPolyline(sk, "rack", { "points" : append(pts, pts[0]) });
+        pd = 0 * inch;
+        // Measured off the outline that was just drawn, not from N circular
+        // pitches. The blank ends on the outer root corner of the first and
+        // last tooth, so it is half a pitch short of N pitches and only the
+        // two root offsets long again: N x pitch overstates it by
+        // PI / (2 DP) - 2.5 tan(PA) / DP, about 0.9 / DP, which is 0.046 in
+        // at 20 DP. Reading the drawn points back cannot drift from the
+        // geometry the way a second formula can.
+        var xLo = pts[0][0];
+        var xHi = pts[0][0];
+        for (var q in pts)
+        {
+            xLo = min(xLo, q[0]);
+            xHi = max(xHi, q[0]);
+        }
+        od = xHi - xLo;
+    }
+    skSolve(sk);
+
+    // filterInnerLoops drops the disc inside the bore, so the bore comes out
+    // as a hole rather than being filled back in.
+    const regions = qSketchRegion(id + "sk", true);
+    if (size(evaluateQuery(context, regions)) == 0)
+        throw regenError("The tooth profile did not close. Try a different tooth count.", ["teeth"]);
+    opExtrude(context, id + "ex", { "entities" : regions, "direction" : pl.normal,
+                "endBound" : BoundingType.BLIND, "endDepth" : definition.faceWidth });
+
+    const bq = qCreatedBy(id + "ex", EntityType.BODY);
+    setProperty(context, { "entities" : bq, "propertyType" : PropertyType.NAME,
+                "value" : definition.kind == FRCGearKind.SPUR
+                    ? ("" ~ N ~ "T " ~ label ~ " Gear") : "Rack" });
+    frcApplyPart(context, bq, definition.material, FRCPartClass.DRIVE);
+
+    // Volume and mass read the same either side of the move, so the gear or
+    // rack body is moved once, here.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : bq });
+    var lines = "";
+    if (definition.kind == FRCGearKind.SPUR)
+        lines ~= "Pitch dia " ~ frcInches(pd) ~ ", outside dia " ~ frcInches(od) ~ ", at "
+            ~ label ~ ". Centers to a mate are (teeth + mating teeth) / (2 x DP), plus "
+            ~ "0.002 in for backlash. ";
+    else
+        lines ~= "Rack " ~ frcInches(od) ~ " long over " ~ N ~ " teeth spaced "
+            ~ frcInches(PI / DP) ~ ", ends cut at the roots. The pinion pitch circle sits "
+            ~ "tangent to the pitch line. ";
+    lines ~= "Mass " ~ roundToPrecision(vol * frcDensity(definition.material)
+            / (0.45359237 * kilogram), 3) ~ " lb. ";
+    lines ~= "Involute flanks sampled to a polyline, with a root fillet, not arcs.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################ PULLEY ################################
+
+export enum FRCBeltProfile
+{
+    annotation { "Name" : "GT2 / GT3 2 mm" }        GT2_2,
+    annotation { "Name" : "GT2 / GT3 3 mm" }        GT2_3,
+    annotation { "Name" : "GT2 / GT3 5 mm" }        GT2_5,
+    annotation { "Name" : "GT2 8 mm" }              GT2_8,
+    annotation { "Name" : "GT2 14 mm" }             GT2_14,
+    annotation { "Name" : "HTD 3 mm" }              HTD_3,
+    annotation { "Name" : "HTD 5 mm" }              HTD_5,
+    annotation { "Name" : "HTD 8 mm" }              HTD_8,
+    annotation { "Name" : "HTD 14 mm" }             HTD_14,
+    annotation { "Name" : "RT25 (0.250 in pitch)" } RT25,
+    annotation { "Name" : "T5" }                    T5,
+    annotation { "Name" : "T10" }                   T10,
+    annotation { "Name" : "Round cord (polycord)" } POLYCORD
+}
+
+/**
+ * Belt data by profile.
+ *
+ * `pld` is the pitch line differential: the belt's pitch line sits that far
+ * above the pulley's outside diameter, so OD = PD - 2 * pld. The values are
+ * from the SDP/SI timing belt handbook, table 4, cross-checked against the
+ * Gates sprocket diameter tables and Pfeifer's pitch and outside diameter
+ * charts. Pitch and outside diameters are therefore exact.
+ *
+ * The groove itself is the part no vendor publishes at small pitches. HTD is a
+ * circular arc by design, so the arc form here is the real profile. GT and
+ * RT25 grooves are a close arc approximation, and T-series grooves are
+ * trapezoidal. `minTeeth` is the smallest pulley usually recommended at
+ * moderate speed; FRC vendors do sell smaller, so it warns rather than blocks.
+ */
+export function frcBeltData(p is FRCBeltProfile) returns map
+{
+    const mm = millimeter;
+    return {
+            FRCBeltProfile.GT2_2 : { "pitch" : 2 * mm, "pld" : 0.254 * mm, "form" : "arc",
+                "depth" : 0.76 * mm, "rad" : 0.66 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 14, "exact" : false, "name" : "GT2 / GT3 2 mm" },
+            FRCBeltProfile.GT2_3 : { "pitch" : 3 * mm, "pld" : 0.381 * mm, "form" : "arc",
+                "depth" : 1.14 * mm, "rad" : 1.00 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 18, "exact" : false, "name" : "GT2 / GT3 3 mm" },
+            FRCBeltProfile.GT2_5 : { "pitch" : 5 * mm, "pld" : 0.5715 * mm, "form" : "arc",
+                "depth" : 1.93 * mm, "rad" : 1.67 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 20, "exact" : false, "name" : "GT2 / GT3 5 mm" },
+            FRCBeltProfile.GT2_8 : { "pitch" : 8 * mm, "pld" : 0.6858 * mm, "form" : "arc",
+                "depth" : 3.43 * mm, "rad" : 2.29 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 22, "exact" : false, "name" : "GT2 8 mm" },
+            FRCBeltProfile.GT2_14 : { "pitch" : 14 * mm, "pld" : 1.397 * mm, "form" : "arc",
+                "depth" : 6.00 * mm, "rad" : 4.00 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 28, "exact" : false, "name" : "GT2 14 mm" },
+            FRCBeltProfile.HTD_3 : { "pitch" : 3 * mm, "pld" : 0.381 * mm, "form" : "arc",
+                "depth" : 1.22 * mm, "rad" : 0.90 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 18, "exact" : true, "name" : "HTD 3 mm" },
+            FRCBeltProfile.HTD_5 : { "pitch" : 5 * mm, "pld" : 0.5715 * mm, "form" : "arc",
+                "depth" : 2.08 * mm, "rad" : 1.49 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 26, "exact" : true, "name" : "HTD 5 mm" },
+            FRCBeltProfile.HTD_8 : { "pitch" : 8 * mm, "pld" : 0.6858 * mm, "form" : "arc",
+                "depth" : 3.40 * mm, "rad" : 2.44 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 28, "exact" : true, "name" : "HTD 8 mm" },
+            FRCBeltProfile.HTD_14 : { "pitch" : 14 * mm, "pld" : 1.397 * mm, "form" : "arc",
+                "depth" : 6.00 * mm, "rad" : 4.30 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 28, "exact" : true, "name" : "HTD 14 mm" },
+            FRCBeltProfile.RT25 : { "pitch" : 6.35 * mm, "pld" : 0.561 * mm, "form" : "arc",
+                "depth" : 2.64 * mm, "rad" : 1.89 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 12, "exact" : false, "name" : "RT25" },
+            FRCBeltProfile.T5 : { "pitch" : 5 * mm, "pld" : 0.5 * mm, "form" : "trapezoid",
+                "depth" : 1.2 * mm, "rad" : 0.2 * mm, "flank" : 20 * degree,
+                "top" : 2.65 * mm, "minTeeth" : 14, "exact" : false, "name" : "T5" },
+            FRCBeltProfile.T10 : { "pitch" : 10 * mm, "pld" : 1.0 * mm, "form" : "trapezoid",
+                "depth" : 2.5 * mm, "rad" : 0.4 * mm, "flank" : 20 * degree,
+                "top" : 5.3 * mm, "minTeeth" : 16, "exact" : false, "name" : "T10" },
+            FRCBeltProfile.POLYCORD : { "pitch" : 0 * mm, "pld" : 0 * mm, "form" : "cord",
+                "depth" : 0 * mm, "rad" : 3.175 * mm, "flank" : 0 * degree,
+                "top" : 0 * mm, "minTeeth" : 0, "exact" : true, "name" : "polycord" }
+        }[p];
+}
+
+export enum FRCCordSize
+{
+    annotation { "Name" : "1/4 in polycord (WCP)" } CORD_250,
+    annotation { "Name" : "6 mm round belt (REV)" } CORD_6MM,
+    annotation { "Name" : "3/16 in" }               CORD_1875,
+    annotation { "Name" : "Custom diameter" }       CORD_CUSTOM
+}
+
+export function frcCordDia(s is FRCCordSize) returns ValueWithUnits
+{
+    return { FRCCordSize.CORD_250 : 0.250 * inch, FRCCordSize.CORD_6MM : 6 * millimeter,
+             FRCCordSize.CORD_1875 : 0.1875 * inch, FRCCordSize.CORD_CUSTOM : 0.25 * inch }[s];
+}
+
+/** One tooth groove, either the HTD-style arc or the T-series trapezoid. */
+export function frcGrooveSegments(bd is map, N is number, rOD is ValueWithUnits,
+    center is Vector) returns array
+{
+    var out = [];
+    if (bd.form == "trapezoid")
+    {
+        const rRoot = rOD - bd.depth;
+        const halfTop = bd.top / 2;
+        const halfRoot = halfTop - bd.depth * tan(bd.flank);
+        // `top` is the groove width where it breaks the outside diameter, and
+        // the root is one depth of flank narrower than that. The tool runs a
+        // further depth proud of the outside diameter so the cut breaks the
+        // rim cleanly, so the flanks are carried out to that radius at the
+        // same angle. Stopping them at halfTop spread the flank over twice
+        // the depth, which halved the flank angle and left the groove
+        // 2 * depth * tan(flank) too narrow at the rim for the belt tooth.
+        const halfLip = halfTop + bd.depth * tan(bd.flank);
+        for (var i = 0; i < N; i += 1)
+        {
+            const th = (360 * degree) * i / N;
+            const u = vector(cos(th), sin(th));
+            const v = vector(-sin(th), cos(th));
+            const pts = [center + u * (rOD + bd.depth) + v * halfLip,
+                         center + u * rRoot + v * max(halfRoot, 0.05 * bd.top),
+                         center + u * rRoot - v * max(halfRoot, 0.05 * bd.top),
+                         center + u * (rOD + bd.depth) - v * halfLip];
+            for (var k = 0; k < 4; k += 1)
+                out = append(out, { "kind" : "line", "start" : pts[k],
+                            "end" : pts[(k + 1) % 4] });
+        }
+        return out;
+    }
+    const rc = rOD - bd.depth + bd.rad;
+    for (var i = 0; i < N; i += 1)
+    {
+        const th = (360 * degree) * i / N;
+        const c = center + frcPolar(rc, th);
+        out = concatenateArrays([out, frcCircleArcs(2 * bd.rad, c, 0 * inch)]);
+    }
+    return out;
+}
+
+export function frcPulleyBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face, a hole, a vertex or a mate connector to place the pulley.", ["location"]);
+
+    // Pattern and mirror support. The picked face, hole, vertex or mate
+    // connector is what places the pulley, so it is the reference the pattern
+    // transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    const bd = frcBeltData(definition.profile);
+    const center = vector(0, 0) * inch;
+    const isCord = definition.profile == FRCBeltProfile.POLYCORD;
+    const cordD = (definition.cordSize == FRCCordSize.CORD_CUSTOM)
+        ? definition.cordDia : frcCordDia(definition.cordSize);
+    const N = isCord ? 0 : definition.teeth;
+    const PD = isCord ? 0 * inch : bd.pitch * N / PI;
+    const OD = isCord ? definition.overCord - 2 * cordD * 0.75 : PD - 2 * bd.pld;
+    // A face cut to exactly the belt width gives the belt nothing to wander
+    // onto and pinches it between the flanges, and on a cord it runs the
+    // groove out through both rims. No vendor in the table above publishes a
+    // face width, so this is a rule of thumb and not vendor data: one
+    // millimeter of land on each side of the belt or cord. The report says so
+    // as well. Widen it on a long drive or where the shafts are not parallel.
+    const faceClear = 2 * millimeter;
+    const width = (isCord ? cordD : definition.beltWidth) + faceClear;
+
+    if (!isCord && OD - 2 * bd.depth < 0.08 * inch)
+        throw regenError("That tooth count is too small for this belt profile. Add teeth, or pick a finer pitch.", ["teeth"]);
+    if (isCord && OD < 0.2 * inch)
+        throw regenError("That diameter over the cord leaves no pulley. Increase it.", ["overCord"]);
+
+    const skb = newSketchOnPlane(context, id + "b", { "sketchPlane" : pl });
+    skCircle(skb, "od", { "center" : center, "radius" : OD / 2 });
+    frcAddBore(skb, "bore", center, definition);
+    skSolve(skb);
+    opExtrude(context, id + "bx", { "entities" : qSketchRegion(id + "b", true),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : width });
+    const body = qCreatedBy(id + "bx", EntityType.BODY);
+
+    if (!isCord)
+    {
+        const skg = newSketchOnPlane(context, id + "g",
+            { "sketchPlane" : plane(pl.origin - pl.normal * (0.1 * inch), pl.normal, pl.x) });
+        frcDrawProfile(skg, "g", frcGrooveSegments(bd, N, OD / 2, center));
+        skSolve(skg);
+        opExtrude(context, id + "gx", { "entities" : qSketchRegion(id + "g", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : width + 0.3 * inch });
+        opBoolean(context, id + "gsub", { "tools" : qCreatedBy(id + "gx", EntityType.BODY),
+                    "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    else
+    {
+        // A round cord sits in a round bottomed groove, so the groove is cut
+        // by revolving a circle of the cord's own diameter.
+        const skg = newSketchOnPlane(context, id + "g",
+            { "sketchPlane" : plane(pl.origin, cross(pl.normal, pl.x), pl.x) });
+        skCircle(skg, "c", { "center" : vector(OD / 2 + cordD * 0.25, -width / 2),
+                    "radius" : cordD / 2 });
+        skSolve(skg);
+        opRevolve(context, id + "gx", { "entities" : qSketchRegion(id + "g", false),
+                    "axis" : line(pl.origin, pl.normal), "angleForward" : 360 * degree });
+        opBoolean(context, id + "gsub", { "tools" : qCreatedBy(id + "gx", EntityType.BODY),
+                    "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+
+    if (definition.flanges)
+    {
+        const fr = OD / 2 + definition.flangeHeight;
+        const skf = newSketchOnPlane(context, id + "f", { "sketchPlane" : pl });
+        skCircle(skf, "f1", { "center" : center, "radius" : fr });
+        frcAddBore(skf, "fb", center, definition);
+        skSolve(skf);
+        opExtrude(context, id + "f1", { "entities" : qSketchRegion(id + "f", true),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.flangeThickness });
+        opExtrude(context, id + "f2", { "entities" : qSketchRegion(id + "f", true),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : width + definition.flangeThickness,
+                    "startBound" : BoundingType.BLIND, "startDepth" : -width });
+        // A union takes every body in "tools". Splitting them across "tools"
+        // and "targets" is what a subtraction wants, and fails here.
+        opBoolean(context, id + "funion", {
+                    "tools" : qUnion([body, qCreatedBy(id + "f1", EntityType.BODY),
+                            qCreatedBy(id + "f2", EntityType.BODY)]),
+                    "operationType" : BooleanOperationType.UNION });
+        frcBreakEdges(context, id + "fch", qUnion([qCreatedBy(id + "f1", EntityType.EDGE),
+                    qCreatedBy(id + "f2", EntityType.EDGE)]), 0.015 * inch);
+    }
+
+    setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                "value" : isCord
+                    ? ("" ~ roundToPrecision(cordD / inch, 3) ~ " in Cord Pulley")
+                    : ("" ~ N ~ "T " ~ bd.name ~ " Pulley") });
+    frcApplyPart(context, body, definition.material, FRCPartClass.DRIVE);
+
+    // The groove is cut out of this feature's own body rather than out of a
+    // part that was already there, so the pulley survives the subtraction and
+    // is moved once, here.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : body });
+    var lines = "";
+    if (isCord)
+        lines ~= "Outside dia " ~ frcInches(OD) ~ " over a " ~ frcInches(cordD)
+            ~ " cord, groove root " ~ frcInches(OD - cordD / 2) ~ ". ";
+    else
+        lines ~= "Pitch dia " ~ frcInches(PD) ~ ", outside dia " ~ frcInches(OD)
+            ~ ", groove root " ~ frcInches(OD - 2 * bd.depth) ~ ", on "
+            ~ bd.name ~ " at " ~ roundToPrecision(bd.pitch / millimeter, 3)
+            ~ " mm pitch; belt length is the belt tooth count times that pitch. ";
+    lines ~= "Face width " ~ frcInches(width) ~ ", the " ~ (isCord ? "cord" : "belt")
+        ~ " plus " ~ roundToPrecision(faceClear / millimeter, 1)
+        ~ " mm as a rule of thumb. ";
+    lines ~= "Mass " ~ roundToPrecision(vol * frcDensity(definition.material)
+            / (0.45359237 * kilogram), 3) ~ " lb. ";
+    if (!isCord && N < bd.minTeeth)
+        lines ~= "NOTE " ~ bd.minTeeth ~ " or more teeth is usual; fewer costs belt life. ";
+    if (isCord)
+        lines ~= "The half-round groove is a quarter of the cord diameter deep, so the "
+            ~ "rest of the cord stands proud.";
+    else if (bd.exact)
+        lines ~= "Diameters exact; HTD is the true circular-arc form.";
+    else
+        lines ~= "Diameters exact; groove form unpublished, approximated.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################### SPROCKET ###############################
+
+export enum FRCChainSize
+{
+    annotation { "Name" : "#25 (0.250 in pitch)" }    CH25,
+    annotation { "Name" : "#25H (0.250 in, heavy)" }  CH25H,
+    annotation { "Name" : "#35 (0.375 in pitch)" }    CH35,
+    annotation { "Name" : "#40 (0.500 in pitch)" }    CH40,
+    annotation { "Name" : "Custom pitch and roller" } CUSTOM
+}
+
+/**
+ * Chain dimensions from the US Tsubaki and Martin catalogs. #25 and #35 are
+ * bushed rather than rollered, so `roller` is the bushing diameter, which is
+ * the diameter the tooth form is built around either way.
+ *
+ * `width` is the inner width between the roller link plates and `plate` is the
+ * plate thickness. The overall width over the outer link plates is not carried
+ * here, and it does not follow from those two, so side clearance checks against
+ * a chain run are out of scope for this table. Add an overall width from a
+ * cited catalog row before writing one.
+ */
+export function frcChainData(c is FRCChainSize) returns map
+{
+    return {
+            FRCChainSize.CH25 : { "pitch" : 0.250 * inch, "roller" : 0.130 * inch,
+                                  "width" : 0.125 * inch, "plate" : 0.030 * inch },
+            FRCChainSize.CH25H : { "pitch" : 0.250 * inch, "roller" : 0.130 * inch,
+                                   "width" : 0.125 * inch, "plate" : 0.040 * inch },
+            FRCChainSize.CH35 : { "pitch" : 0.375 * inch, "roller" : 0.200 * inch,
+                                  "width" : 0.188 * inch, "plate" : 0.050 * inch },
+            FRCChainSize.CH40 : { "pitch" : 0.500 * inch, "roller" : 0.312 * inch,
+                                  "width" : 0.312 * inch, "plate" : 0.060 * inch },
+            FRCChainSize.CUSTOM : { "pitch" : 0.250 * inch, "roller" : 0.130 * inch,
+                                    "width" : 0.125 * inch, "plate" : 0.030 * inch }
+        }[c];
+}
+
+/**
+ * ANSI B29.1 sprocket tooth form, built exactly as the American Chain
+ * Association handbook constructs it: a seating curve of radius R about the
+ * pitch point, a working flank of radius E about c, a straight run yz, and a
+ * topping curve of radius F about b, trimmed at the catalog outside diameter.
+ *
+ * The construction and every identity in it were checked against the worked
+ * example for a 30 tooth #25 sprocket, and the resulting pitch and outside
+ * diameters match the Martin catalog across nineteen sizes. Cutting plain
+ * roller circles, which is what most generators do, leaves no working flank
+ * at all and the chain rides up under load.
+ */
+export function frcSprocketSegments(P is ValueWithUnits, N is number, Dr is ValueWithUnits,
+    clearance is ValueWithUnits, center is Vector) returns array
+{
+    const delta = (180 / N) * degree;
+    const A = (35 + 60 / N) * degree;
+    const B = (18 - 56 / N) * degree;
+    const gamma = (17 - 64 / N) * degree;
+    // Seating curve radius. ANSI B29.1 publishes the seating curve diameter as
+    // 1.005 Dr + 0.003 in, and R is half of it. The construction below forces
+    // the same value: x is where the seating curve meets the working flank, and
+    // it sits at R from a and at E from c along one ray, so E = ac + R. With
+    // ac = 0.8 Dr and E = 1.3025 Dr + 0.0015 in, R can only be
+    // 0.5025 Dr + 0.0015 in. A reviewer proposed 0.50025, which would open a
+    // 0.00225 Dr step between the seating curve and the flank. Not a typo.
+    const R = 0.5025 * Dr + 0.0015 * inch + clearance;
+    const E = 1.3025 * Dr + 0.0015 * inch + clearance;
+    const F = Dr * (0.8 * cos(B) + 1.4 * cos(gamma) - 1.3025) - 0.0015 * inch - clearance;
+    const ac = 0.8 * Dr;
+    const ab = 1.4 * Dr;
+    const yz = Dr * (1.4 * sin(gamma) - 0.8 * sin(B));
+    const leg = ab - P / 2;
+    const PD = P / sin(delta);
+    const rOD = P * (0.6 + cos(delta) / sin(delta)) / 2;
+    if (F * F <= leg * leg)
+        throw regenError("That roller is too large for this chain pitch, so the tooth form has no solution. Reduce the roller diameter or increase the chain pitch.", ["teeth"]);
+    const H = sqrt(F * F - leg * leg);
+
+    const a = vector(0 * inch, PD / 2);
+    const c = a + vector(cos(A), sin(A)) * ac;
+    const b = a - vector(cos(delta), sin(delta)) * ab;
+    const angX = 180 * degree + A;
+    const angY = angX - B;
+    const y = c + frcPolar(E, angY);
+    const z = y + frcPolar(yz, angY - 90 * degree);
+    const angZ = A - B;
+    var angTop = delta + atan2(H, leg);
+
+    // Real sprockets are trimmed at the catalog outside diameter, which leaves
+    // a short land on the tooth tip. Solve for where the topping curve crosses.
+    const bn = norm(b);
+    const beta = atan2(b[1], b[0]);
+    var landAt = undefined;
+    const kk = (rOD * rOD - bn * bn - F * F) / (2 * F * bn);
+    if (abs(kk) <= 1)
+    {
+        const dphi = acos(kk);
+        for (var cand in [beta + dphi, beta - dphi, beta + dphi - 360 * degree,
+                    beta - dphi + 360 * degree])
+        {
+            if (cand > angZ + 1e-6 * degree && cand < angTop - 1e-9 * degree)
+            {
+                if (landAt == undefined || cand < landAt)
+                    landAt = cand;
+            }
+        }
+    }
+    if (landAt != undefined)
+        angTop = landAt;
+
+    var half = [frcArcFromAngles(a, R, 270 * degree, angX),
+                frcArcFromAngles(c, E, angX, angY),
+                { "kind" : "line", "start" : y, "end" : z },
+                frcArcFromAngles(b, F, angZ, angTop)];
+    if (landAt != undefined)
+    {
+        const pt = b + frcPolar(F, angTop);
+        half = append(half, frcArcFromAngles(vector(0, 0) * inch, rOD,
+                    atan2(pt[1], pt[0]), 90 * degree + delta));
+    }
+
+    // The other half of the tooth is the mirror image about the tooth center
+    // line, walked backwards so the loop keeps running counter-clockwise.
+    const phi = 90 * degree + delta;
+    var unit = half;
+    for (var i = size(half) - 1; i >= 0; i -= 1)
+    {
+        const s = half[i];
+        if (s.kind == "line")
+            unit = append(unit, { "kind" : "line", "start" : frcMirrorPoint(s.end, phi),
+                        "end" : frcMirrorPoint(s.start, phi) });
+        else
+            unit = append(unit, { "kind" : "arc", "start" : frcMirrorPoint(s.end, phi),
+                        "mid" : frcMirrorPoint(s.mid, phi), "end" : frcMirrorPoint(s.start, phi) });
+    }
+
+    var out = [];
+    for (var k = 0; k < N; k += 1)
+    {
+        const rot = k * 2 * delta;
+        for (var s in unit)
+        {
+            if (s.kind == "line")
+                out = append(out, { "kind" : "line",
+                            "start" : center + frcRotatePoint(s.start, rot),
+                            "end" : center + frcRotatePoint(s.end, rot) });
+            else
+                out = append(out, { "kind" : "arc",
+                            "start" : center + frcRotatePoint(s.start, rot),
+                            "mid" : center + frcRotatePoint(s.mid, rot),
+                            "end" : center + frcRotatePoint(s.end, rot) });
+        }
+    }
+    return out;
+}
+
+export function frcSprocketBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face, a hole, a vertex or a mate connector to place the sprocket.", ["location"]);
+
+    // Pattern and mirror support. The picked face, hole, vertex or mate
+    // connector is what places the sprocket, so it is the reference the
+    // pattern transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    const cd = frcChainData(definition.chain);
+    const P = (definition.chain == FRCChainSize.CUSTOM) ? definition.chainPitch : cd.pitch;
+    const Dr = (definition.chain == FRCChainSize.CUSTOM) ? definition.rollerDia : cd.roller;
+    const N = definition.teeth;
+    const delta = (180 / N) * degree;
+    const PD = P / sin(delta);
+    const OD = P * (0.6 + cos(delta) / sin(delta));
+    const center = vector(0, 0) * inch;
+
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : pl });
+    frcDrawProfile(sk, "t", frcSprocketSegments(P, N, Dr, definition.rollerClearance, center));
+    frcAddBore(sk, "bore", center, definition);
+    skSolve(sk);
+    const regions = qSketchRegion(id + "s", true);
+    if (size(evaluateQuery(context, regions)) == 0)
+        throw regenError("The tooth form did not close. Try a different tooth count.", ["teeth"]);
+    opExtrude(context, id + "ex", { "entities" : regions, "direction" : pl.normal,
+                "endBound" : BoundingType.BLIND, "endDepth" : definition.thickness });
+    const body = qCreatedBy(id + "ex", EntityType.BODY);
+
+    var lightened = false;
+    if (definition.lighten)
+    {
+        // The root radius is the one frcSprocketSegments uses, clearance and
+        // all, so the rim is measured from where the seating curve really is.
+        const rRoot = PD / 2 - (0.5025 * Dr + 0.0015 * inch + definition.rollerClearance);
+        const rOuter = rRoot - definition.rimWidth;
+        const rInner = frcProfileReach(frcBoreSpec(definition)) + definition.rimWidth;
+        const nSpokes = definition.spokes;
+        const step = (360 * degree) / nSpokes;
+        const halfW = definition.spokeWidth / 2;
+        // A spoke of one width covers more of the inner circle than of the
+        // outer one, so the inner circle is where neighbours run out of room.
+        const roomy = halfW + 0.01 * inch < rInner * sin(step / 2);
+        if (rOuter > rInner + 0.1 * inch && roomy)
+        {
+            const skl = newSketchOnPlane(context, id + "l",
+                { "sketchPlane" : plane(pl.origin - pl.normal * (0.1 * inch), pl.normal, pl.x) });
+            // Draw the pockets, not the spokes. Two circles crossed by full
+            // diameter bars handed every region between the bore and the rim
+            // to the unfiltered region query, hub wedges included, so the cut
+            // took the whole web away; and each bar spanned a diameter, so an
+            // odd spoke count came out doubled and an even one drew every bar
+            // twice. One closed loop per pocket, out along one spoke side,
+            // round the outer circle, back down the next spoke side and round
+            // the inner circle, leaves exactly the n spokes the dialog asks
+            // for, and the loops are disjoint so none sits inside another.
+            const tIn = sqrt(rInner * rInner - halfW * halfW);
+            const tOut = sqrt(rOuter * rOuter - halfW * halfW);
+            for (var i = 0; i < nSpokes; i += 1)
+            {
+                const th = step * i;
+                const thNext = th + step;
+                const thMid = th + step / 2;
+                const u0 = vector(cos(th), sin(th));
+                const v0 = vector(-sin(th), cos(th));
+                const u1 = vector(cos(thNext), sin(thNext));
+                const v1 = vector(-sin(thNext), cos(thNext));
+                const pIn0 = center + v0 * halfW + u0 * tIn;
+                const pOut0 = center + v0 * halfW + u0 * tOut;
+                const pOut1 = center - v1 * halfW + u1 * tOut;
+                const pIn1 = center - v1 * halfW + u1 * tIn;
+                frcDrawProfile(skl, "s" ~ i ~ "_", [
+                            { "kind" : "line", "start" : pIn0, "end" : pOut0 },
+                            { "kind" : "arc", "start" : pOut0,
+                              "mid" : center + frcPolar(rOuter, thMid), "end" : pOut1 },
+                            { "kind" : "line", "start" : pOut1, "end" : pIn1 },
+                            { "kind" : "arc", "start" : pIn1,
+                              "mid" : center + frcPolar(rInner, thMid), "end" : pIn0 }]);
+            }
+            skSolve(skl);
+            opExtrude(context, id + "lx", { "entities" : qSketchRegion(id + "l", false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : definition.thickness + 0.3 * inch });
+            try silent
+            {
+                opBoolean(context, id + "lsub", { "tools" : qCreatedBy(id + "lx", EntityType.BODY),
+                            "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+                lightened = true;
+            }
+            // Pockets that do not cut leave one loose prism per spoke in the
+            // studio, unnamed and with no material, and Weight Budget's
+            // fallback group then weighs each of them at whatever density its
+            // own dialog was left at. The panel already reads this flag and
+            // prints the no room to lighten note, so a cut that misses is a
+            // case this feature reports rather than fails on: a sprocket with
+            // a solid web is still a sprocket. The delete is guarded, since a
+            // cleanup that throws is worse than the bodies it was clearing.
+            if (!lightened)
+            {
+                try silent
+                {
+                    opDeleteBodies(context, id + "ldel",
+                        { "entities" : qCreatedBy(id + "lx", EntityType.BODY) });
+                }
+            }
+        }
+    }
+
+    const chainTag = {
+            FRCChainSize.CH25 : "#25", FRCChainSize.CH25H : "#25H",
+            FRCChainSize.CH35 : "#35", FRCChainSize.CH40 : "#40",
+            FRCChainSize.CUSTOM : frcInches(P) ~ " pitch"
+        }[definition.chain];
+    setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                "value" : "" ~ N ~ "T " ~ chainTag ~ " Sprocket" });
+    frcApplyPart(context, body, definition.material, FRCPartClass.DRIVE);
+
+    // The lightening pockets are cut out of this feature's own body, so the
+    // sprocket survives the subtraction and is moved once, here.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : body });
+    var lines = "Pitch dia " ~ frcInches(PD) ~ ", outside dia " ~ frcInches(OD)
+        // The same root frcSprocketSegments cuts to, clearance and all, so the
+        // figure is where the seating curve really is and not a nominal.
+        ~ ", root dia " ~ frcInches(PD - 2 * (0.5025 * Dr + 0.0015 * inch
+                + definition.rollerClearance))
+        ~ ", and keep parts clear of " ~ frcInches(PD + P) ~ ". ";
+    lines ~= "Mass " ~ roundToPrecision(vol * frcDensity(definition.material)
+            / (0.45359237 * kilogram), 3) ~ " lb. ";
+    if (definition.lighten && !lightened)
+        lines ~= "NOTE No room to lighten, so narrow the rim or the spokes. ";
+    lines ~= "Full ANSI B29.1 form. Aim for centers " ~ frcInches(30 * P) ~ " to "
+        ~ frcInches(50 * P) ~ ".";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################ SHAFT #################################
+
+export enum FRCShaftEnd
+{
+    annotation { "Name" : "Plain" }                   PLAIN,
+    annotation { "Name" : "Chamfered" }               CHAMFER,
+    annotation { "Name" : "Tapped (#10-32 through)" } TAPPED,
+    annotation { "Name" : "Retaining ring groove" }   RING
+}
+
+/**
+ * External retaining ring groove dimensions for the shaft sizes teams stock,
+ * from the 5100 series basic dimensions, converted from the published groove
+ * diameter to a radial depth.
+ *
+ * The 0.30 to 0.40 in band was corrected. It used to return 0.018 in depth and
+ * 0.039 in width, which put the groove on a 3/8 in shaft at 0.339 in diameter.
+ * The 5100-37 ring seats in a 0.352 in groove on a 0.375 in shaft, so the depth
+ * is (0.375 - 0.352) / 2 = 0.0115 in, and the groove width is 0.029 in with a
+ * plus 0.002 in tolerance, which makes 0.030 in the cut target. Two independent
+ * FRC libraries corroborate: uploads/Shaft Feature.txt lines 135 and 143, and
+ * uploads/Shaft.txt lines 344 and 345, both give 0.352 in and 0.030 in.
+ * The old depth was 4.8 percent of shaft diameter against the roughly 3 percent
+ * this series uses, and the old width is the 1/2 in size groove, which would
+ * have left the 0.025 in thick ring 0.014 in of axial slop.
+ *
+ * The other bands are not corroborated against a vendor table. The 0.55 in band
+ * puts a 1/2 in shaft groove at 0.460 in where uploads/Shaft.txt line 336 gives
+ * 0.468 in, so that band is a candidate for the same correction.
+ */
+export function frcRingGroove(shaftDia is ValueWithUnits) returns map
+{
+    if (shaftDia <= 0.30 * inch)
+        return { "depth" : 0.015 * inch, "width" : 0.029 * inch };
+    if (shaftDia <= 0.40 * inch)
+        return { "depth" : 0.0115 * inch, "width" : 0.030 * inch };
+    if (shaftDia <= 0.55 * inch)
+        return { "depth" : 0.020 * inch, "width" : 0.039 * inch };
+    if (shaftDia <= 0.80 * inch)
+        return { "depth" : 0.025 * inch, "width" : 0.046 * inch };
+    return { "depth" : 0.030 * inch, "width" : 0.056 * inch };
+}
+
+export function frcShaftBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face, a hole, a vertex or a mate connector to place the shaft.", ["location"]);
+
+    // Pattern and mirror support. The picked face, hole, vertex or mate
+    // connector is what places the shaft, so it is the reference the pattern
+    // transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    var spec = frcBoreSpec(definition);
+    spec.fit = 0 * inch;                 // stock is nominal; the bore carries the fit
+    if (spec.bore == FRCDriveBore.NONE)
+        throw regenError("The bore is set to none, so there is no shaft profile to draw. Pick a shaft profile.", ["bore"]);
+    const center = vector(0, 0) * inch;
+    const reach = frcProfileReach(spec);
+
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : pl });
+    frcDrawProfile(sk, "p", frcProfileSegments(spec, center));
+    if (definition.hollow)
+    {
+        if (definition.throughDia / 2 >= reach - 0.02 * inch)
+            throw regenError("That through hole leaves no wall on this shaft. Reduce the through hole diameter.", ["throughDia"]);
+        skCircle(sk, "hole", { "center" : center, "radius" : definition.throughDia / 2 });
+    }
+    skSolve(sk);
+    opExtrude(context, id + "ex", { "entities" : qSketchRegion(id + "s", true),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : definition.length });
+    const body = qCreatedBy(id + "ex", EntityType.BODY);
+
+    // Set by the ring branch below, and read by the panel at the end.
+    var grooveNote = "";
+    if (definition.endType == FRCShaftEnd.CHAMFER)
+    {
+        const caps = frcCapFaces(context, body, pl.normal);
+        if (size(evaluateQuery(context, caps)) > 0)
+        {
+            try silent
+            {
+                opChamfer(context, id + "ch",
+                    { "entities" : qAdjacent(caps, AdjacencyType.EDGE, EntityType.EDGE),
+                      "chamferType" : ChamferType.EQUAL_OFFSETS,
+                      "width" : definition.chamfer });
+            }
+        }
+    }
+    else if (definition.endType == FRCShaftEnd.TAPPED)
+    {
+        const skt = newSketchOnPlane(context, id + "t", { "sketchPlane" : pl });
+        skCircle(skt, "t", { "center" : center,
+                    "radius" : frcHoleDiameter(FRCHoleSize.NO10_TAP) / 2 });
+        skSolve(skt);
+        opExtrude(context, id + "tx", { "entities" : qSketchRegion(id + "t", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.length + 0.1 * inch });
+        opBoolean(context, id + "tsub", { "tools" : qCreatedBy(id + "tx", EntityType.BODY),
+                    "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    else if (definition.endType == FRCShaftEnd.RING)
+    {
+        // A retaining ring is made for one nominal round shaft size, and it
+        // seats on a groove floor that runs the whole way round. So what this
+        // branch has to settle is which round size the profile presents.
+        //
+        // Round, keyed and bearing profiles are round already: 2 * reach.
+        //
+        // Hex and square stock is turned down to a round land for the ring, and
+        // that land is the across-flats size. reach is half the across-corners
+        // size, so asking the table for 2 * reach put a 1/2 in hex in the
+        // 0.80 in band, 5 thou too deep and 7 thou too wide, and then set the
+        // groove floor at reach - depth, which is outside the flats: the
+        // revolve reached only the six corners and left six scallops over about
+        // a third of the circumference, with nothing continuous for a ring to
+        // grip. Measuring from the flats puts the floor inside them, so the
+        // groove comes out round all the way, which is how a ring groove on hex
+        // stock is cut.
+        //
+        // A lobed spline has neither a round land nor a ring sized to it, so it
+        // is refused rather than guessed at.
+        const isFlatSided = spec.bore == FRCDriveBore.HEX
+            || spec.bore == FRCDriveBore.SQUARE
+            || spec.bore == FRCDriveBore.ROUNDED_HEX
+            || spec.bore == FRCDriveBore.ROUNDED_SQUARE;
+        const isRoundLand = spec.bore == FRCDriveBore.ROUND
+            || spec.bore == FRCDriveBore.KEYED
+            || spec.bore == FRCDriveBore.BEARING;
+        if (!isFlatSided && !isRoundLand)
+            throw regenError("A retaining ring groove needs a round journal, and this profile has no round land to turn one on. Use a round, hex or square shaft, or another end type.", ["endType"]);
+        const land = isFlatSided ? spec.acrossFlats : 2 * reach;
+        const g = frcRingGroove(land);
+        const floorR = land / 2 - g.depth;
+        if (definition.grooveInset * 2 + g.width * 2 > definition.length)
+            throw regenError("The grooves overlap. Move them closer to the ends or use a longer shaft.", ["grooveInset"]);
+        // The floor is turned below the flats, so a hollow shaft can lose its
+        // wall at the groove while the through hole still clears the corners
+        // that the check above measures against.
+        if (definition.hollow && definition.throughDia / 2 > floorR - 0.02 * inch)
+            throw regenError("The ring groove would cut into the through hole. Reduce the through hole diameter, or use another end type.", ["throughDia"]);
+        const gp = plane(pl.origin, cross(pl.normal, pl.x), pl.x);
+        const skg = newSketchOnPlane(context, id + "g", { "sketchPlane" : gp });
+        for (var e = 0; e < 2; e += 1)
+        {
+            const at = (e == 0) ? definition.grooveInset
+                : definition.length - definition.grooveInset - g.width;
+            // The outer edge stays clear of the corners, so the same rectangle
+            // cuts the same round groove whether the stock is round or flat
+            // sided.
+            skRectangle(skg, "g" ~ e, {
+                        "firstCorner" : vector(floorR, -at),
+                        "secondCorner" : vector(reach + 0.05 * inch, -(at + g.width)) });
+        }
+        skSolve(skg);
+        opRevolve(context, id + "gx", { "entities" : qSketchRegion(id + "g", false),
+                    "axis" : line(pl.origin, pl.normal), "angleForward" : 360 * degree });
+        try silent
+        {
+            opBoolean(context, id + "gsub", { "tools" : qCreatedBy(id + "gx", EntityType.BODY),
+                        "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+            // The panel names the round land the ring is sized to, since on hex
+            // or square stock that is not a dimension the shaft carries
+            // anywhere else. It is set inside the try, so a cut that did not
+            // take is not reported as a groove that is there.
+            grooveNote = frcInches(2 * floorR) ~ " dia, " ~ frcInches(g.width) ~ " wide";
+        }
+        // Both grooves are revolved as one body, so a subtraction that does
+        // not take leaves a ring standing around the shaft, unnamed and with
+        // no material, which Weight Budget's fallback group weighs at the
+        // reading dialog's own density. Everything that would make this a
+        // broken part has already been refused above: a lobed spline has no
+        // round land, a groove pair that overlaps is caught on length, and a
+        // floor that would break into the through hole is caught on the wall
+        // left. What is left to fail is a revolve that did not reach the
+        // stock, which is a miss, and the panel prints no ring groove line
+        // when grooveNote is empty. So the ring goes and the shaft stands.
+        if (grooveNote == "")
+        {
+            try silent
+            {
+                opDeleteBodies(context, id + "gdel",
+                    { "entities" : qCreatedBy(id + "gx", EntityType.BODY) });
+            }
+        }
+    }
+
+    setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                "value" : "Shaft - "
+                    ~ roundToPrecision(definition.length / inch, 3) ~ " in" });
+    frcApplyPart(context, body, definition.material, FRCPartClass.SHAFT);
+
+    // The tap hole and the ring grooves are cut out of this feature's own
+    // body, so the shaft survives them and is moved once, here.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : body });
+    var lines = "Across corners " ~ frcInches(2 * reach) ~ ". ";
+    if (grooveNote != "")
+        lines ~= "Ring groove " ~ grooveNote ~ ". ";
+    lines ~= "Mass " ~ roundToPrecision(vol * frcDensity(definition.material)
+            / (0.45359237 * kilogram), 3) ~ " lb. ";
+    lines ~= "Nominal size; the mating bores carry the running clearance.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################ SPACER ################################
+
+export enum FRCSpacerKind
+{
+    annotation { "Name" : "Round spacer" }            ROUND,
+    annotation { "Name" : "Hex spacer (wrenchable)" } HEX,
+    annotation { "Name" : "Bearing hat (shoulder)" }  HAT,
+    annotation { "Name" : "Standoff (tapped ends)" }  STANDOFF
+}
+
+export function frcSpacerBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face, a hole, a vertex or a mate connector to place the spacer.", ["location"]);
+
+    // Pattern and mirror support. The picked face, hole, vertex or mate
+    // connector is what places the spacer, so it is the reference the pattern
+    // transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    const center = vector(0, 0) * inch;
+    const isStandoff = definition.kind == FRCSpacerKind.STANDOFF;
+    const hexOutside = definition.kind == FRCSpacerKind.HEX
+        || (isStandoff && definition.standoffHex);
+
+    // A standoff is threaded at its ends rather than bored through, so the
+    // clear size in the middle is the tap drill, not a shaft profile.
+    const tapDia = isStandoff ? frcHoleDiameter(definition.thread) : 0 * inch;
+    const boreReach = isStandoff ? tapDia / 2 : frcProfileReach(frcBoreSpec(definition));
+    if (definition.outerDia / 2 <= boreReach + 0.01 * inch)
+        throw regenError("The outside diameter is not larger than the bore. Increase it.", ["outerDia"]);
+
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : pl });
+    if (hexOutside)
+        frcDrawProfile(sk, "o", frcSharpPolyArcs(6, definition.outerDia, center, 0 * inch));
+    else
+        skCircle(sk, "o", { "center" : center, "radius" : definition.outerDia / 2 });
+    if (!isStandoff)
+        frcAddBore(sk, "bore", center, definition);
+    skSolve(sk);
+    opExtrude(context, id + "ex", { "entities" : qSketchRegion(id + "s", true),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : definition.length });
+    const body = qCreatedBy(id + "ex", EntityType.BODY);
+
+    var threadNote = "";
+    if (isStandoff)
+    {
+        const skt = newSketchOnPlane(context, id + "t", { "sketchPlane" : pl });
+        skCircle(skt, "t", { "center" : center, "radius" : tapDia / 2 });
+        skSolve(skt);
+        const hole = qSketchRegion(id + "t", false);
+        if (definition.tapThrough)
+        {
+            opExtrude(context, id + "t1", { "entities" : hole, "direction" : pl.normal,
+                        "endBound" : BoundingType.BLIND,
+                        "endDepth" : definition.length + 0.1 * inch });
+            opBoolean(context, id + "tsub", { "tools" : qCreatedBy(id + "t1", EntityType.BODY),
+                        "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+            threadNote = "tapped through";
+        }
+        else
+        {
+            if (2 * definition.threadDepth > definition.length - 0.06 * inch)
+                throw regenError("The two tapped holes would meet in the middle. Shorten them, tap it through, or use a longer standoff.", ["threadDepth"]);
+            opExtrude(context, id + "t1", { "entities" : hole, "direction" : pl.normal,
+                        "endBound" : BoundingType.BLIND, "endDepth" : definition.threadDepth });
+            // startDepth is measured opposite the direction, so a negative
+            // value starts the cut that far along it: at the far end here.
+            opExtrude(context, id + "t2", { "entities" : hole, "direction" : pl.normal,
+                        "endBound" : BoundingType.BLIND, "endDepth" : definition.length,
+                        "startBound" : BoundingType.BLIND,
+                        "startDepth" : -(definition.length - definition.threadDepth) });
+            opBoolean(context, id + "tsub", {
+                        "tools" : qUnion([qCreatedBy(id + "t1", EntityType.BODY),
+                                qCreatedBy(id + "t2", EntityType.BODY)]),
+                        "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+            threadNote = frcInches(definition.threadDepth) ~ " deep from each end";
+        }
+    }
+    else if (definition.kind == FRCSpacerKind.HAT)
+    {
+        if (definition.shoulderDia <= definition.outerDia)
+            throw regenError("The shoulder is not larger than the outside diameter. Increase the shoulder diameter.", ["shoulderDia"]);
+        const skh = newSketchOnPlane(context, id + "h", { "sketchPlane" : pl });
+        skCircle(skh, "o", { "center" : center, "radius" : definition.shoulderDia / 2 });
+        frcAddBore(skh, "bore", center, definition);
+        skSolve(skh);
+        opExtrude(context, id + "hx", { "entities" : qSketchRegion(id + "h", true),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.shoulderThk });
+        opBoolean(context, id + "hu", {
+                    "tools" : qUnion([body, qCreatedBy(id + "hx", EntityType.BODY)]),
+                    "operationType" : BooleanOperationType.UNION });
+    }
+
+    frcBreakEdges(context, id + "brk", qGeometry(qOwnedByBody(body, EntityType.EDGE),
+            GeometryType.CIRCLE), 0.015 * inch);
+    setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                "value" : (isStandoff ? "Standoff"
+                    : (definition.kind == FRCSpacerKind.HAT ? "Bearing Hat"
+                        : (hexOutside ? "Hex Spacer" : "Spacer")))
+                    ~ " - " ~ roundToPrecision(definition.length / inch, 3) ~ " in" });
+    // All four kinds are SHAFT, the Bearing Hat included: that class is
+    // "Shafts and spacers", and a hat is a spacer with a shoulder, cut from
+    // the same stock and stacked on the same bolt. BEARING is "Bearing
+    // blocks", the part a bearing sits in, which a hat is not.
+    frcApplyPart(context, body, definition.material, FRCPartClass.SHAFT);
+
+    // The tapped holes are cut out of this feature's own body, so the spacer
+    // survives them and is moved once, here.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : body });
+    var lines = "Wall " ~ frcInches(definition.outerDia / 2 - boreReach)
+        ~ " at the thinnest. ";
+    if (isStandoff)
+        lines ~= "Tap drill " ~ frcInches(tapDia) ~ ", " ~ threadNote ~ ". ";
+    lines ~= "Mass " ~ roundToPrecision(vol * frcDensity(definition.material)
+            / (0.45359237 * kilogram), 3) ~ " lb. ";
+    if (definition.outerDia / 2 - boreReach < 0.04 * inch)
+        lines ~= "NOTE That wall may split when pressed; increase the outside dia. ";
+    if (isStandoff)
+        lines ~= "Drilled at tap size for you to tap, and thread engagement wants one "
+            ~ "diameter in aluminum, two in plastic.";
+    else
+        lines ~= "Make a stack a few thou short of its gap, so the fastener clamps the "
+            ~ "plates, not the stack.";
+    reportFeatureInfo(context, id, lines);
+}

@@ -1,0 +1,2403 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+
+// ===========================================================================
+//  FRC CORE: shared standards, math and profiles for the FRC Toolkit
+// ---------------------------------------------------------------------------
+//  1. Standards   materials, processes, structural limits, ties, fits, bearings
+//  2. Helpers     boundary classification, face measurement, formatting
+//  3. Math        Delaunay triangulation, triangle inset, the involute
+//  4. Profiles    every FRC shaft and bore form, taken from vendor drawings
+//
+//  The features that use all of this live in the FRC Toolkit tab.
+// ===========================================================================
+
+// ############################# 1. STANDARDS #############################
+
+/**
+ * Fastener hole sizes, named by the fastener with the drill diameter beside
+ * it. A clear hole passes the screw, a tap hole is drilled for threading.
+ * The same diameters are returned by frcHoleDiameter below.
+ */
+export enum FRCHoleSize
+{
+    annotation { "Name" : "#6 clear, 0.150 in" }      NO6_CLEAR,
+    annotation { "Name" : "#6 tap, 0.106 in" }        NO6_TAP,
+    annotation { "Name" : "#8 clear, 0.177 in" }      NO8_CLEAR,
+    annotation { "Name" : "#8 tap, 0.136 in" }        NO8_TAP,
+    annotation { "Name" : "#10 clear, 0.196 in" }     NO10_CLEAR,
+    annotation { "Name" : "#10-32 tap, 0.159 in" }    NO10_TAP,
+    annotation { "Name" : "1/4-20 clear, 0.257 in" }  QTR_CLEAR,
+    annotation { "Name" : "1/4-20 tap, 0.201 in" }    QTR_TAP,
+    annotation { "Name" : "M3 clear, 3.4 mm" }        M3_CLEAR,
+    annotation { "Name" : "M3 tap, 2.5 mm" }          M3_TAP,
+    annotation { "Name" : "M5 clear, 5.5 mm" }        M5_CLEAR,
+    annotation { "Name" : "M5 tap, 4.2 mm" }          M5_TAP
+}
+
+export function frcHoleDiameter(h is FRCHoleSize) returns ValueWithUnits
+{
+    const t = {
+            FRCHoleSize.NO6_CLEAR : 0.150 * inch, FRCHoleSize.NO6_TAP : 0.106 * inch,
+            FRCHoleSize.NO8_CLEAR : 0.177 * inch, FRCHoleSize.NO8_TAP : 0.136 * inch,
+            FRCHoleSize.NO10_CLEAR : 0.196 * inch, FRCHoleSize.NO10_TAP : 0.159 * inch,
+            FRCHoleSize.QTR_CLEAR : 0.257 * inch, FRCHoleSize.QTR_TAP : 0.201 * inch,
+            FRCHoleSize.M3_CLEAR : 3.4 * millimeter, FRCHoleSize.M3_TAP : 2.5 * millimeter,
+            FRCHoleSize.M5_CLEAR : 5.5 * millimeter, FRCHoleSize.M5_TAP : 4.2 * millimeter
+        };
+    return t[h];
+}
+
+export enum FRCMaterial
+{
+    annotation { "Name" : "6061 aluminum" }           AL_6061,
+    annotation { "Name" : "7075 aluminum" }           AL_7075,
+    annotation { "Name" : "Polycarbonate" }           POLYCARB,
+    annotation { "Name" : "Delrin / acetal" }         DELRIN,
+    annotation { "Name" : "PLA (3D print)" }          PLA,
+    annotation { "Name" : "PETG (3D print)" }         PETG,
+    annotation { "Name" : "Nylon / Onyx (3D print)" } ONYX,
+    annotation { "Name" : "Steel (4130)" }            STEEL,
+    annotation { "Name" : "Plywood" }                 PLYWOOD,
+    annotation { "Name" : "Pool noodle (bumper)" }    FOAM_NOODLE,
+    annotation { "Name" : "Wire bundle (envelope)" }  WIRE_BUNDLE
+}
+
+export function frcDensity(m is FRCMaterial) returns ValueWithUnits
+{
+    const t = {
+            FRCMaterial.AL_6061 : 2700, FRCMaterial.AL_7075 : 2810,
+            FRCMaterial.POLYCARB : 1200, FRCMaterial.DELRIN : 1410,
+            FRCMaterial.PLA : 1240, FRCMaterial.PETG : 1270,
+            FRCMaterial.ONYX : 1180, FRCMaterial.STEEL : 7850,
+            // Baltic birch, which is what FRC bumper backing is cut from and
+            // the only thing this entry is used for. Birch (Betula pendula)
+            // sits at 670 to 680 kg/m^3 at 12 percent moisture in the Wood
+            // Handbook, and baltic birch plywood is all birch veneer with no
+            // softwood core, so the panel density is the species density.
+            // This was 600, which is fir or generic softwood plywood and
+            // undercharged a bumper backing by about 13 percent.
+            FRCMaterial.PLYWOOD : 680,
+            // Closed-cell polyethylene pool noodle. This is a measured value
+            // off a cut sample, not a figure read from a foam datasheet,
+            // because noodle stock varies far more between brands than any
+            // published grade does.
+            FRCMaterial.FOAM_NOODLE : 27.7,
+            // Not a material density. It is the mass of a real routed bundle
+            // divided by the volume of the envelope drawn around it, so
+            // copper, insulation and the air between strands are all folded
+            // in. Use it to weigh a wire run, never to weigh a solid.
+            FRCMaterial.WIRE_BUNDLE : 1640
+        };
+    return t[m] * kilogram / meter ^ 3;
+}
+
+/**
+ * Largest rib slenderness ratio that still yields before it buckles: the
+ * longest unbraced span the rib may run, as a multiple of the rib's LEAST
+ * cross-section dimension. Euler buckling between junctions set equal to
+ * compressive yield:
+ *
+ *     pi^2 E / (K L / r)^2 = Fy,  with r = d / sqrt(12)
+ *     L / d <= sqrt(pi^2 E / (12 * K^2 * Fy)) = (0.85 pi / (K sqrt 12)) sqrt(E / Fy)
+ *
+ * at K = 0.8, which gives 0.9635 * sqrt(E / Fy),
+ *
+ * and a 0.85 margin applied to the result. Without this the aggressive preset
+ * makes ribs that buckle elastically, and every plastic is badly over-spanned.
+ *
+ * Read the d carefully, because it is the thing this function is most often
+ * misused for. The 12 is the one in I = b d^3 / 12 divided by A = b d, so d is
+ * the dimension that sets the radius of gyration, and a bar buckles about its
+ * weakest axis, so d is the SMALLER of the two sides of the section. It is not
+ * the rib's width. For a rib routed into a plate the section is rib width by
+ * plate thickness, and on the commonest plate in this library, 0.125 in stock
+ * with a 0.25 in rib, the thickness is the smaller of the two by a factor of
+ * two. Multiplying this ratio by the width alone overstates the allowed span
+ * by exactly that ratio. Multiply by the smaller of the two dimensions, or
+ * call frcBuckleSpan below, which does it for you.
+ *
+ * The ratio itself is dimension-agnostic; only the dimension it is handed
+ * decides whether the answer is right.
+ *
+ * Why K = 0.8 and not 0.65. AISC recommends 0.65 for a fixed-fixed column,
+ * against a theoretical 0.5 (Steel Construction Manual, Commentary Table
+ * C-A-7.1), and these limits were originally published at that value. It is
+ * fair for the IN-PLANE mode, where the node really does hold the rib. It is
+ * too generous for the OUT-OF-PLANE mode, which is the one that governs here:
+ * the ribs meeting this one at a node lie in the same plane and resist
+ * out-of-plane end rotation only in torsion of a thin strip and in weak-axis
+ * bending, both soft. A continuous strut whose equal bays are equally loaded
+ * buckles at K = 1 with no help at all from its neighbours (Timoshenko and
+ * Gere, Theory of Elastic Stability, continuous struts on rigid supports).
+ *
+ * The truth is between the two, so the document owner chose 0.8: real credit
+ * for the node, short of the full fixity the plane of the plate would give.
+ * That scales every limit below by 0.65 / 0.8 = 0.8125 against the values
+ * this function first shipped with. On the commonest plate in the library,
+ * 0.125 in 6061, it takes the allowed span from 2.51 in to 2.04 in and costs
+ * about two and a half points of the material removed.
+ *
+ * The unbraced length is the node-to-node distance, not the clear pocket.
+ * frcAutoSizing backs the pocket out of the allowed span through the triangle
+ * relation, pocket = (sqrt(3) / 2) * span - rib, because the side of an
+ * equilateral triangle whose inscribed pocket is p with rib r is
+ * 2 (p + r) / sqrt(3). An earlier version of this comment said the span was
+ * taken as the clear pocket and was about ten per cent optimistic; that was
+ * corrected, and on a triangular mesh the correction was nearer thirty per
+ * cent. Do not apply it again. The 0.85 margin is unspent and is there for
+ * the things this model still does not know.
+ */
+export function frcSlendernessLimit(m is FRCMaterial) returns number
+{
+    const t = {
+            FRCMaterial.AL_6061 : 16.3, FRCMaterial.AL_7075 : 11.5,
+            FRCMaterial.POLYCARB : 5.9, FRCMaterial.DELRIN : 6.4,
+            FRCMaterial.PLA : 8.2, FRCMaterial.PETG : 6.2,
+            FRCMaterial.ONYX : 7.8, FRCMaterial.STEEL : 20.9,
+            FRCMaterial.PLYWOOD : 17.3,
+            // Neither of these is a structural section, so the limit is 1:
+            // any rib generator that asks will refuse to span them.
+            FRCMaterial.FOAM_NOODLE : 1, FRCMaterial.WIRE_BUNDLE : 1
+        };
+    return t[m];
+}
+
+/**
+ * The longest unbraced span a rib of rectangular section `width` by `depth`
+ * may run before it buckles rather than yields. This is frcSlendernessLimit
+ * times the smaller of the two sides, because the ratio that function returns
+ * is a span-to-depth ratio about the weak axis, and the weak axis of a
+ * rectangle is the one governed by its shorter side.
+ *
+ * For a rib routed into a plate, hand it the rib width and the plate
+ * thickness, in either order; it takes the smaller. Both arguments are lengths
+ * and so is the result. A zero or negative side returns zero rather than a
+ * negative span, so a degenerate measurement cannot hand a caller a bound it
+ * would read as generous.
+ */
+export function frcBuckleSpan(m is FRCMaterial, width is ValueWithUnits,
+    depth is ValueWithUnits) returns ValueWithUnits
+{
+    return max(min(width, depth), 0 * meter) * frcSlendernessLimit(m);
+}
+
+/** Defaults for frcPrintedDensity: 0.2 infill, 3 walls, 0.45 mm line width. */
+export const FRC_PRINT_DEFAULTS = { infill : 0.2, walls : 3, lineWidth : 0.45 * millimeter };
+
+/**
+ * Effective density of a 3D printed part, so the weight budget stops charging
+ * a print for solid plastic. At normal settings a print is mostly air, and
+ * weighing it at solid PLA, PETG or Onyx density overstates it by roughly 2x.
+ *
+ *     effective = solid * (wallVolume + infill * (volume - wallVolume)) / volume
+ *
+ * The shell volume is estimated as area * lineWidth * (1 + log(walls)), where
+ * log is natural log in FeatureScript. That was checked here, not assumed:
+ * log(e) returns 1 and log(10) returns 2.302585. The (1 + ln n) factor comes
+ * from a third-party printed-mass feature. Its reasoning is that each inner
+ * perimeter encloses less area than the one outside it, area falls off like
+ * 1/x, and the integral of 1/x is ln(x), with the constant set so that a
+ * single wall contributes exactly one wall. That is a rule of thumb, not a
+ * slicer result, and it is the weakest number in this function.
+ *
+ * One caveat, stated plainly because the source hid it: `area` is meant to be
+ * the outer surface the perimeters actually follow, but callers normally hand
+ * in evArea over every face of the body. On a thin plate the two large faces
+ * are both counted, so the shell comes out roughly twice what it should be.
+ * The source dealt with that by clamping the wall volume to the total volume,
+ * which is a bandage rather than a fix, and we clamp the same way for want of
+ * a better one. The consequence is real: on a plate thinner than about
+ * 2 * lineWidth * (1 + log(walls)), a little under 2 mm at the defaults, this
+ * returns close to the solid density and the infill setting stops mattering.
+ * A caller that cares should pass the area of the side walls only.
+ *
+ * Units: `solidDensity` is mass over length^3, `area` is length^2 and
+ * `volume` is length^3, all as ValueWithUnits; the result is mass over
+ * length^3. `opts` may carry `infill` as a fraction from 0 to 1 and not a
+ * percentage, `walls` as a perimeter count, and `lineWidth` as one extrusion
+ * width rather than the whole shell thickness. Anything missing comes from
+ * FRC_PRINT_DEFAULTS. Out-of-range values are clamped instead of throwing,
+ * because this is called while weighing a part and a weight budget should not
+ * fail regeneration.
+ *
+ * The result is never above the solid density and never below a tenth of it,
+ * so a doubled area or a degenerate volume cannot produce a nonsense mass.
+ */
+export function frcPrintedDensity(solidDensity is ValueWithUnits, area is ValueWithUnits,
+    volume is ValueWithUnits, opts is map) returns ValueWithUnits
+{
+    const o = mergeMaps(FRC_PRINT_DEFAULTS, opts);
+    const infill = max(0, min(1, o.infill));
+    const walls = max(1, o.walls);
+    const lineWidth = max(0 * meter, o.lineWidth);
+    const floorDensity = 0.1 * solidDensity;
+    if (volume <= 0 * meter ^ 3)
+        return floorDensity;
+
+    // This is the clamp described above. Once the estimated shell fills the
+    // part there is no room left for infill, so the print is treated as solid.
+    const shell = min(area * lineWidth * (1 + log(walls)), volume);
+    const effective = solidDensity * (shell + infill * (volume - shell)) / volume;
+    return min(solidDensity, max(floorDensity, effective));
+}
+
+/** frcPrintedDensity at the default 0.2 infill, 3 walls, 0.45 mm line width. */
+export function frcPrintedDensity(solidDensity is ValueWithUnits, area is ValueWithUnits,
+    volume is ValueWithUnits) returns ValueWithUnits
+{
+    return frcPrintedDensity(solidDensity, area, volume, {});
+}
+
+/** How the part gets cut. Manual means a drill press, bandsaw and files. */
+export enum FRCProcess
+{
+    annotation { "Name" : "CNC router / mill" }        CNC,
+    annotation { "Name" : "Waterjet / laser" }         WATERJET,
+    annotation { "Name" : "3D printed" }               PRINTED,
+    annotation { "Name" : "Manual (drill, bandsaw)" }  MANUAL
+}
+
+export function frcCanPocketBlind(proc is FRCProcess) returns boolean
+{
+    return proc == FRCProcess.CNC || proc == FRCProcess.PRINTED;
+}
+
+/**
+ * How hard to lighten. Sets the wall, the rib, the material kept round a bolt
+ * hole and the fraction of the buckling span the pocket may use.
+ *
+ * Aggressive is the recommended one, which reads oddly until you see what the
+ * three now mean. The buckling bound they scale was corrected twice: it is
+ * taken against the least section dimension rather than the rib width, and at
+ * K = 0.8 rather than 0.65. Aggressive sits at that corrected bound with the
+ * 0.85 margin still inside it, which is where the old Balanced was thought to
+ * be. Measured on a 15 x 20 in plate of 0.125 in 6061, Aggressive removes
+ * 68.1 per cent against Balanced's 60.7 and Conservative's 58.6, and it is
+ * also the only one of the three whose mesh comes out mirror symmetric on a
+ * symmetric plate. Balanced and Conservative are now margin above that, not
+ * safety against a bound that was wrong.
+ */
+export enum FRCAggression
+{
+    annotation { "Name" : "Conservative (stiffest)" } CONSERVATIVE,
+    annotation { "Name" : "Balanced (more margin)" }  BALANCED,
+    annotation { "Name" : "Aggressive (recommended)" } AGGRESSIVE
+}
+
+/**
+ * How the plate is loaded. Edge-on is for gussets, side plates and frame
+ * rails. Across the face is for shelves and mounts. Not structural is for
+ * covers and panels.
+ */
+export enum FRCLoading
+{
+    annotation { "Name" : "Edge-on (gusset, rail)" }   EDGE_ON,
+    annotation { "Name" : "Across the face (shelf)" }  ACROSS_FACE,
+    annotation { "Name" : "Not structural (cover)" }   NON_STRUCTURAL
+}
+
+/** Cable tie sizes. The value in parentheses is the strap width. */
+export enum FRCTieSize
+{
+    annotation { "Name" : "6 in tie (0.100 in)" }    TIE_100,
+    annotation { "Name" : "10 in tie (0.140 in)" }   TIE_140,
+    annotation { "Name" : "14 in tie (0.190 in)" }   TIE_190,
+    annotation { "Name" : "Heavy duty (0.300 in)" }  TIE_300
+}
+
+export function frcTieWidth(t is FRCTieSize) returns ValueWithUnits
+{
+    const m = {
+            FRCTieSize.TIE_100 : 0.100 * inch, FRCTieSize.TIE_140 : 0.140 * inch,
+            FRCTieSize.TIE_190 : 0.190 * inch, FRCTieSize.TIE_300 : 0.300 * inch
+        };
+    return m[t];
+}
+
+/**
+ * How tight the hole is on what goes in it. Press stays put once driven in,
+ * slip assembles by hand, clearance passes through freely.
+ */
+export enum FRCFitClass
+{
+    annotation { "Name" : "Press fit (stays put)" }  PRESS,
+    annotation { "Name" : "Slip fit (by hand)" }     SLIP,
+    annotation { "Name" : "Clearance (free)" }       CLEARANCE
+}
+
+/**
+ * Diametral allowance added to nominal, by process. A 1.125 in bearing bored
+ * 1.124 in is what FRC teams actually cut on a CNC. Waterjet and laser cannot
+ * hold that, so they are cut undersize and reamed. Printed holes come out
+ * under nominal, so printing adds a compensation the team calibrates once.
+ */
+export function frcFitAllowance(fit is FRCFitClass, proc is FRCProcess,
+    printerComp is ValueWithUnits) returns ValueWithUnits
+{
+    var base = 0 * inch;
+    if (proc == FRCProcess.WATERJET)
+        base = { FRCFitClass.PRESS : -0.005 * inch, FRCFitClass.SLIP : 0.005 * inch,
+                 FRCFitClass.CLEARANCE : 0.015 * inch }[fit];
+    else
+        base = { FRCFitClass.PRESS : -0.001 * inch, FRCFitClass.SLIP : 0.002 * inch,
+                 FRCFitClass.CLEARANCE : 0.010 * inch }[fit];
+    if (proc == FRCProcess.PRINTED)
+        base = base + printerComp;
+    else if (proc == FRCProcess.MANUAL)
+        base = base + 0.003 * inch;
+    return base;
+}
+
+export enum FRCBoreType
+{
+    annotation { "Name" : "Bearing" }          BEARING,
+    annotation { "Name" : "Round shaft" }      SHAFT,
+    annotation { "Name" : "Fastener" }         FASTENER,
+    annotation { "Name" : "Custom diameter" }  CUSTOM
+}
+
+/**
+ * Bearing outside diameters we cut seats for.
+ *
+ * Backed by the BearingRef vendor table, 18 rows with 217-xxxx part numbers.
+ * Where several rows share an OD, the row named in frcBearingData is the plain
+ * radial round bearing, because that is what a through bore in a plate takes;
+ * the flanged and hex-broached alternates are named in the comments beside it.
+ *
+ * The last four entries were added from BearingRef rows the library had no
+ * size for. They are appended rather than inserted, so nothing already saved
+ * against this enum moves.
+ *
+ * Five of the original eight have no BearingRef row at all. Their OD is kept,
+ * because parts in this library are already cut to them, but their bore and
+ * width stay undefined rather than guessed. See frcBearingData for which.
+ *
+ * Each option is named by its outside diameter with the shaft bore beside it.
+ * frcBearingData carries the rest: the width, the vendor part, and whether the
+ * row is flanged (1.375 in) or a bronze bushing rather than a bearing
+ * (0.750 in).
+ */
+export enum FRCBearingOD
+{
+    annotation { "Name" : "1.125 in (1/2 in bore)" }  OD_1125,
+    annotation { "Name" : "0.875 in (3/8 in bore)" }  OD_875,
+    annotation { "Name" : "1.000 in (rounded hex)" }  OD_1000,
+    annotation { "Name" : "0.750 in (bushing)" }      OD_750,
+    annotation { "Name" : "0.625 in" }                OD_625,
+    annotation { "Name" : "0.500 in" }                OD_500,
+    annotation { "Name" : "22 mm (608 flanged)" }     OD_22MM,
+    annotation { "Name" : "12 mm" }                   OD_12MM,
+    annotation { "Name" : "1.375 in (3/4 in bore)" }  OD_1375,
+    annotation { "Name" : "0.375 in (1/4 in bore)" }  OD_375,
+    annotation { "Name" : "26 mm (17 mm bore)" }      OD_26MM,
+    annotation { "Name" : "28 mm (15 mm bore)" }      OD_28MM
+}
+
+/**
+ * Bore, OD, width and vendor part number for each size, so a caller can name
+ * the part a seat was cut for instead of quoting a bare diameter.
+ *
+ * Rows carrying a `part` come straight from BearingRef. Rows with `part` set
+ * to "" have no entry there, and their `bore` and `width` are deliberately
+ * undefined. Do not fill those in from memory: an invented vendor dimension is
+ * worse than a missing one, because it looks authoritative.
+ */
+export function frcBearingData(b is FRCBearingOD) returns map
+{
+    const t = {
+            // 1.125 in also appears on 217-2731 flanged 1/2 ID, 217-2732
+            // flanged 3/8 ID, and the ThunderHex 217-4006 and 217-4270. The
+            // two hex-broached flanged parts, 217-3875 and 217-2735, are
+            // listed at 1.124 in, a thousandth under the round ones. We keep
+            // 1.125 in because that is what every round row in the table says
+            // and what existing seats are cut to.
+            FRCBearingOD.OD_1125 : { "bore" : 0.500 * inch, "od" : 1.125 * inch,
+                        "width" : 0.313 * inch, "part" : "217-3109",
+                        "desc" : "radial 1/2 in ID round bearing" },
+            // 0.875 in also appears on 217-3337 radial 1/2 ID, 217-2733
+            // flanged 3/8 ID, 217-5829 ThunderHex and 217-5830 ThunderSquare.
+            FRCBearingOD.OD_875 : { "bore" : 0.375 * inch, "od" : 0.875 * inch,
+                        "width" : 0.281 * inch, "part" : "217-3239",
+                        "desc" : "radial 3/8 in ID round bearing" },
+            // Uncorroborated. A 1.000 in OD bearing for rounded hex is a real
+            // product, but BearingRef has no row for it, so only the OD stands.
+            FRCBearingOD.OD_1000 : { "od" : 1.000 * inch, "part" : "",
+                        "desc" : "1.000 in OD rounded hex bearing" },
+            // Uncorroborated. This is a bronze bushing OD and BearingRef lists
+            // bearings only, so its absence there is expected, not suspicious.
+            FRCBearingOD.OD_750 : { "od" : 0.750 * inch, "part" : "",
+                        "desc" : "0.750 in OD bronze bushing" },
+            // Uncorroborated, and the weaker of the two. Nothing in BearingRef
+            // and nothing found elsewhere supports a 0.625 in OD bearing.
+            // Kept only because parts are already cut to it. Treat as suspect.
+            FRCBearingOD.OD_625 : { "od" : 0.625 * inch, "part" : "",
+                        "desc" : "0.625 in OD, uncorroborated" },
+            // 0.500 in also appears on 217-3246, radial 3/16 in ID.
+            FRCBearingOD.OD_500 : { "bore" : 0.250 * inch, "od" : 0.500 * inch,
+                        "width" : 0.188 * inch, "part" : "217-3489",
+                        "desc" : "radial 1/4 in ID round bearing" },
+            // Uncorroborated by BearingRef. The 608 designation is a standard
+            // 8 x 22 x 7 mm bearing, but that is the designation talking and
+            // not this vendor table, so no bore or width is recorded here.
+            FRCBearingOD.OD_22MM : { "od" : 22 * millimeter, "part" : "",
+                        "desc" : "22 mm OD (608 size)" },
+            // Uncorroborated, and the other weak one. No BearingRef row and no
+            // standard designation found for a 12 mm OD bearing. Treat as
+            // suspect and confirm against a catalog before relying on it.
+            FRCBearingOD.OD_12MM : { "od" : 12 * millimeter, "part" : "",
+                        "desc" : "12 mm OD, uncorroborated" },
+            FRCBearingOD.OD_1375 : { "bore" : 0.750 * inch, "od" : 1.375 * inch,
+                        "width" : 0.367 * inch, "part" : "217-2789",
+                        "desc" : "flanged 3/4 in ID round bearing" },
+            FRCBearingOD.OD_375 : { "bore" : 0.250 * inch, "od" : 0.375 * inch,
+                        "width" : 0.125 * inch, "part" : "217-2788",
+                        "desc" : "radial 1/4 in ID round bearing" },
+            FRCBearingOD.OD_26MM : { "bore" : 17 * millimeter, "od" : 26 * millimeter,
+                        "width" : 5 * millimeter, "part" : "217-2741",
+                        "desc" : "radial 17 mm ID round bearing" },
+            FRCBearingOD.OD_28MM : { "bore" : 15 * millimeter, "od" : 28 * millimeter,
+                        "width" : 7 * millimeter, "part" : "217-2742",
+                        "desc" : "radial 15 mm ID round bearing" }
+        };
+    return t[b];
+}
+
+/**
+ * A label for the part a seat is cut for, used in info panels and part names.
+ * Says so plainly when there is no vendor part rather than inventing one.
+ */
+export function frcBearingPartName(b is FRCBearingOD) returns string
+{
+    const d = frcBearingData(b);
+    if (d.part == "")
+        return d.desc ~ ", no vendor part on file";
+    return d.part ~ ", " ~ d.desc;
+}
+
+/**
+ * The seat diameter, read out of the vendor-backed table so the numbers live
+ * in one place. The signature and every returned value are unchanged, so every
+ * caller keeps working.
+ */
+export function frcBearingOD(b is FRCBearingOD) returns ValueWithUnits
+{
+    return frcBearingData(b).od;
+}
+
+/**
+ * Round shaft sizes. WCP's reamer offering states the intended fits directly:
+ * 0.251, 0.376, 0.501 and 0.751 in reamers give a running fit on the matching
+ * shaft, and 0.874, 0.999 and 1.124 in press a bearing home.
+ */
+export enum FRCShaftSize
+{
+    annotation { "Name" : "1/2 in" }    RD_500,
+    annotation { "Name" : "3/8 in" }    RD_375,
+    annotation { "Name" : "1/4 in" }    RD_250,
+    annotation { "Name" : "5/16 in" }   RD_3125,
+    annotation { "Name" : "5/8 in" }    RD_625,
+    annotation { "Name" : "3/4 in" }    RD_750,
+    annotation { "Name" : "1 in" }      RD_1000,
+    annotation { "Name" : "6 mm" }      RD_6MM,
+    annotation { "Name" : "8 mm" }      RD_8MM
+}
+
+export function frcShaftDia(s is FRCShaftSize) returns ValueWithUnits
+{
+    const t = { FRCShaftSize.RD_500 : 0.500 * inch, FRCShaftSize.RD_375 : 0.375 * inch,
+                FRCShaftSize.RD_250 : 0.250 * inch, FRCShaftSize.RD_3125 : 0.3125 * inch,
+                FRCShaftSize.RD_625 : 0.625 * inch, FRCShaftSize.RD_750 : 0.750 * inch,
+                FRCShaftSize.RD_1000 : 1.000 * inch, FRCShaftSize.RD_6MM : 6 * millimeter,
+                FRCShaftSize.RD_8MM : 8 * millimeter };
+    return t[s];
+}
+
+// ############################## 2. HELPERS ##############################
+
+export function frcSideWallGroups(context is Context, bodyQ is Query, faceNormal is Vector) returns array
+{
+    var lateral = [];
+    for (var f in evaluateQuery(context, qOwnedByBody(bodyQ, EntityType.FACE)))
+    {
+        var isCap = false;
+        try silent
+        {
+            const pl = evPlane(context, { "face" : f });
+            if (abs(dot(pl.normal, faceNormal)) > 0.999)
+                isCap = true;
+        }
+        if (!isCap)
+            lateral = append(lateral, f);
+    }
+    const n = size(lateral);
+    if (n == 0)
+        return [];
+    var comp = makeArray(n, -1);
+    var groups = [];
+    for (var i = 0; i < n; i += 1)
+    {
+        if (comp[i] != -1)
+            continue;
+        const gid = size(groups);
+        comp[i] = gid;
+        var stack = [i];
+        var members = [];
+        while (size(stack) > 0)
+        {
+            const cur = stack[size(stack) - 1];
+            stack = resize(stack, size(stack) - 1);
+            members = append(members, lateral[cur]);
+            for (var nb in evaluateQuery(context, qIntersection([
+                            qAdjacent(lateral[cur], AdjacencyType.EDGE, EntityType.FACE),
+                            qUnion(lateral)])))
+            {
+                for (var j = 0; j < n; j += 1)
+                {
+                    if (comp[j] == -1 && lateral[j] == nb)
+                    {
+                        comp[j] = gid;
+                        stack = append(stack, j);
+                    }
+                }
+            }
+        }
+        groups = append(groups, members);
+    }
+    return groups;
+}
+
+export function frcClassifyBoundaries(context is Context, groups is array, cSys is CoordSystem) returns map
+{
+    if (size(groups) == 0)
+        return { "outer" : [], "inner" : [] };
+    var best = 0;
+    var bestDiag = -1 * meter;
+    var info = [];
+    for (var i = 0; i < size(groups); i += 1)
+    {
+        const b = evBox3d(context, { "topology" : qUnion(groups[i]), "cSys" : cSys });
+        const w = b.maxCorner[0] - b.minCorner[0];
+        const hh = b.maxCorner[1] - b.minCorner[1];
+        const diag = sqrt(w * w + hh * hh);
+        const squareness = (max(w, hh) > 1e-7 * meter) ? min(w, hh) / max(w, hh) : 0;
+        info = append(info, {
+                    "faces" : groups[i],
+                    "center" : vector((b.maxCorner[0] + b.minCorner[0]) / 2,
+                        (b.maxCorner[1] + b.minCorner[1]) / 2),
+                    "isRound" : squareness > 0.98 && size(groups[i]) <= 2,
+                    "diameter" : (w + hh) / 2
+                });
+        if (diag > bestDiag)
+        {
+            bestDiag = diag;
+            best = i;
+        }
+    }
+    var inner = [];
+    for (var i = 0; i < size(info); i += 1)
+    {
+        if (i != best)
+            inner = append(inner, info[i]);
+    }
+    return { "outer" : groups[best], "inner" : inner };
+}
+
+export function frcFaceCSys(pl is Plane) returns CoordSystem
+{
+    return coordSystem(pl.origin, pl.x, pl.normal);
+}
+
+export function frcMaterialDepth(context is Context, bodyQ is Query, cSys is CoordSystem) returns ValueWithUnits
+{
+    return -evBox3d(context, { "topology" : bodyQ, "cSys" : cSys }).minCorner[2];
+}
+
+export function frcEdgesAlong(context is Context, bodyQ is Query, dir is Vector) returns Query
+{
+    var out = [];
+    for (var e in evaluateQuery(context, qOwnedByBody(bodyQ, EntityType.EDGE)))
+    {
+        try silent
+        {
+            const ln = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5 });
+            if (abs(dot(ln.direction, dir)) > 0.999)
+                out = append(out, e);
+        }
+    }
+    return qUnion(out);
+}
+
+export function frcVerticalEdgesOf(context is Context, faces is array, dir is Vector) returns Query
+{
+    var out = [];
+    for (var f in faces)
+    {
+        for (var e in evaluateQuery(context, qLoopEdges(f)))
+        {
+            try silent
+            {
+                const ln = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5 });
+                if (abs(dot(ln.direction, dir)) > 0.999)
+                    out = append(out, e);
+            }
+        }
+    }
+    return qUnion(out);
+}
+
+export function frcRefindFace(context is Context, bodyQ is Query, pl is Plane)
+{
+    for (var f in evaluateQuery(context, qOwnedByBody(bodyQ, EntityType.FACE)))
+    {
+        try silent
+        {
+            const p = evPlane(context, { "face" : f });
+            if (dot(p.normal, pl.normal) > 0.999
+                && abs(dot(p.origin - pl.origin, pl.normal)) < 1e-5 * meter)
+                return f;
+        }
+    }
+    return undefined;
+}
+
+/** The two end faces of an extrusion, the ones square to `normal`. */
+export function frcCapFaces(context is Context, bodyQ is Query, normal is Vector) returns Query
+{
+    var out = [];
+    for (var f in evaluateQuery(context, qOwnedByBody(bodyQ, EntityType.FACE)))
+    {
+        try silent
+        {
+            if (abs(dot(evPlane(context, { "face" : f }).normal, normal)) > 0.999)
+                out = append(out, f);
+        }
+    }
+    return qUnion(out);
+}
+
+export function frcMinCornerRadius(proc is FRCProcess, toolDiameter is ValueWithUnits) returns ValueWithUnits
+{
+    if (proc == FRCProcess.CNC)
+        return toolDiameter / 2;
+    else if (proc == FRCProcess.PRINTED)
+        return 0.04 * inch;
+    else if (proc == FRCProcess.MANUAL)
+        return 0.125 * inch;
+    return 0.02 * inch;
+}
+
+export function frcMinWall(proc is FRCProcess, toolDiameter is ValueWithUnits) returns ValueWithUnits
+{
+    if (proc == FRCProcess.CNC)
+        return max(0.090 * inch, toolDiameter);
+    else if (proc == FRCProcess.PRINTED)
+        return 0.080 * inch;
+    else if (proc == FRCProcess.MANUAL)
+        return 0.125 * inch;
+    return 0.060 * inch;
+}
+
+export function frcMinFloor(proc is FRCProcess) returns ValueWithUnits
+{
+    return (proc == FRCProcess.PRINTED) ? 0.032 * inch : 0.040 * inch;
+}
+
+export function frcFormatMass(m is ValueWithUnits) returns string
+{
+    return "" ~ roundToPrecision(m / (0.45359237 * kilogram), 3) ~ " lb ("
+        ~ roundToPrecision(m / kilogram, 4) ~ " kg)";
+}
+
+export function frcInches(v is ValueWithUnits) returns string
+{
+    return "" ~ roundToPrecision(v / inch, 4) ~ " in";
+}
+
+export function frcThou(v is ValueWithUnits) returns string
+{
+    const th = roundToPrecision(v / inch * 1000, 1);
+    return (th >= 0) ? ("+" ~ th ~ " thou") : ("" ~ th ~ " thou");
+}
+
+/**
+ * Ascending sort of an array of arrays on element [0], with ties left in
+ * input order. This was a hand-rolled insertion sort, quadratic in the number
+ * of entries; std sort does the same job in n log n.
+ *
+ * The comparator returns the difference of the two keys, which may be a
+ * ValueWithUnits and often is, since callers sort lengths. It must be a
+ * number-like value and not a boolean, which is why this is a subtraction
+ * rather than a comparison.
+ *
+ * Ties are left where they were found. A harness ran the old hand-rolled
+ * insertion sort and this one side by side on an empty array, one element,
+ * already-sorted input, reverse-sorted input, input with duplicate keys, an
+ * all-ties array and ValueWithUnits keys; the order came out identical on
+ * every case.
+ *
+ * Do not read that as a guarantee to build on. frcConvexHull used to lean on
+ * it and was wrong for it, because a stable sort on one key is not the same
+ * as a sort on two. Anything that needs a second key must say so in its own
+ * comparator, which is what frcConvexHull does now.
+ */
+export function frcSortByFirst(arr is array) returns array
+{
+    if (size(arr) < 2)
+        return arr;
+    return sort(arr, function(a, b)
+        {
+            return a[0] - b[0];
+        });
+}
+
+// ########################### PART FINISHING ###########################
+
+/** Short material names, for the material property and for reports. */
+export function frcMaterialName(m is FRCMaterial) returns string
+{
+    const t = {
+            FRCMaterial.AL_6061 : "6061 aluminum", FRCMaterial.AL_7075 : "7075 aluminum",
+            FRCMaterial.POLYCARB : "Polycarbonate", FRCMaterial.DELRIN : "Delrin",
+            FRCMaterial.PLA : "PLA", FRCMaterial.PETG : "PETG",
+            FRCMaterial.ONYX : "Onyx nylon", FRCMaterial.STEEL : "4130 steel",
+            FRCMaterial.PLYWOOD : "Plywood",
+            FRCMaterial.FOAM_NOODLE : "Pool noodle foam",
+            FRCMaterial.WIRE_BUNDLE : "Wire bundle"
+        };
+    return t[m];
+}
+
+/**
+ * A display color close to the real part: silver aluminum, polycarbonate
+ * partially transparent as the real sheet is, natural white Delrin, matte
+ * black Onyx, blued steel and birch plywood. The prints get neutral grays,
+ * because filament comes in every color there is. Foam takes the blue of the
+ * noodle every team buys, and a wire bundle takes near-black loom.
+ */
+export function frcColor(m is FRCMaterial) returns Color
+{
+    const t = {
+            FRCMaterial.AL_6061 : color(0.77, 0.78, 0.80),
+            FRCMaterial.AL_7075 : color(0.71, 0.72, 0.75),
+            FRCMaterial.POLYCARB : color(0.88, 0.92, 0.95, 0.35),
+            FRCMaterial.DELRIN : color(0.93, 0.93, 0.89),
+            FRCMaterial.PLA : color(0.45, 0.45, 0.48),
+            FRCMaterial.PETG : color(0.36, 0.36, 0.39),
+            FRCMaterial.ONYX : color(0.13, 0.13, 0.13),
+            FRCMaterial.STEEL : color(0.45, 0.46, 0.50),
+            FRCMaterial.PLYWOOD : color(0.76, 0.62, 0.42),
+            FRCMaterial.FOAM_NOODLE : color(0.20, 0.55, 0.85),
+            FRCMaterial.WIRE_BUNDLE : color(0.15, 0.15, 0.17)
+        };
+    return t[m];
+}
+
+/** Assign the material, its density and a real-part color in one call. */
+export function frcApplyPart(context is Context, bodies is Query, m is FRCMaterial)
+{
+    frcApplyPart(context, bodies, m, FRCPartClass.OTHER);
+}
+
+/** The same, for parts whose real finish is not the stock color. */
+export function frcApplyNamed(context is Context, bodies is Query, name is string,
+    density is ValueWithUnits, c is Color)
+{
+    setProperty(context, { "entities" : bodies, "propertyType" : PropertyType.MATERIAL,
+                "value" : material(name, density) });
+    setProperty(context, { "entities" : bodies, "propertyType" : PropertyType.APPEARANCE,
+                "value" : c });
+}
+
+/**
+ * What kind of part this is, for the color override in FRC Design Constants.
+ *
+ * A team that wants every plate in its own color does not want to say so once
+ * per feature, so the choice is made once at the top of the Part Studio and
+ * every builder asks for the color of its own class. The classes are the ones
+ * a student would sort a pile of parts into, not the ones the code is
+ * organised by: a tube from FRC Frame and a rail from FRC Swerve Chassis are
+ * both structure, and it would be no use if they were not.
+ *
+ * There is deliberately no printed class. Printedness is a property of the
+ * material, which every one of these already carries and frcIsPrintedMaterial
+ * already tests. Any part here can be printed, so folding the two axes into
+ * one list would make both of them worse.
+ */
+export enum FRCPartClass
+{
+    annotation { "Name" : "Plates and gussets" }        PLATE,
+    annotation { "Name" : "Tube and structure" }        STRUCTURE,
+    annotation { "Name" : "Gears, sprockets, pulleys" } DRIVE,
+    annotation { "Name" : "Shafts and spacers" }        SHAFT,
+    annotation { "Name" : "Wheels and rollers" }        WHEEL,
+    annotation { "Name" : "Bearing blocks" }            BEARING,
+    annotation { "Name" : "Bumpers" }                   BUMPER,
+    annotation { "Name" : "Pneumatics" }                PNEUMATIC,
+    annotation { "Name" : "Electronics and wiring" }    ELECTRICAL,
+    annotation { "Name" : "Game piece contact" }        GAMEPIECE,
+    annotation { "Name" : "Envelopes and reference" }   REFERENCE,
+    annotation { "Name" : "Layout copies" }             LAYOUT,
+    annotation { "Name" : "Everything else" }           OTHER
+}
+
+/**
+ * The Part Studio variable FRC Design Constants writes the color scheme into.
+ *
+ * A variable rather than a feature parameter because it has to reach every
+ * other feature, and a variable is the only thing in FeatureScript that
+ * crosses from one feature to the next. It is read below, never written here.
+ */
+export const FRC_COLOR_VAR = "frcPartColors";
+
+/**
+ * The colors FRC Design Constants offers per part class.
+ *
+ * A named list rather than three sliders per class. FeatureScript has no color
+ * picker parameter, so a color costs three real fields; thirteen classes of
+ * three would be thirty nine boxes in one dialog, which is not a thing a
+ * student will fill in. These are the colors teams actually paint and anodise.
+ */
+export enum FRCTeamPaint
+{
+    annotation { "Name" : "Leave it the material" } DEFAULT,
+    annotation { "Name" : "Red" }                  RED,
+    annotation { "Name" : "Orange" }               ORANGE,
+    annotation { "Name" : "Yellow" }               YELLOW,
+    annotation { "Name" : "Green" }                GREEN,
+    annotation { "Name" : "Teal" }                 TEAL,
+    annotation { "Name" : "Blue" }                 BLUE,
+    annotation { "Name" : "Navy" }                 NAVY,
+    annotation { "Name" : "Purple" }               PURPLE,
+    annotation { "Name" : "Pink" }                 PINK,
+    annotation { "Name" : "Black" }                BLACK,
+    annotation { "Name" : "White" }                WHITE,
+    annotation { "Name" : "Silver" }               SILVER,
+    annotation { "Name" : "Gold" }                 GOLD
+}
+
+/**
+ * The color behind each paint name. DEFAULT has none on purpose: the caller
+ * leaves that class out of the map entirely, and frcTeamColor then falls
+ * through to the material color, which is the whole point of the entry.
+ */
+export function frcPaintColor(p is FRCTeamPaint) returns Color
+{
+    return frcPaintColorA(p, 1);
+}
+
+/**
+ * The same color at a given alpha.
+ *
+ * Envelopes, keep-outs and bumper padding are drawn translucent on purpose:
+ * an opaque envelope hides the robot it is drawn around, which is the one
+ * thing it exists to let you see. A team color must not cost them that, so
+ * the alpha is carried separately and the palette never sets its own.
+ */
+export function frcPaintColorA(p is FRCTeamPaint, a is number) returns Color
+{
+    const t = {
+            FRCTeamPaint.RED : [0.72, 0.11, 0.13],
+            FRCTeamPaint.ORANGE : [0.90, 0.45, 0.10],
+            FRCTeamPaint.YELLOW : [0.95, 0.79, 0.12],
+            FRCTeamPaint.GREEN : [0.16, 0.55, 0.24],
+            FRCTeamPaint.TEAL : [0.09, 0.55, 0.55],
+            FRCTeamPaint.BLUE : [0.11, 0.36, 0.72],
+            FRCTeamPaint.NAVY : [0.09, 0.16, 0.36],
+            FRCTeamPaint.PURPLE : [0.42, 0.19, 0.60],
+            FRCTeamPaint.PINK : [0.85, 0.35, 0.60],
+            FRCTeamPaint.BLACK : [0.11, 0.11, 0.12],
+            FRCTeamPaint.WHITE : [0.93, 0.93, 0.94],
+            FRCTeamPaint.SILVER : [0.77, 0.78, 0.80],
+            FRCTeamPaint.GOLD : [0.80, 0.66, 0.25]
+        };
+    const c = t[p];
+    if (c is array)
+        return color(c[0], c[1], c[2], a);
+    return color(0.77, 0.78, 0.80, a);
+}
+
+/**
+ * The color a part of this class should carry.
+ *
+ * Returns the team color when FRC Design Constants is in the Part Studio above
+ * this feature with custom colors switched on and a color set for this class.
+ * Falls back to the real material color in every other case: no Design
+ * Constants, custom colors switched off, or nothing chosen for this class.
+ *
+ * The read is guarded because a Part Studio without the constants feature has
+ * no such variable and getVariable throws on one that is not defined. Failing
+ * to a material color is the right failure: the part is still colored, and it
+ * is colored the way the whole library colored it before any of this existed.
+ */
+export function frcTeamPaintFor(context is Context, cls is FRCPartClass)
+{
+    var chosen = undefined;
+    try silent
+    {
+        const set = getVariable(context, FRC_COLOR_VAR);
+        if (set is map && set.on == true && set.byClass is map)
+        {
+            const p = set.byClass[cls];
+            if (p is FRCTeamPaint)
+                chosen = p;
+        }
+    }
+    return chosen;
+}
+
+export function frcTeamColor(context is Context, cls is FRCPartClass, m is FRCMaterial) returns Color
+{
+    const p = frcTeamPaintFor(context, cls);
+    if (p is FRCTeamPaint)
+        return frcPaintColor(p);
+    return frcColor(m);
+}
+
+/**
+ * The team color for this class at the alpha the caller already draws with,
+ * or that caller's own color untouched when the team has set none.
+ *
+ * This is the form for the bodies that are not made of anything: envelopes,
+ * keep-outs, layout copies. They have no material to fall back to, they have a
+ * tuned literal instead, and most of them are translucent.
+ */
+export function frcTeamColorA(context is Context, cls is FRCPartClass,
+    fallback is Color, a is number) returns Color
+{
+    const p = frcTeamPaintFor(context, cls);
+    if (p is FRCTeamPaint)
+        return frcPaintColorA(p, a);
+    return fallback;
+}
+
+/**
+ * How see-through a material is.
+ *
+ * Only polycarbonate is drawn translucent, because only polycarbonate is
+ * translucent. It is carried separately from frcColor so that a team color
+ * can be applied at the material's own alpha: painting a polycarbonate part
+ * should change what color you see through it, not stop you seeing through
+ * it. Every other material returns 1 and is unaffected.
+ */
+export function frcMaterialAlpha(m is FRCMaterial) returns number
+{
+    return (m == FRCMaterial.POLYCARB) ? 0.35 : 1;
+}
+
+/**
+ * Assign the material, its density and the color for this class of part.
+ *
+ * The three argument form below is the same call with the class left unsaid,
+ * so a builder that has not been told what it is building still works and
+ * still honours the team's "everything else" color.
+ */
+export function frcApplyPart(context is Context, bodies is Query, m is FRCMaterial,
+    cls is FRCPartClass)
+{
+    setProperty(context, { "entities" : bodies, "propertyType" : PropertyType.MATERIAL,
+                "value" : material(frcMaterialName(m), frcDensity(m)) });
+    setProperty(context, { "entities" : bodies, "propertyType" : PropertyType.APPEARANCE,
+                "value" : frcTeamColorA(context, cls, frcColor(m),
+                        frcMaterialAlpha(m)) });
+}
+
+/**
+ * Round every straight edge of a body running along `dir`. Falls back to
+ * filleting each edge on its own, so one impossible edge no longer costs
+ * every other edge its radius.
+ */
+export function frcRoundAlong(context is Context, id is Id, body is Query, dir is Vector,
+    r is ValueWithUnits)
+{
+    const edges = evaluateQuery(context, frcEdgesAlong(context, body, dir));
+    if (size(edges) == 0)
+        return;
+
+    // One op over the whole set is cheaper and gives cleaner corner blends,
+    // so it is worth trying before falling back.
+    var whole = false;
+    try silent
+    {
+        opFillet(context, id + "all", { "entities" : qUnion(edges), "radius" : r });
+        whole = true;
+    }
+    if (whole)
+        return;
+
+    // A failed op poisons the id it was given, so `attempt` advances on every
+    // try, successful or not, and no id is ever reused.
+    var attempt = 0;
+    for (var e in edges)
+    {
+        for (var radius in [r, r / 2])
+        {
+            var rounded = false;
+            try silent
+            {
+                opFillet(context, id + ("e" ~ attempt), { "entities" : e, "radius" : radius });
+                rounded = true;
+            }
+            attempt += 1;
+            if (rounded)
+                break;
+        }
+    }
+}
+
+/**
+ * Break edges with a small equal-offset chamfer. Falls back to chamfering
+ * each edge on its own, so one impossible edge no longer costs every other
+ * edge its break.
+ */
+export function frcBreakEdges(context is Context, id is Id, edges is Query, w is ValueWithUnits)
+{
+    const found = evaluateQuery(context, edges);
+    if (size(found) == 0)
+        return;
+
+    // One op over the whole set is cheaper and blends shared corners, so it is
+    // worth trying before falling back.
+    var whole = false;
+    try silent
+    {
+        opChamfer(context, id + "all", { "entities" : qUnion(found),
+                    "chamferType" : ChamferType.EQUAL_OFFSETS, "width" : w });
+        whole = true;
+    }
+    if (whole)
+        return;
+
+    // A failed op poisons the id it was given, so `attempt` advances on every
+    // try, successful or not, and no id is ever reused.
+    var attempt = 0;
+    for (var e in found)
+    {
+        for (var width in [w, w / 2])
+        {
+            var broken = false;
+            try silent
+            {
+                opChamfer(context, id + ("e" ~ attempt), { "entities" : e,
+                            "chamferType" : ChamferType.EQUAL_OFFSETS, "width" : width });
+                broken = true;
+            }
+            attempt += 1;
+            if (broken)
+                break;
+        }
+    }
+}
+
+/**
+ * Resolve a placement pick into the frame a part is built on: origin where
+ * the part goes, normal along the feature axis. Picks resolve in order of
+ * exactness: a mate connector gives its full frame; a circular edge or a
+ * cylindrical face gives the hole's center and axis, so picking a hole
+ * locates the part exactly; a flat face or plane gives its own frame; a
+ * vertex gives its point with the fallback orientation. Anything else falls
+ * back to `fallback`.
+ */
+export function frcPickFrame(context is Context, q is Query, fallback is Plane) returns Plane
+{
+    for (var e in evaluateQuery(context, q))
+    {
+        try silent
+        {
+            const cs = evMateConnector(context, { "mateConnector" : e });
+            return plane(cs.origin, cs.zAxis, cs.xAxis);
+        }
+        try silent
+        {
+            const c = evCurveDefinition(context, { "edge" : e });
+            if (c is Circle)
+                return plane(c.coordSystem.origin, c.coordSystem.zAxis, c.coordSystem.xAxis);
+        }
+        try silent
+        {
+            const s = evSurfaceDefinition(context, { "face" : e });
+            if (s is Cylinder)
+                return plane(s.coordSystem.origin, s.coordSystem.zAxis, s.coordSystem.xAxis);
+        }
+        try silent
+        {
+            return evPlane(context, { "face" : e });
+        }
+        try silent
+        {
+            const p = evVertexPoint(context, { "vertex" : e });
+            return plane(p, fallback.normal, fallback.x);
+        }
+    }
+    return fallback;
+}
+
+// ############################### 3. MATH ################################
+
+/**
+ * True when `d` lies strictly inside the circumcircle of the triangle a, b, c.
+ * Works for either winding: the sign of the in-circle determinant is read
+ * against the sign of the triangle's own orientation.
+ *
+ * The test is strict, so a point exactly on the circumcircle answers false.
+ * That is the right convention, but it means that on a set with cocircular
+ * points the answer for a point that is on the circle only to within rounding
+ * is decided by the last bit of the determinant. frcDelaunay does not trust
+ * this test alone for that reason; see the note there.
+ */
+export function frcInCircumcircle(a is Vector, b is Vector, c is Vector, d is Vector) returns boolean
+{
+    const ax = a[0] - d[0]; const ay = a[1] - d[1];
+    const bx = b[0] - d[0]; const by = b[1] - d[1];
+    const cx = c[0] - d[0]; const cy = c[1] - d[1];
+    const det = (ax * ax + ay * ay) * (bx * cy - cx * by)
+        - (bx * bx + by * by) * (ax * cy - cx * ay)
+        + (cx * cx + cy * cy) * (ax * by - bx * ay);
+    const orient = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+    return (orient > 0) ? det > 0 : det < 0;
+}
+
+/**
+ * True when `d` is inside the triangle a, b, c or on its boundary. Either
+ * winding answers correctly. A triangle with no area answers true, which is
+ * deliberate: it costs nothing here and keeps a sliver from being skipped.
+ */
+function frcTriangleHolds(a is Vector, b is Vector, c is Vector, d is Vector) returns boolean
+{
+    const s1 = (b[0] - a[0]) * (d[1] - a[1]) - (d[0] - a[0]) * (b[1] - a[1]);
+    const s2 = (c[0] - b[0]) * (d[1] - b[1]) - (d[0] - b[0]) * (c[1] - b[1]);
+    const s3 = (a[0] - c[0]) * (d[1] - c[1]) - (d[0] - c[0]) * (a[1] - c[1]);
+    return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
+}
+
+/** True when two index triangles have an edge in common, either way round. */
+function frcTrianglesShareEdge(t1 is array, t2 is array) returns boolean
+{
+    for (var a = 0; a < 3; a += 1)
+    {
+        const u = t1[a]; const v = t1[(a + 1) % 3];
+        for (var b = 0; b < 3; b += 1)
+        {
+            const x = t2[b]; const y = t2[(b + 1) % 3];
+            if ((u == x && v == y) || (u == y && v == x))
+                return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * The mirror axes of a point set, if it has any. The candidate axis in each
+ * direction is the middle of the extent; it is accepted only when every point
+ * has a partner across it, so a set that is not symmetric answers false and
+ * nothing downstream of this changes.
+ *
+ * This exists for one reason. A Delaunay triangulation is unique only when no
+ * four points are cocircular, and mirror symmetry manufactures cocircular
+ * quadrilaterals by the dozen: take any two points and their two mirror
+ * images, and the circle through the first three is centred on the axis, so
+ * it passes through the fourth as well. Every such quadrilateral is an
+ * isosceles trapezoid whose two diagonals are exactly the same length, and no
+ * rule written on those four points alone can choose between them, because
+ * the quadrilateral's own mirror is a symmetry of the quadrilateral and swaps
+ * the two diagonals. Knowing where the axis is breaks that deadlock for the
+ * quadrilaterals that sit clear of the axis. For the ones that straddle it,
+ * nothing can; see frcCocircularFlips.
+ */
+function frcMirrorAxes(p is array)
+{
+    const none = { "useX" : false, "ax" : 0, "useY" : false, "ay" : 0, "tol" : 0 };
+    if (size(p) == 0)
+        return none;
+    var minx = p[0][0]; var maxx = minx; var miny = p[0][1]; var maxy = miny;
+    for (var q in p)
+    {
+        minx = min(minx, q[0]); maxx = max(maxx, q[0]);
+        miny = min(miny, q[1]); maxy = max(maxy, q[1]);
+    }
+    const ext = max(maxx - minx, maxy - miny);
+    if (ext <= 0)
+        return none;
+    const tol = 1e-9 * ext;
+    const ax = (minx + maxx) / 2;
+    const ay = (miny + maxy) / 2;
+    var okx = true;
+    for (var q in p)
+    {
+        var hit = false;
+        for (var r in p)
+        {
+            if (abs(2 * ax - q[0] - r[0]) <= tol && abs(q[1] - r[1]) <= tol)
+            {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit)
+        {
+            okx = false;
+            break;
+        }
+    }
+    var oky = true;
+    for (var q in p)
+    {
+        var hit = false;
+        for (var r in p)
+        {
+            if (abs(q[0] - r[0]) <= tol && abs(2 * ay - q[1] - r[1]) <= tol)
+            {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit)
+        {
+            oky = false;
+            break;
+        }
+    }
+    return { "useX" : okx, "ax" : ax, "useY" : oky, "ay" : ay, "tol" : tol };
+}
+
+/**
+ * A point written in the one form a mirror cannot see: the distance from each
+ * detected axis in place of the raw coordinate. A point and its mirror image
+ * get the same key, which is exactly what makes an order built on these keys
+ * commute with the mirror.
+ */
+function frcSymKey(qx is number, qy is number, sym is map) returns array
+{
+    return [sym.useX ? abs(qx - sym.ax) : qx,
+            sym.useY ? abs(qy - sym.ay) : qy];
+}
+
+/**
+ * Order on two symmetry keys, with a tolerance so that two points that mirror
+ * each other only to within rounding still compare equal.
+ */
+function frcKeyCompare(a is array, b is array, tol is number) returns number
+{
+    if (abs(a[0] - b[0]) > tol)
+        return (a[0] < b[0]) ? -1 : 1;
+    if (abs(a[1] - b[1]) > tol)
+        return (a[1] < b[1]) ? -1 : 1;
+    return 0;
+}
+
+/** The two endpoint keys of a diagonal in a fixed order, so that a diagonal's
+ *  key does not depend on which end of it came first. */
+function frcDiagKey(a is array, b is array, tol is number) returns array
+{
+    return (frcKeyCompare(a, b, tol) <= 0) ? [a[0], a[1], b[0], b[1]]
+        : [b[0], b[1], a[0], a[1]];
+}
+
+/** Order on two diagonal keys. */
+function frcDiagCompare(d1 is array, d2 is array, tol is number) returns number
+{
+    const c = frcKeyCompare([d1[0], d1[1]], [d2[0], d2[1]], tol);
+    if (c != 0)
+        return c;
+    return frcKeyCompare([d1[2], d1[3]], [d2[2], d2[3]], tol);
+}
+
+/**
+ * Settle the cocircular choices in a finished triangulation by geometry
+ * rather than by insertion order.
+ *
+ * Where four points are cocircular the two diagonals of their quadrilateral
+ * are both Delaunay, and the Bowyer-Watson loop picks one of them from the
+ * sign of a determinant that is zero to within rounding. That choice follows
+ * the order the points arrived in, which is why it does not mirror: on a
+ * cocircular ring of 12 points, 40 of 40 random permutations of the same
+ * input gave a different triangle set, while on a random cloud in general
+ * position 0 of 40 did.
+ *
+ * The pass walks every interior edge, and where the four points around it are
+ * cocircular to 1e-9 of the local length squared it re-chooses the diagonal:
+ *
+ *   1. the strictly shorter diagonal wins. Length is untouched by reflection,
+ *      so this rule mirrors on its own and needs no axis;
+ *   2. on an exact tie, and only when the whole point set was found to be
+ *      mirror symmetric, the diagonal whose endpoints have the lower key
+ *      wins. The key is the distance from the axis, so a point and its mirror
+ *      share it and the order commutes with the mirror.
+ *
+ * A tie means the quadrilateral is an isosceles trapezoid, so rule 2 is the
+ * only one that ever fires on a symmetric plate. When the trapezoid straddles
+ * the axis the two diagonals are each other's mirror image and their keys are
+ * equal, so nothing fires and the pass leaves the edge alone. That is not
+ * timidity, it is forced: if the axis crosses the inside of a triangle then
+ * that triangle must be its own mirror image, and a triangle that is its own
+ * mirror image has a vertex on the axis. So a point set with points on both
+ * sides and none on the axis has no mirror symmetric triangulation at all,
+ * and the only cure for a straddling quadrilateral is a node on the axis,
+ * which is the caller's business, not this function's.
+ *
+ * The pass only ever flips a diagonal, so the triangle count and the summed
+ * area cannot change, and in general position no quadrilateral is cocircular
+ * and nothing is flipped at all.
+ */
+function frcCocircularFlips(p is array, tin is array) returns array
+{
+    var tris = tin;
+    if (size(tris) < 2)
+        return tris;
+    const sym = frcMirrorAxes(p);
+    const usekey = sym.useX || sym.useY;
+    const ktol = sym.tol;
+    for (var sweep = 0; sweep < 64; sweep += 1)
+    {
+        const nt = size(tris);
+        var ed = [];
+        for (var t = 0; t < nt; t += 1)
+        {
+            for (var k = 0; k < 3; k += 1)
+            {
+                const u0 = tris[t][k];
+                const v0 = tris[t][(k + 1) % 3];
+                ed = append(ed, [min(u0, v0), max(u0, v0), t]);
+            }
+        }
+        ed = sort(ed, function(a, b)
+            {
+                if (a[0] != b[0])
+                    return a[0] - b[0];
+                if (a[1] != b[1])
+                    return a[1] - b[1];
+                return a[2] - b[2];
+            });
+        var cands = [];
+        var e = 0;
+        while (e < size(ed))
+        {
+            var f = e + 1;
+            while (f < size(ed) && ed[f][0] == ed[e][0] && ed[f][1] == ed[e][1])
+                f += 1;
+            if (f - e != 2)
+            {
+                e = f;
+                continue;
+            }
+            const ti = ed[e][2]; const tj = ed[e + 1][2];
+            const sa = ed[e][0]; const sb = ed[e][1];
+            e = f;
+            if (ti == tj)
+                continue;
+            var oi = -1; var oj = -1;
+            for (var k = 0; k < 3; k += 1)
+            {
+                if (tris[ti][k] != sa && tris[ti][k] != sb)
+                    oi = tris[ti][k];
+                if (tris[tj][k] != sa && tris[tj][k] != sb)
+                    oj = tris[tj][k];
+            }
+            if (oi < 0 || oj < 0 || oi == oj)
+                continue;
+            const pa = p[sa]; const pb = p[sb];
+            const pu = p[oi]; const pv = p[oj];
+            const orient = (pb[0] - pa[0]) * (pu[1] - pa[1])
+                - (pu[0] - pa[0]) * (pb[1] - pa[1]);
+            if (orient == 0)
+                continue;
+            const qx = pa[0] - pv[0]; const qy = pa[1] - pv[1];
+            const rx = pb[0] - pv[0]; const ry = pb[1] - pv[1];
+            const sx = pu[0] - pv[0]; const sy = pu[1] - pv[1];
+            const det = (qx * qx + qy * qy) * (rx * sy - sx * ry)
+                - (rx * rx + ry * ry) * (qx * sy - sx * qy)
+                + (sx * sx + sy * sy) * (qx * ry - rx * qy);
+            const dx1 = pa[0] - pb[0]; const dy1 = pa[1] - pb[1];
+            const dx2 = pu[0] - pv[0]; const dy2 = pu[1] - pv[1];
+            const dx3 = pa[0] - pu[0]; const dy3 = pa[1] - pu[1];
+            const dx4 = pb[0] - pv[0]; const dy4 = pb[1] - pv[1];
+            const scale = max(max(dx1 * dx1 + dy1 * dy1, dx2 * dx2 + dy2 * dy2),
+                max(dx3 * dx3 + dy3 * dy3, dx4 * dx4 + dy4 * dy4));
+            if (scale <= 0 || abs(det / orient) > 1e-9 * scale)
+                continue;
+            const s1 = (pv[0] - pu[0]) * (pa[1] - pu[1])
+                - (pa[0] - pu[0]) * (pv[1] - pu[1]);
+            const s2 = (pv[0] - pu[0]) * (pb[1] - pu[1])
+                - (pb[0] - pu[0]) * (pv[1] - pu[1]);
+            if (!((s1 > 0 && s2 < 0) || (s1 < 0 && s2 > 0)))
+                continue;
+            const lc = sqrt(dx1 * dx1 + dy1 * dy1);
+            const la = sqrt(dx2 * dx2 + dy2 * dy2);
+            if (lc - la > 1e-12 * lc)
+            {
+                cands = append(cands, [1, lc - la, ti, tj, sa, sb, oi, oj]);
+                continue;
+            }
+            if (!usekey || abs(lc - la) > 1e-12 * lc)
+                continue;
+            const kc = frcDiagKey(frcSymKey(pa[0], pa[1], sym),
+                frcSymKey(pb[0], pb[1], sym), ktol);
+            const ka = frcDiagKey(frcSymKey(pu[0], pu[1], sym),
+                frcSymKey(pv[0], pv[1], sym), ktol);
+            if (frcDiagCompare(ka, kc, ktol) < 0)
+                cands = append(cands, [0, 0, ti, tj, sa, sb, oi, oj]);
+        }
+        if (size(cands) == 0)
+            break;
+        cands = sort(cands, function(a, b)
+            {
+                if (a[0] != b[0])
+                    return b[0] - a[0];
+                if (a[1] != b[1])
+                    return b[1] - a[1];
+                if (a[2] != b[2])
+                    return a[2] - b[2];
+                return a[3] - b[3];
+            });
+        var used = makeArray(nt, false);
+        var did = 0;
+        for (var c in cands)
+        {
+            if (used[c[2]] || used[c[3]])
+                continue;
+            used[c[2]] = true;
+            used[c[3]] = true;
+            tris[c[2]] = [c[6], c[7], c[4]];
+            tris[c[3]] = [c[6], c[7], c[5]];
+            did += 1;
+        }
+        if (did == 0)
+            break;
+    }
+    return tris;
+}
+
+/**
+ * Bowyer-Watson Delaunay over unitless plane points, returning triangles as
+ * index triples into `pin`.
+ *
+ * Three things here are not the textbook version, and all three were
+ * measured rather than assumed. A port of this function was run against 2N - 2 - B, and the
+ * summed triangle area against the convex hull area, over 2800 point sets at
+ * four scales: random clouds, square grids, single rings, nested rings, rings
+ * with interior points, and long thin clouds.
+ *
+ * First, the cavity is grown by connectivity, not taken as every triangle the
+ * in-circle test flags. The textbook loop assumes the flagged triangles form
+ * one connected patch around the new point, which they do in exact arithmetic.
+ * On cocircular points they do not: a point that is on a circumcircle to
+ * within rounding gets a determinant of either sign, so the flagged set comes
+ * out as several disconnected patches. Their edges are then all boundary
+ * edges, the new point is fanned to every one of them, and the fan from the
+ * far patch lies straight across the mesh. That is not a small error. On a
+ * ring of 37 cocircular points the old loop returned 125 triangles where
+ * 2N - 2 - B gives 35, with the areas summing to 22 times the true area; on a
+ * round outline with an interior grid, 463 triangles at 17 times the area.
+ * Half of all test cases failed. Seeding the cavity with the triangles that
+ * actually contain the new point and growing only through shared edges leaves
+ * the generic case bit for bit unchanged and makes every cocircular case come
+ * out at exactly 2N - 2 - B with the areas exact.
+ *
+ * Second, the super triangle is 1000 times the point extent rather than 10.
+ * At 10 the hull is not always covered and single sliver triangles go missing
+ * along it: 35 of 400 random clouds lost one. At 1000 that drops to 13 in
+ * 2800 and no case gains a triangle or any area. It is not pushed further
+ * than 1000 because the in-circle determinant goes as the fourth power of the
+ * coordinates, and at 10000 the terms for a triangle on two super vertices
+ * reach the point where a genuinely small determinant is lost in the rounding.
+ *
+ * Third, the cocircular choice is settled afterwards by frcCocircularFlips
+ * above, on the geometry of the four points, and not by the sign of a
+ * determinant that rounding decides. On a symmetric plate this is the whole
+ * ball game: two points and their two mirror images are always exactly
+ * cocircular, so a symmetric node set is full of cocircular quadrilaterals,
+ * and the old behaviour resolved each one by whichever way the last bit fell.
+ * Measured on 36 symmetric layouts, a square lattice with a ring of nodes
+ * round each of four holes, 192 to 304 triangles each: every one came back
+ * with 128 to 208 triangles having no mirror partner and not one came back
+ * symmetric. With the flip pass all 36 come back with zero, in both
+ * directions. Over the same 2800 point sets, random clouds, rings with
+ * interior points and long thin clouds come back bit for bit unchanged, and
+ * all 600 rings still meet 2N - 2 - B with the summed area equal to the hull
+ * area.
+ *
+ * Points that repeat are still not handled: a repeat is on the circumcircle
+ * of every triangle it touches, so nothing is flagged and the point is
+ * dropped. Callers that can produce coincident nodes must merge them first.
+ */
+export function frcDelaunay(pin is array) returns array
+{
+    const n = size(pin);
+    if (n < 3)
+        return [];
+    var p = pin;
+    var minx = p[0][0]; var maxx = minx; var miny = p[0][1]; var maxy = miny;
+    for (var q in p)
+    {
+        minx = min(minx, q[0]); maxx = max(maxx, q[0]);
+        miny = min(miny, q[1]); maxy = max(maxy, q[1]);
+    }
+    const dm = max(maxx - minx, maxy - miny) * 1000 + 1;
+    const mx = (minx + maxx) / 2; const my = (miny + maxy) / 2;
+    p = append(p, vector(mx - 2 * dm, my - dm));
+    p = append(p, vector(mx, my + 2 * dm));
+    p = append(p, vector(mx + 2 * dm, my - dm));
+    var tris = [[n, n + 1, n + 2]];
+    for (var i = 0; i < n; i += 1)
+    {
+        var cand = []; var keep = [];
+        for (var t in tris)
+        {
+            if (frcInCircumcircle(p[t[0]], p[t[1]], p[t[2]], p[i]))
+                cand = append(cand, t);
+            else
+                keep = append(keep, t);
+        }
+        const nc = size(cand);
+        if (nc == 0)
+            continue;
+
+        // Seed on the triangles that hold the new point, then flood outward
+        // through shared edges only. Anything the in-circle test flagged that
+        // the flood never reaches was flagged by rounding and is put back.
+        var inCav = makeArray(nc, false);
+        var stack = [];
+        for (var k = 0; k < nc; k += 1)
+        {
+            if (frcTriangleHolds(p[cand[k][0]], p[cand[k][1]], p[cand[k][2]], p[i]))
+            {
+                inCav[k] = true;
+                stack = append(stack, k);
+            }
+        }
+        if (size(stack) == 0)
+        {
+            // No flagged triangle holds the point, so there is nothing to
+            // seed from. Fall back to the whole flagged set rather than
+            // dropping the point.
+            for (var k = 0; k < nc; k += 1)
+                inCav[k] = true;
+        }
+        while (size(stack) > 0)
+        {
+            const cur = stack[size(stack) - 1];
+            stack = resize(stack, size(stack) - 1);
+            for (var k = 0; k < nc; k += 1)
+            {
+                if (inCav[k])
+                    continue;
+                if (frcTrianglesShareEdge(cand[cur], cand[k]))
+                {
+                    inCav[k] = true;
+                    stack = append(stack, k);
+                }
+            }
+        }
+
+        var bad = [];
+        for (var k = 0; k < nc; k += 1)
+        {
+            const t = cand[k];
+            if (inCav[k])
+            {
+                bad = append(bad, [t[0], t[1]]);
+                bad = append(bad, [t[1], t[2]]);
+                bad = append(bad, [t[2], t[0]]);
+            }
+            else
+                keep = append(keep, t);
+        }
+        for (var e = 0; e < size(bad); e += 1)
+        {
+            var shared = false;
+            for (var f = 0; f < size(bad); f += 1)
+            {
+                if (e == f)
+                    continue;
+                if ((bad[e][0] == bad[f][0] && bad[e][1] == bad[f][1]) ||
+                    (bad[e][0] == bad[f][1] && bad[e][1] == bad[f][0]))
+                {
+                    shared = true;
+                    break;
+                }
+            }
+            if (!shared)
+                keep = append(keep, [bad[e][0], bad[e][1], i]);
+        }
+        tris = keep;
+    }
+    var out = [];
+    for (var t in tris)
+    {
+        if (t[0] >= n || t[1] >= n || t[2] >= n)
+            continue;
+        out = append(out, t);
+    }
+    return frcCocircularFlips(pin, out);
+}
+
+export function frcInsetTriangle(a0 is Vector, b0 is Vector, c0 is Vector, d is number)
+{
+    var a = a0; var b = b0; var c = c0;
+    var area2 = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+    if (abs(area2) < 1e-10)
+        return undefined;
+    if (area2 < 0)
+    {
+        const t = b; b = c; c = t; area2 = -area2;
+    }
+    const per = norm(b - a) + norm(c - b) + norm(a - c);
+    if (2 * (area2 / 2) / per <= d)
+        return undefined;
+    const pts = [a, b, c];
+    var ns = []; var cs = [];
+    for (var i = 0; i < 3; i += 1)
+    {
+        const pp = pts[i]; const qq = pts[(i + 1) % 3];
+        const u = (qq - pp) / norm(qq - pp);
+        const nv = vector(-u[1], u[0]);
+        ns = append(ns, nv);
+        cs = append(cs, dot(pp, nv) + d);
+    }
+    var res = [];
+    for (var i = 0; i < 3; i += 1)
+    {
+        const n0 = ns[i]; const k0 = cs[i];
+        const n1 = ns[(i + 1) % 3]; const k1 = cs[(i + 1) % 3];
+        const det = n0[0] * n1[1] - n0[1] * n1[0];
+        if (abs(det) < 1e-12)
+            return undefined;
+        res = append(res, vector((k0 * n1[1] - n0[1] * k1) / det,
+                    (n0[0] * k1 - k0 * n1[0]) / det));
+    }
+    return [res[2], res[0], res[1]];
+}
+
+export function frcBar(from is Vector, u is Vector, len is ValueWithUnits,
+    width is ValueWithUnits) returns array
+{
+    const nv = vector(-u[1], u[0]);
+    return [from + nv * (width / 2), from + u * len + nv * (width / 2),
+            from + u * len - nv * (width / 2), from - nv * (width / 2)];
+}
+
+export function frcPolygonPoints(center is Vector, circumradius is ValueWithUnits,
+    sides is number, startAngle is ValueWithUnits) returns array
+{
+    var pts = [];
+    for (var i = 0; i < sides; i += 1)
+    {
+        const a = startAngle + (360 * degree) * i / sides;
+        pts = append(pts, center + vector(cos(a), sin(a)) * circumradius);
+    }
+    return pts;
+}
+
+export function frcToPoint(cSys is CoordSystem, c is Vector, down is ValueWithUnits) returns Vector
+{
+    return cSys.origin + cSys.xAxis * c[0] + cross(cSys.zAxis, cSys.xAxis) * c[1] - cSys.zAxis * down;
+}
+
+/** The involute function, kept as an angle so units stay consistent. */
+export function frcInv(a is ValueWithUnits) returns ValueWithUnits
+{
+    return (tan(a) - a / radian) * radian;
+}
+
+/**
+ * Monotone chain convex hull, returning the hull points in order.
+ *
+ * The sort is on x with y breaking the tie, and the tie-break is not optional.
+ * Monotone chain walks the points in lexicographic order and assumes that
+ * everything sharing an x arrives bottom to top; hand it a column in any other
+ * order and the lower chain starts partway up the column, so the points below
+ * the start are never picked up and the hull comes back short. This used to
+ * sort on x alone and rely on ties keeping their input order, which is not the
+ * same thing. On random points it made no difference, because no two of them
+ * share an x. On hole patterns it did: a run of 3910 layouts whose holes sat
+ * in three vertical columns, which is an ordinary bolt pattern, returned the
+ * wrong hull 1255 times, and a four-hole plate with three holes up one edge
+ * came back at half its true area. With the tie-break, none of 11817 layouts
+ * across lattice, column and random point sets came back wrong.
+ */
+export function frcConvexHull(pts is array) returns array
+{
+    const n = size(pts);
+    if (n < 3)
+        return pts;
+    var idx = [];
+    for (var i = 0; i < n; i += 1)
+        idx = append(idx, [pts[i][0], pts[i][1], i]);
+    idx = sort(idx, function(a, b)
+        {
+            return (a[0] != b[0]) ? a[0] - b[0] : a[1] - b[1];
+        });
+    var sorted = [];
+    for (var e in idx)
+        sorted = append(sorted, pts[e[2]]);
+
+    var lower = [];
+    for (var i = 0; i < n; i += 1)
+    {
+        while (size(lower) >= 2
+            && frcCross2(lower[size(lower) - 2], lower[size(lower) - 1], sorted[i]) <= 0 * inch * inch)
+            lower = resize(lower, size(lower) - 1);
+        lower = append(lower, sorted[i]);
+    }
+    var upper = [];
+    for (var i = n - 1; i >= 0; i -= 1)
+    {
+        while (size(upper) >= 2
+            && frcCross2(upper[size(upper) - 2], upper[size(upper) - 1], sorted[i]) <= 0 * inch * inch)
+            upper = resize(upper, size(upper) - 1);
+        upper = append(upper, sorted[i]);
+    }
+    var hull = [];
+    for (var i = 0; i < size(lower) - 1; i += 1)
+        hull = append(hull, lower[i]);
+    for (var i = 0; i < size(upper) - 1; i += 1)
+        hull = append(hull, upper[i]);
+    return hull;
+}
+
+export function frcCross2(o is Vector, a is Vector, b is Vector) returns ValueWithUnits
+{
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+}
+
+// ############################# 4. PROFILES ##############################
+
+/**
+ * Every shaft and bore profile sold for FRC, generated from vendor drawing
+ * dimensions rather than eyeballed. Each profile is emitted as exact arcs and
+ * lines, so a bore cut from it seats on the same surfaces the real part does.
+ *
+ * Sources, all vendor drawings or vendor CAD:
+ *   Hex bores 0.502 / 0.377 across flats ...... WCP 20 DP gear drawings
+ *   Rounded hex 13.75 / 10.25 mm corner circle  WCP-0914, REV-21-1135
+ *   ThunderSquare 0.302 corner circle ......... WCP rounded hex bearing table
+ *   MAXSpline ................................. REV-21-2351 bracket bore
+ *   SplineXL .................................. WCP-1082 gear bore
+ *   SplineXS 15T, Kraken and NEO 2.0 shafts ... REV-41-6457, EXT 15z x 0.5m x 30R x 5e
+ *   Falcon 14T ................................ WCP pulley drawings, 0.5 module
+ */
+export enum FRCDriveBore
+{
+    annotation { "Name" : "None (solid)" }              NONE,
+    annotation { "Name" : "Round" }                     ROUND,
+    annotation { "Name" : "Hex" }                       HEX,
+    annotation { "Name" : "Rounded hex (ThunderHex)" }  ROUNDED_HEX,
+    annotation { "Name" : "Square" }                    SQUARE,
+    annotation { "Name" : "Rounded square" }            ROUNDED_SQUARE,
+    annotation { "Name" : "Keyed round" }               KEYED,
+    annotation { "Name" : "MAXSpline (REV)" }           MAXSPLINE,
+    annotation { "Name" : "SplineXL (WCP)" }            SPLINEXL,
+    annotation { "Name" : "SplineXS 15T (Kraken)" }     SPLINEXS,
+    annotation { "Name" : "Falcon 500 14T spline" }     FALCON,
+    annotation { "Name" : "Custom involute spline" }    CUSTOM_SPLINE,
+    annotation { "Name" : "Bearing seat" }              BEARING
+}
+
+export enum FRCHexSize
+{
+    annotation { "Name" : "1/2 in" }              HX_500,
+    annotation { "Name" : "3/8 in" }              HX_375,
+    annotation { "Name" : "1/4 in" }              HX_250,
+    annotation { "Name" : "5/8 in" }              HX_625,
+    annotation { "Name" : "5 mm" }                HX_5MM,
+    annotation { "Name" : "8 mm" }                HX_8MM,
+    annotation { "Name" : "14 mm" }               HX_14MM,
+    annotation { "Name" : "Custom across flats" } HX_CUSTOM
+}
+
+export enum FRCRoundedHexSize
+{
+    annotation { "Name" : "1/2 in (13.75 mm corner)" }  RH_500,
+    annotation { "Name" : "3/8 in (10.25 mm corner)" }  RH_375
+}
+
+export function frcHexAcrossFlats(s is FRCHexSize) returns ValueWithUnits
+{
+    return {
+            FRCHexSize.HX_500 : 0.500 * inch, FRCHexSize.HX_375 : 0.375 * inch,
+            FRCHexSize.HX_250 : 0.250 * inch, FRCHexSize.HX_625 : 0.625 * inch,
+            FRCHexSize.HX_5MM : 5 * millimeter, FRCHexSize.HX_8MM : 8 * millimeter,
+            FRCHexSize.HX_14MM : 14 * millimeter, FRCHexSize.HX_CUSTOM : 0.500 * inch
+        }[s];
+}
+
+/**
+ * Rounded-hex corner circle diameter, from the WCP and REV shaft drawings.
+ *
+ * The corner circle is held in millimetres because ThunderHex is ground to a
+ * metric corner circle even though it is sold by an inch across-flats. The
+ * two figures were stored as 0.541 in and 0.404 in, which are exactly the
+ * three-place inch roundings of 13.75 mm and 10.25 mm and throw away about a
+ * third of a thousandth on the corner circle diameter. That is the surface a
+ * rounded-hex bore seats on, so the exact figure is kept here and converted
+ * once, rather than the rounded one being converted back.
+ *
+ * Across flats stays in inches because that is how the stock is sold.
+ */
+export function frcRoundedHexData(s is FRCRoundedHexSize) returns map
+{
+    return {
+            FRCRoundedHexSize.RH_500 : { "flats" : 0.500 * inch, "corner" : 13.75 * millimeter },
+            FRCRoundedHexSize.RH_375 : { "flats" : 0.375 * inch, "corner" : 10.25 * millimeter }
+        }[s];
+}
+
+/**
+ * Six-lobe spline parameters. Both profiles are all-arc and tangent
+ * throughout: a root arc, a concave fillet, a convex lobe, and on MAXSpline a
+ * short tip arc. `rootHalf` is the half angle of the root arc, `fillet` the
+ * concave fillet radius, `lobe` the convex radius.
+ */
+export function frcLobedSplineData(kind is FRCDriveBore) returns map
+{
+    if (kind == FRCDriveBore.MAXSPLINE)
+        return { "lobes" : 6, "root" : 0.5625 * inch, "tip" : 0.6875 * inch,
+                 "rootHalf" : 8.1829 * degree, "fillet" : 0.08071 * inch,
+                 "lobe" : 0.08071 * inch };
+    return { "lobes" : 6, "root" : 0.5625 * inch, "tip" : 0.68751 * inch,
+             "rootHalf" : 8.2299 * degree, "fillet" : 0.0795 * inch,
+             "lobe" : 0.17188 * inch };
+}
+
+/** Involute spline parameters. SplineXS is REV's published ISO 4156 callout. */
+export function frcInvoluteSplineData(kind is FRCDriveBore) returns map
+{
+    if (kind == FRCDriveBore.SPLINEXS)
+        return { "teeth" : 15, "module" : 0.5 * millimeter, "pressure" : 30 * degree };
+    return { "teeth" : 14, "module" : 0.5 * millimeter, "pressure" : 30 * degree };
+}
+
+export function frcPolar(r is ValueWithUnits, a is ValueWithUnits) returns Vector
+{
+    return vector(r * cos(a), r * sin(a));
+}
+
+/** Shortest arc from `s` to `e` about `c`, as the three points skArc wants. */
+export function frcArcSeg(c is Vector, s is Vector, e is Vector) returns map
+{
+    const r = (norm(s - c) + norm(e - c)) / 2;
+    var a0 = atan2(s[1] - c[1], s[0] - c[0]);
+    var a1 = atan2(e[1] - c[1], e[0] - c[0]);
+    var d = a1 - a0;
+    while (d > 180 * degree) d = d - 360 * degree;
+    while (d < -180 * degree) d = d + 360 * degree;
+    return { "kind" : "arc", "start" : s, "mid" : c + frcPolar(r, a0 + d / 2), "end" : e };
+}
+
+/** An arc given by its center, radius and end angles, as skArc wants it. */
+export function frcArcFromAngles(c is Vector, r is ValueWithUnits,
+    a0 is ValueWithUnits, a1 is ValueWithUnits) returns map
+{
+    return { "kind" : "arc", "start" : c + frcPolar(r, a0),
+             "mid" : c + frcPolar(r, (a0 + a1) / 2), "end" : c + frcPolar(r, a1) };
+}
+
+export function frcMirrorPoint(p is Vector, phi is ValueWithUnits) returns Vector
+{
+    const c2 = cos(2 * phi);
+    const s2 = sin(2 * phi);
+    return vector(c2 * p[0] + s2 * p[1], s2 * p[0] - c2 * p[1]);
+}
+
+export function frcRotatePoint(p is Vector, a is ValueWithUnits) returns Vector
+{
+    return vector(cos(a) * p[0] - sin(a) * p[1], sin(a) * p[0] + cos(a) * p[1]);
+}
+
+/** Where a ray from `o` at angle `a` leaves the circle of radius `r` about `c`. */
+export function frcRayHitsCircle(o is Vector, a is ValueWithUnits, c is Vector,
+    r is ValueWithUnits) returns Vector
+{
+    const u = vector(cos(a), sin(a));
+    const rel = c - o;
+    const p = dot(rel, u);
+    const disc = p * p - dot(rel, rel) + r * r;
+    return o + u * (p + sqrt(max(disc, 0 * inch * inch)));
+}
+
+/**
+ * Six-lobe spline outline. `fit` grows every radius, so a positive value opens
+ * a bore. The concave and convex fillet centers are re-solved for the fitted
+ * radii, which keeps the two fillets exactly tangent at any allowance.
+ */
+export function frcLobedSplineArcs(d is map, center is Vector, fit is ValueWithUnits) returns array
+{
+    const n = d.lobes;
+    const pitch = (360 / n) * degree;
+    const rRoot = d.root + fit;
+    const rTip = d.tip + fit;
+    const c1r = rRoot + d.fillet;
+    const c2r = rTip - d.lobe;
+    const cosSep = (c1r * c1r + c2r * c2r - (d.fillet + d.lobe) * (d.fillet + d.lobe))
+        / (2 * c1r * c2r);
+    const sep = acos(max(min(cosSep, 1), -1));
+    const aFull = d.rootHalf + sep;
+    const aTip = min(aFull, pitch / 2);
+
+    var out = [];
+    for (var k = 0; k < n; k += 1)
+    {
+        const base = k * pitch;
+        const aR = base + d.rootHalf;
+        const c1 = center + frcPolar(c1r, aR);
+        const c2 = center + frcPolar(c2r, base + aFull);
+        const t = c1 + (c2 - c1) * (d.fillet / norm(c2 - c1));
+        const pRoot = center + frcPolar(rRoot, aR);
+        const pTip = frcRayHitsCircle(center, base + aTip, c2, d.lobe);
+
+        const aRm = base + pitch - d.rootHalf;
+        const c1m = center + frcPolar(c1r, aRm);
+        const c2m = center + frcPolar(c2r, base + pitch - aFull);
+        const tm = c1m + (c2m - c1m) * (d.fillet / norm(c2m - c1m));
+        const pRootM = center + frcPolar(rRoot, aRm);
+        const pTipM = frcRayHitsCircle(center, base + pitch - aTip, c2m, d.lobe);
+
+        out = append(out, frcArcSeg(c1, pRoot, t));
+        out = append(out, frcArcSeg(c2, t, pTip));
+        if (aTip < pitch / 2 - 1e-6 * degree)
+            out = append(out, frcArcSeg(center, pTip, pTipM));
+        out = append(out, frcArcSeg(c2m, pTipM, tm));
+        out = append(out, frcArcSeg(c1m, tm, pRootM));
+        const nextRoot = center + frcPolar(rRoot, base + pitch + d.rootHalf);
+        out = append(out, frcArcSeg(center, pRootM, nextRoot));
+    }
+    return out;
+}
+
+/**
+ * Flat-root involute spline, the form used by the 8 mm motor splines. Flanks
+ * are true involutes; the root between teeth is a chord, which is what a
+ * flat-root spline actually has.
+ *
+ * A positive `fit` grows the whole outline outward, tooth angle included,
+ * which is how a broached bore clears its shaft. The one loop this returns is
+ * the shaft section at fit 0 and the bore at fit above it, both indexed on the
+ * same tooth centres, so the bore is the shaft grown: subtract it and the
+ * tooth shaped recess left behind is what the shaft tooth enters. The recess
+ * has to be the wider of the two.
+ *
+ * This read `- shift`, which narrowed the tooth while both radii grew, so the
+ * recess came out about a thousandth under the shaft tooth it had to accept
+ * and the shaft would not enter. The comment that stood here said the fit
+ * widens the space, and the code did widen the space; widening the space is
+ * the wrong half of the pitch. Both said the same wrong thing.
+ */
+export function frcInvoluteSplinePoints(d is map, center is Vector,
+    fit is ValueWithUnits) returns array
+{
+    const z = d.teeth;
+    const m = d.module;
+    const pa = d.pressure;
+    const rp = m * z / 2;
+    const rb = rp * cos(pa);
+    const rMajor = m * (z + 1) / 2 + fit;
+    const rMinor = m * (z - 1.5) / 2 + fit;
+    // An involute's normal is tangent to the base circle, so rolling the
+    // flank round that circle by an arc of `fit` offsets it normally by
+    // exactly `fit`. That is why the shift is fit over rb and not over any
+    // other radius.
+    const shift = (fit / rb) * radian;
+    const half = (PI / (2 * z)) * radian + shift;
+    const invPA = frcInv(pa);
+    const rStart = max(rb, rMinor);
+    const steps = 8;
+
+    var pts = [];
+    for (var k = 0; k < z; k += 1)
+    {
+        const base = (360 * k / z) * degree;
+        var rr = [];
+        var th = [];
+        for (var i = 0; i <= steps; i += 1)
+        {
+            const r = rStart + (rMajor - rStart) * i / steps;
+            const a = acos(max(min(rb / r, 1), -1));
+            rr = append(rr, r);
+            th = append(th, half + invPA - frcInv(a));
+        }
+        // The two root points drop the flank from where it starts down to the
+        // minor circle. They are only there when the flank starts above the
+        // minor circle, that is when the base circle is the larger of the
+        // two. On every spline this library ships the minor circle is the
+        // larger, rStart is exactly rMinor, and emitting them anyway put two
+        // points on top of two others and handed skLineSegment a pair of
+        // zero-length lines per tooth.
+        const rootBelowStart = rStart > rMinor;
+        if (rootBelowStart)
+            pts = append(pts, center + frcPolar(rMinor, base - th[0]));
+        for (var i = 0; i <= steps; i += 1)
+            pts = append(pts, center + frcPolar(rr[i], base - th[i]));
+        for (var i = steps; i >= 0; i -= 1)
+            pts = append(pts, center + frcPolar(rr[i], base + th[i]));
+        if (rootBelowStart)
+            pts = append(pts, center + frcPolar(rMinor, base + th[0]));
+    }
+    return pts;
+}
+
+/** Regular polygon with its corners relieved to a circle, as hex stock is. */
+export function frcRoundedPolyArcs(sides is number, acrossFlats is ValueWithUnits,
+    cornerDia is ValueWithUnits, center is Vector, fit is ValueWithUnits) returns array
+{
+    const half = (180 / sides) * degree;
+    const rf = acrossFlats / 2 + fit;
+    const rc = cornerDia / 2 + fit;
+    const rv = rf / cos(half);
+    if (rc <= rf * 1.0002 || rc >= rv * 0.9998)
+        return frcSharpPolyArcs(sides, acrossFlats, center, fit);
+    const cut = sqrt(rc * rc - rf * rf);
+    var out = [];
+    for (var k = 0; k < sides; k += 1)
+    {
+        const mid = 2 * k * half;
+        const nrm = vector(cos(mid), sin(mid));
+        const tng = vector(-sin(mid), cos(mid));
+        const p0 = center + nrm * rf - tng * cut;
+        const p1 = center + nrm * rf + tng * cut;
+        const nxt = 2 * (k + 1) * half;
+        const nrm2 = vector(cos(nxt), sin(nxt));
+        const tng2 = vector(-sin(nxt), cos(nxt));
+        const p2 = center + nrm2 * rf - tng2 * cut;
+        out = append(out, { "kind" : "line", "start" : p0, "end" : p1 });
+        out = append(out, frcArcSeg(center, p1, p2));
+    }
+    return out;
+}
+
+/** Sharp-cornered regular polygon, for plain hex and square bores. */
+export function frcSharpPolyArcs(sides is number, acrossFlats is ValueWithUnits,
+    center is Vector, fit is ValueWithUnits) returns array
+{
+    const half = (180 / sides) * degree;
+    const rv = (acrossFlats / 2 + fit) / cos(half);
+    var out = [];
+    for (var k = 0; k < sides; k += 1)
+    {
+        const a0 = (2 * k + 1) * half;
+        const a1 = (2 * k + 3) * half;
+        out = append(out, { "kind" : "line", "start" : center + frcPolar(rv, a0),
+                    "end" : center + frcPolar(rv, a1) });
+    }
+    return out;
+}
+
+/** Round bore with a straight keyway, sized to a square key of `keyWidth`. */
+export function frcKeyedArcs(dia is ValueWithUnits, keyWidth is ValueWithUnits,
+    center is Vector, fit is ValueWithUnits) returns array
+{
+    const r = dia / 2 + fit;
+    const w = keyWidth / 2;
+    const depth = r + keyWidth / 2;
+    if (w >= r * 0.95)
+        return frcCircleArcs(dia, center, fit);
+    const x = sqrt(r * r - w * w);
+    const aA = atan2(w, x);
+    const pA = center + vector(x, w);
+    const pB = center + vector(x, -w);
+    const pL = center + vector(-r, 0 * inch);
+    return [{ "kind" : "line", "start" : pB, "end" : center + vector(depth, -w) },
+            { "kind" : "line", "start" : center + vector(depth, -w),
+              "end" : center + vector(depth, w) },
+            { "kind" : "line", "start" : center + vector(depth, w), "end" : pA },
+            { "kind" : "arc", "start" : pA,
+              "mid" : center + frcPolar(r, (aA + 180 * degree) / 2), "end" : pL },
+            { "kind" : "arc", "start" : pL,
+              "mid" : center + frcPolar(r, 270 * degree - aA / 2), "end" : pB }];
+}
+
+/** Plain circle, as two half arcs so it joins the same segment pipeline. */
+export function frcCircleArcs(dia is ValueWithUnits, center is Vector,
+    fit is ValueWithUnits) returns array
+{
+    const r = dia / 2 + fit;
+    const p0 = center + vector(r, 0 * inch);
+    const p1 = center - vector(r, 0 * inch);
+    return [{ "kind" : "arc", "start" : p0, "mid" : center + vector(0 * inch, r), "end" : p1 },
+            { "kind" : "arc", "start" : p1, "mid" : center - vector(0 * inch, r), "end" : p0 }];
+}
+
+/** Closed polyline through sampled points, for the involute spline forms. */
+export function frcPointsToSegments(pts is array) returns array
+{
+    var out = [];
+    for (var i = 0; i < size(pts); i += 1)
+        out = append(out, { "kind" : "line", "start" : pts[i],
+                    "end" : pts[(i + 1) % size(pts)] });
+    return out;
+}
+
+/**
+ * The one entry point every feature calls. Returns the closed outline of the
+ * chosen profile as arc and line segments, already offset by `fit`.
+ */
+export function frcProfileSegments(spec is map, center is Vector) returns array
+{
+    const kind = spec.bore;
+    const fit = spec.fit;
+    if (kind == FRCDriveBore.NONE)
+        return [];
+    if (kind == FRCDriveBore.ROUND || kind == FRCDriveBore.BEARING)
+        return frcCircleArcs(spec.diameter, center, fit);
+    if (kind == FRCDriveBore.HEX)
+        return frcSharpPolyArcs(6, spec.acrossFlats, center, fit);
+    if (kind == FRCDriveBore.SQUARE)
+        return frcSharpPolyArcs(4, spec.acrossFlats, center, fit);
+    if (kind == FRCDriveBore.ROUNDED_HEX)
+        return frcRoundedPolyArcs(6, spec.acrossFlats, spec.cornerDia, center, fit);
+    if (kind == FRCDriveBore.ROUNDED_SQUARE)
+        return frcRoundedPolyArcs(4, spec.acrossFlats, spec.cornerDia, center, fit);
+    if (kind == FRCDriveBore.KEYED)
+        return frcKeyedArcs(spec.diameter, spec.keyWidth, center, fit);
+    if (kind == FRCDriveBore.MAXSPLINE || kind == FRCDriveBore.SPLINEXL)
+        return frcLobedSplineArcs(frcLobedSplineData(kind), center, fit);
+    return frcPointsToSegments(frcInvoluteSplinePoints(spec.spline, center, fit));
+}
+
+/** Largest radius the profile reaches, for clearance and sizing checks. */
+export function frcProfileReach(spec is map) returns ValueWithUnits
+{
+    const segs = frcProfileSegments(spec, vector(0, 0) * inch);
+    var r = 0 * inch;
+    for (var s in segs)
+    {
+        r = max(r, norm(s.start));
+        r = max(r, norm(s.end));
+        if (s.kind == "arc")
+            r = max(r, norm(s.mid));
+    }
+    return r;
+}
+
+/** Draw the profile into an open sketch. */
+export function frcDrawProfile(sk is Sketch, tag is string, segs is array)
+{
+    for (var i = 0; i < size(segs); i += 1)
+    {
+        const s = segs[i];
+        if (s.kind == "line")
+            skLineSegment(sk, tag ~ i, { "start" : s.start, "end" : s.end });
+        else
+            skArc(sk, tag ~ i, { "start" : s.start, "mid" : s.mid, "end" : s.end });
+    }
+}
+
+// ################################ BOUNDS ################################
+
+export const FRC_WALL_BOUNDS = { (meter) : [1e-5, 0.0032, 0.5], (centimeter) : 0.32,
+    (millimeter) : 3.2, (inch) : 0.125, (foot) : 0.010417, (yard) : 0.003472 } as LengthBoundSpec;
+export const FRC_POCKET_BOUNDS = { (meter) : [1e-4, 0.038, 2], (centimeter) : 3.8,
+    (millimeter) : 38, (inch) : 1.5, (foot) : 0.125, (yard) : 0.041667 } as LengthBoundSpec;
+export const FRC_TOOL_BOUNDS = { (meter) : [1e-4, 0.00635, 0.05], (centimeter) : 0.635,
+    (millimeter) : 6.35, (inch) : 0.25, (foot) : 0.020833, (yard) : 0.006944 } as LengthBoundSpec;
+export const FRC_FLOOR_BOUNDS = { (meter) : [1e-5, 0.0016, 0.25], (centimeter) : 0.16,
+    (millimeter) : 1.6, (inch) : 0.0625, (foot) : 0.005208, (yard) : 0.001736 } as LengthBoundSpec;
+export const FRC_EDGEFILLET_BOUNDS = { (meter) : [1e-5, 0.00635, 0.15], (centimeter) : 0.635,
+    (millimeter) : 6.35, (inch) : 0.25, (foot) : 0.020833, (yard) : 0.006944 } as LengthBoundSpec;
+export const FRC_DIA_BOUNDS = { (meter) : [1e-5, 0.0286, 0.5], (centimeter) : 2.86,
+    (millimeter) : 28.6, (inch) : 1.125, (foot) : 0.09375, (yard) : 0.03125 } as LengthBoundSpec;
+export const FRC_COMP_BOUNDS = { (meter) : [0, 0.000203, 0.005], (centimeter) : 0.0203,
+    (millimeter) : 0.203, (inch) : 0.008, (foot) : 0.000667, (yard) : 0.000222 } as LengthBoundSpec;
+export const FRC_DEPTH_BOUNDS = { (meter) : [1e-5, 0.0127, 1], (centimeter) : 1.27,
+    (millimeter) : 12.7, (inch) : 0.5, (foot) : 0.04167, (yard) : 0.01389 } as LengthBoundSpec;
+export const FRC_TUBEWALL_BOUNDS = { (meter) : [2e-4, 0.0015875, 0.02], (centimeter) : 0.15875,
+    (millimeter) : 1.5875, (inch) : 0.0625, (foot) : 0.005208, (yard) : 0.001736 } as LengthBoundSpec;
+export const FRC_PITCH_BOUNDS = { (meter) : [2e-3, 0.0127, 0.3], (centimeter) : 1.27,
+    (millimeter) : 12.7, (inch) : 0.5, (foot) : 0.04167, (yard) : 0.01389 } as LengthBoundSpec;
+export const FRC_ROWPITCH_BOUNDS = { (meter) : [2e-3, 0.0254, 0.3], (centimeter) : 2.54,
+    (millimeter) : 25.4, (inch) : 1.0, (foot) : 0.08333, (yard) : 0.02778 } as LengthBoundSpec;
+export const FRC_FACEWIDTH_BOUNDS = { (meter) : [1e-4, 0.009525, 0.2], (centimeter) : 0.9525,
+    (millimeter) : 9.525, (inch) : 0.375, (foot) : 0.03125, (yard) : 0.010417 } as LengthBoundSpec;
+export const FRC_BOREDIA_BOUNDS = { (meter) : [1e-4, 0.0127, 0.3], (centimeter) : 1.27,
+    (millimeter) : 12.7, (inch) : 0.5, (foot) : 0.04167, (yard) : 0.01389 } as LengthBoundSpec;
+export const FRC_KEY_BOUNDS = { (meter) : [5e-4, 0.003175, 0.05], (centimeter) : 0.3175,
+    (millimeter) : 3.175, (inch) : 0.125, (foot) : 0.010417, (yard) : 0.003472 } as LengthBoundSpec;
+export const FRC_SPLINETEETH_BOUNDS = { (unitless) : [4, 15, 120] } as IntegerBoundSpec;
+export const FRC_MODULE_BOUNDS = { (meter) : [1e-4, 0.0005, 0.01], (centimeter) : 0.05,
+    (millimeter) : 0.5, (inch) : 0.0197, (foot) : 0.00164, (yard) : 0.000547 } as LengthBoundSpec;
+export const FRC_PA_BOUNDS = { (degree) : [10, 30, 45], (radian) : 0.5236 } as AngleBoundSpec;
+export const FRC_SPROCKETTEETH_BOUNDS = { (unitless) : [6, 16, 200] } as IntegerBoundSpec;
+export const FRC_SPOKES_BOUNDS = { (unitless) : [3, 5, 12] } as IntegerBoundSpec;
+export const FRC_SHAFTLEN_BOUNDS = { (meter) : [1e-3, 0.1524, 3], (centimeter) : 15.24,
+    (millimeter) : 152.4, (inch) : 6.0, (foot) : 0.5, (yard) : 0.16667 } as LengthBoundSpec;
+export const FRC_TEETH_BOUNDS = { (unitless) : [5, 18, 300] } as IntegerBoundSpec;
+export const FRC_RACKLEN_BOUNDS = { (meter) : [1e-3, 0.1524, 3], (centimeter) : 15.24,
+    (millimeter) : 152.4, (inch) : 6.0, (foot) : 0.5, (yard) : 0.16667 } as LengthBoundSpec;
+
+// ############################ BORE SELECTION ############################
+
+/**
+ * The bore picker shared by every rotating part. Gear, pulley, sprocket,
+ * spacer and shaft all show the same control, so a team learns it once.
+ */
+export predicate frcBorePredicate(definition is map)
+{
+    annotation { "Name" : "Bore",
+                 "Description" : "MAXSpline is REV, SplineXL is WCP. SplineXS 15T fits the Kraken and NEO 2.0. Falcon 500 is the 14T spline." }
+    definition.bore is FRCDriveBore;
+
+    if (definition.bore == FRCDriveBore.BEARING)
+    {
+        annotation { "Name" : "Bearing outside diameter",
+                     "Description" : "Named by outside diameter, shaft bore beside it. 1.375 in is flanged, 0.750 in a bronze bushing." }
+        definition.bearingOD is FRCBearingOD;
+    }
+    else if (definition.bore == FRCDriveBore.ROUND || definition.bore == FRCDriveBore.KEYED)
+    {
+        annotation { "Name" : "Standard shaft size", "Default" : true }
+        definition.boreStandard is boolean;
+
+        if (definition.boreStandard)
+        {
+            annotation { "Name" : "Shaft size" }
+            definition.shaftSize is FRCShaftSize;
+        }
+        else
+        {
+            annotation { "Name" : "Bore diameter" }
+            isLength(definition.boreDia, FRC_BOREDIA_BOUNDS);
+        }
+
+        if (definition.bore == FRCDriveBore.KEYED)
+        {
+            annotation { "Name" : "Key width" }
+            isLength(definition.keyWidth, FRC_KEY_BOUNDS);
+        }
+    }
+    else if (definition.bore == FRCDriveBore.HEX || definition.bore == FRCDriveBore.SQUARE
+        || definition.bore == FRCDriveBore.ROUNDED_SQUARE)
+    {
+        annotation { "Name" : "Across flats" }
+        definition.hexSize is FRCHexSize;
+
+        if (definition.hexSize == FRCHexSize.HX_CUSTOM)
+        {
+            annotation { "Name" : "Custom across flats" }
+            isLength(definition.hexFlats, FRC_BOREDIA_BOUNDS);
+        }
+        if (definition.bore == FRCDriveBore.ROUNDED_SQUARE)
+        {
+            annotation { "Name" : "Corner circle diameter" }
+            isLength(definition.cornerDia, FRC_BOREDIA_BOUNDS);
+        }
+    }
+    else if (definition.bore == FRCDriveBore.ROUNDED_HEX)
+    {
+        annotation { "Name" : "Across flats",
+                     "Description" : "ThunderHex, named by across flats. The value beside it is the corner circle diameter." }
+        definition.roundedHexSize is FRCRoundedHexSize;
+    }
+    else if (definition.bore == FRCDriveBore.CUSTOM_SPLINE)
+    {
+        annotation { "Name" : "Spline teeth" }
+        isInteger(definition.splineTeeth, FRC_SPLINETEETH_BOUNDS);
+        annotation { "Name" : "Spline module" }
+        isLength(definition.splineModule, FRC_MODULE_BOUNDS);
+        annotation { "Name" : "Spline pressure angle" }
+        isAngle(definition.splinePA, FRC_PA_BOUNDS);
+    }
+
+    if (definition.bore != FRCDriveBore.NONE)
+    {
+        annotation { "Name" : "Fit",
+                     "Description" : "Press stays put once driven in, slip assembles by hand, clearance passes through freely." }
+        definition.boreFit is FRCFitClass;
+    }
+}
+
+/**
+ * Radial allowance for a bore, by family and fit class. The slip numbers are
+ * the ones the vendors themselves cut: WCP bores 1/2 in hex at 0.502 across
+ * flats, reams a 0.500 in round shaft hole at 0.501, and holds both MAXSpline
+ * and SplineXL bores 0.001 in over the shaft on the diameter.
+ *
+ * RADIAL, and every one of those three figures says so. Hex slip is 0.001
+ * here and across flats comes out 0.502, round slip is 0.0005 and the reamed
+ * hole comes out 0.501, spline slip is 0.0005 and the bore comes out 0.001
+ * over the shaft on the diameter. Every profile builder in this file adds it
+ * to a radius or to half the across-flats, so the diameter moves by twice it.
+ *
+ * A caller holding a diameter must therefore double it:
+ *
+ *     seatDia = bearingOD + 2 * frcBoreAllowance(FRCDriveBore.BEARING, fit)
+ *
+ * Adding it to a diameter undoubled halves the fit, which on a pressed
+ * bearing seat is half a thousandth of interference instead of one and is the
+ * difference between a bearing that stays put and one that spins.
+ *
+ * frcFitAllowance, near the top of this file, is the diametral one. It is a
+ * different function for a different job, by process rather than by bore
+ * family, and its numbers are already on the diameter.
+ */
+export function frcBoreAllowance(bore is FRCDriveBore, fit is FRCFitClass) returns ValueWithUnits
+{
+    if (bore == FRCDriveBore.BEARING)
+        return { FRCFitClass.PRESS : -0.0005 * inch, FRCFitClass.SLIP : 0.0005 * inch,
+                 FRCFitClass.CLEARANCE : 0.005 * inch }[fit];
+    if (bore == FRCDriveBore.HEX || bore == FRCDriveBore.SQUARE
+        || bore == FRCDriveBore.ROUNDED_HEX || bore == FRCDriveBore.ROUNDED_SQUARE)
+        return { FRCFitClass.PRESS : 0 * inch, FRCFitClass.SLIP : 0.001 * inch,
+                 FRCFitClass.CLEARANCE : 0.004 * inch }[fit];
+    return { FRCFitClass.PRESS : 0 * inch, FRCFitClass.SLIP : 0.0005 * inch,
+             FRCFitClass.CLEARANCE : 0.003 * inch }[fit];
+}
+
+/** Collect the bore controls into the one map the profile builder reads. */
+export function frcBoreSpec(d is map) returns map
+{
+    const bore = d.bore;
+    var spec = { "bore" : bore, "fit" : 0 * inch, "diameter" : 0.5 * inch,
+            "acrossFlats" : 0.5 * inch, "cornerDia" : 0.541 * inch,
+            "keyWidth" : 0.125 * inch,
+            "spline" : { "teeth" : 15, "module" : 0.5 * millimeter, "pressure" : 30 * degree } };
+    if (bore == FRCDriveBore.NONE)
+        return spec;
+
+    spec.fit = frcBoreAllowance(bore, d.boreFit);
+
+    if (bore == FRCDriveBore.BEARING)
+        spec.diameter = frcBearingOD(d.bearingOD);
+    else if (bore == FRCDriveBore.ROUND || bore == FRCDriveBore.KEYED)
+    {
+        spec.diameter = d.boreStandard ? frcShaftDia(d.shaftSize) : d.boreDia;
+        spec.keyWidth = d.keyWidth;
+    }
+    else if (bore == FRCDriveBore.HEX || bore == FRCDriveBore.SQUARE
+        || bore == FRCDriveBore.ROUNDED_SQUARE)
+    {
+        spec.acrossFlats = (d.hexSize == FRCHexSize.HX_CUSTOM)
+            ? d.hexFlats : frcHexAcrossFlats(d.hexSize);
+        spec.cornerDia = d.cornerDia;
+    }
+    else if (bore == FRCDriveBore.ROUNDED_HEX)
+    {
+        const rh = frcRoundedHexData(d.roundedHexSize);
+        spec.acrossFlats = rh.flats;
+        spec.cornerDia = rh.corner;
+    }
+    else if (bore == FRCDriveBore.CUSTOM_SPLINE)
+        spec.spline = { "teeth" : d.splineTeeth, "module" : d.splineModule,
+                        "pressure" : d.splinePA };
+    else if (bore == FRCDriveBore.SPLINEXS || bore == FRCDriveBore.FALCON)
+        spec.spline = frcInvoluteSplineData(bore);
+
+    return spec;
+}
+
+/** Draw the selected bore into an open sketch at `center`. */
+export function frcAddBore(sk is Sketch, name is string, center is Vector, d is map)
+{
+    const spec = frcBoreSpec(d);
+    if (spec.bore == FRCDriveBore.NONE)
+        return;
+    frcDrawProfile(sk, name, frcProfileSegments(spec, center));
+}
+
+/** Default bore settings, merged into every feature's default map. */
+export const FRC_BORE_DEFAULTS = {
+        bore : FRCDriveBore.HEX, hexSize : FRCHexSize.HX_500, hexFlats : 0.5 * inch,
+        roundedHexSize : FRCRoundedHexSize.RH_500, cornerDia : 0.541 * inch,
+        bearingOD : FRCBearingOD.OD_1125, boreStandard : true,
+        shaftSize : FRCShaftSize.RD_500, boreDia : 0.5 * inch, keyWidth : 0.125 * inch,
+        splineTeeth : 15, splineModule : 0.5 * millimeter, splinePA : 30 * degree,
+        boreFit : FRCFitClass.SLIP
+    };

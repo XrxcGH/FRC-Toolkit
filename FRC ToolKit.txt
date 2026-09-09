@@ -1,0 +1,3228 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+export import(path : "dded4144e0288134dc165861", version : "ebe07263dbad20bf18fab3a6");
+export import(path : "82d221137a697995b51d4734", version : "da6966cb2fb984d08cceddd0");
+export import(path : "e42da2bec9a2fc21b12cfef9", version : "2c023307f8c8f7f9eeda2c9b");
+export import(path : "3d5ff0c41e6a45c71172fd20", version : "0b894f93724ae50c7d27c7f4");
+export import(path : "fb0d3268087ad9cebe72cc52", version : "5929a4d07b0622e7848ce753");
+export import(path : "2f12c72689d2c919bb3f8ae8", version : "ae169947b9a39f0f72036358");
+export import(path : "966de076655fc78513acd1a1", version : "546270e395e97d798a9941b3");
+export import(path : "d81c97cbe5f982298dc3afc8", version : "e996f030585efff37cbe65dd");
+export import(path : "11d3632223b94670c93adc1c", version : "2207b6f1beb74b4bd59c61e5");
+
+// FRC Toolkit: a FeatureScript library for FIRST Robotics Competition.
+// Geometry and standards live in the ten supporting tabs imported above.
+// Every feature in the library is declared below.
+
+export function frcDefinition(definition is map) returns map
+{
+  var d = definition;
+  if (d.partMaterial != undefined)
+    d.material = d.partMaterial;
+  if (d.partLength != undefined)
+    d.length = d.partLength;
+  if (d.beltLength != undefined)
+    d.length = d.beltLength;
+  if (d.cubeSize != undefined)
+    d.size = d.cubeSize;
+  if (d.drivePlane != undefined)
+    d.plane = d.drivePlane;
+  if (d.floorFace != undefined)
+    d.floor = d.floorFace;
+  if (d.flipSide != undefined)
+    d.flip = d.flipSide;
+  if (d.chamferSize != undefined)
+    d.chamfer = d.chamferSize;
+  return d;
+}
+
+export predicate frcWeighPredicate(definition is map)
+{
+  annotation { "Name" : "Group 1 parts", "Filter" : EntityType.BODY && BodyType.SOLID }
+  definition.bodies1 is Query;
+
+  annotation { "Name" : "Group 1 material", "Description" : "Weighs the group at this density. Pool noodle is closed-cell foam, wire bundle a routed wire run." }
+  definition.material1 is FRCMaterial;
+
+  annotation { "Name" : "A second material group", "Default" : false }
+  definition.group2 is boolean;
+
+  if (definition.group2)
+  {
+    annotation { "Name" : "Group 2 parts", "Filter" : EntityType.BODY && BodyType.SOLID }
+    definition.bodies2 is Query;
+
+    annotation { "Name" : "Group 2 material", "Description" : "Weighs the group at this density. Pool noodle is closed-cell foam, wire bundle a routed wire run." }
+    definition.material2 is FRCMaterial;
+  }
+
+  annotation { "Name" : "A third material group", "Default" : false }
+  definition.group3 is boolean;
+
+  if (definition.group3)
+  {
+    annotation { "Name" : "Group 3 parts", "Filter" : EntityType.BODY && BodyType.SOLID }
+    definition.bodies3 is Query;
+
+    annotation { "Name" : "Group 3 material", "Description" : "Weighs the group at this density. Pool noodle is closed-cell foam, wire bundle a routed wire run." }
+    definition.material3 is FRCMaterial;
+  }
+
+  annotation { "Name" : "A fourth material group", "Default" : false }
+  definition.group4 is boolean;
+
+  if (definition.group4)
+  {
+    annotation { "Name" : "Group 4 parts", "Filter" : EntityType.BODY && BodyType.SOLID }
+    definition.bodies4 is Query;
+
+    annotation { "Name" : "Group 4 material", "Description" : "Weighs the group at this density. Pool noodle is closed-cell foam, wire bundle a routed wire run." }
+    definition.material4 is FRCMaterial;
+  }
+
+  annotation { "Name" : "Material for ungrouped parts", "Description" : "Used for every part not picked into a group. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+  definition.partMaterial is FRCMaterial;
+}
+
+export const FRC_WEIGH_DEFAULTS = {
+    partMaterial : FRCMaterial.AL_6061,
+    material1 : FRCMaterial.AL_6061, material2 : FRCMaterial.STEEL,
+    material3 : FRCMaterial.POLYCARB, material4 : FRCMaterial.PLA,
+    group2 : false, group3 : false, group4 : false
+  };
+
+export function frcGroupList(definition is map) returns array
+{
+  const q = [definition.bodies1, definition.bodies2,
+       definition.bodies3, definition.bodies4];
+  const m = [definition.material1, definition.material2,
+       definition.material3, definition.material4];
+  const on = [true, definition.group2, definition.group3, definition.group4];
+  var out = [];
+  for (var i = 0; i < 4; i += 1)
+  {
+    if (on[i] == true && q[i] is Query)
+      out = append(out, { "bodies" : q[i], "material" : m[i] });
+  }
+  return out;
+}
+
+annotation { "Feature Type Name" : "Arm Pivot", "Feature Name Template" : "Arm pivot" }
+export const frcArmPivot = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Pivot plane", "Description" : "Plane or flat face at the pivot. Its normal is the pivot axis and the arm swings in it.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Arm length from the pivot" }
+    isLength(definition.armLength, FRC_ARMLEN_BOUNDS);
+
+    annotation { "Name" : "Arm tube width, along the axis" }
+    isLength(definition.armWidth, FRC_RAILSIZE_BOUNDS);
+
+    annotation { "Name" : "Arm tube height" }
+    isLength(definition.armHeight, FRC_RAILSIZE_BOUNDS);
+
+    annotation { "Name" : "Arm wall thickness", "Description" : "Zero leaves the arm solid." }
+    isLength(definition.armWall, FRC_FRAMEWALL_BOUNDS);
+
+    annotation { "Name" : "Drawn angle from horizontal" }
+    isAngle(definition.armAngle, FRC_ARMANGLE_BOUNDS);
+
+    annotation { "Name" : "Tube behind the pivot" }
+    isLength(definition.pivotInset, FRC_AXISINSET_BOUNDS);
+
+    annotation { "Name" : "Pivot bearing outside diameter", "Description" : "1.125 in is the de facto FRC bearing, 0.875 in the small option, 0.750 in a bronze bushing." }
+    definition.bearingOD is FRCBearingOD;
+
+    annotation { "Name" : "Fit", "Description" : "Press stays put once driven in, slip assembles by hand, clearance passes through freely.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.fit is FRCFitClass;
+
+    annotation { "Name" : "Dead axle", "Default" : true, "Description" : "Axle fixed to the plates, bearings in the arm. Community guides run 3/4 or 7/8 in round tube." }
+    definition.deadAxle is boolean;
+
+    if (definition.deadAxle)
+    {
+      annotation { "Name" : "Axle outside diameter" }
+      isLength(definition.axleOuter, FRC_ROLLERTUBE_BOUNDS);
+    }
+
+    annotation { "Name" : "Side plates", "Default" : true }
+    definition.sidePlates is boolean;
+
+    if (definition.sidePlates)
+    {
+      annotation { "Name" : "Side plate radius" }
+      isLength(definition.sideRadius, FRC_AXISINSET_BOUNDS);
+
+      annotation { "Name" : "Side plate thickness" }
+      isLength(definition.sideThickness, FRC_PLATETHK_BOUNDS);
+
+      annotation { "Name" : "Clearance to the arm" }
+      isLength(definition.plateGap, FRC_STAGEGAP_BOUNDS);
+    }
+
+    annotation { "Name" : "Payload at the end, lb" }
+    isReal(definition.loadLb, FRC_ARMLOAD_BOUNDS);
+
+    annotation { "Name" : "Motors on the pivot" }
+    isInteger(definition.motorCount, FRC_MOTORCOUNT_BOUNDS);
+
+    annotation { "Name" : "Stall torque per motor, N m", "Description" : "At the motor, before the gearing. A NEO is 2.6, a Kraken X60 7.09." }
+    isReal(definition.motorStall, FRC_ARMSTALL_BOUNDS);
+
+    annotation { "Name" : "Total gear ratio to the pivot" }
+    isReal(definition.gearRatio, FRC_ARMRATIO_BOUNDS);
+
+    annotation { "Name" : "Extension limit", "Description" : "Horizontal extension past your frame reference. The rule moved 16, 48, 12, 18, 12 in from 2022 to 2026." }
+    isLength(definition.extensionLimit, FRC_EXTLIMIT_BOUNDS);
+
+    annotation { "Name" : "Pivot to the frame reference", "Description" : "How far the pivot sits inside the point the extension is measured from." }
+    isLength(definition.pivotSetback, FRC_AXISINSET_BOUNDS);
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcArmPivotBuild(context, id, frcDefinition(definition));
+  },
+  {
+    armLength : 30 * inch, armWidth : 1 * inch, armHeight : 2 * inch,
+    armWall : 0.0625 * inch, armAngle : 0 * degree, pivotInset : 1.5 * inch,
+    bearingOD : FRCBearingOD.OD_1125, fit : FRCFitClass.PRESS,
+    deadAxle : true, axleOuter : 0.875 * inch, sidePlates : true,
+    sideRadius : 1.5 * inch, sideThickness : 0.25 * inch, plateGap : 0.125 * inch,
+    loadLb : 5, motorCount : 1, motorStall : 2.6, gearRatio : 100,
+    extensionLimit : 12 * inch, pivotSetback : 6 * inch,
+    partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Battery Mount", "Feature Name Template" : "Battery mount" }
+export const frcBatteryMount = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Plane or flat face to build on", "Description" : "The tray floor sits on it, cavity up.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Battery orientation", "Description" : "The R601 battery is 7.1 x 3.0 x 6.6 in nominal." }
+    definition.batteryPose is FRCBatteryPose;
+
+    annotation { "Name" : "Clearance per side", "Description" : "On top of the 0.1 in the rule already allows the battery." }
+    isLength(definition.batteryClear, FRC_BATCLEAR_BOUNDS);
+
+    annotation { "Name" : "Tray thickness", "Description" : "AndyMark's strap plate, for scale, is 0.09 in 5052." }
+    isLength(definition.trayThickness, FRC_TRAYTHK_BOUNDS);
+
+    annotation { "Name" : "Wall height" }
+    isLength(definition.wallHeight, FRC_TRAYWALL_BOUNDS);
+
+    annotation { "Name" : "Strap slots", "Default" : true, "Description" : "R606 wants the battery held in any orientation, so strap it; walls alone do not pass." }
+    definition.strapSlots is boolean;
+
+    if (definition.strapSlots)
+    {
+      annotation { "Name" : "Strap width" }
+      isLength(definition.strapWidth, FRC_STRAPW_BOUNDS);
+
+      annotation { "Name" : "Slot clearance" }
+      isLength(definition.slotClear, FRC_SLOTCLEAR_BOUNDS);
+    }
+
+    annotation { "Name" : "Lead opening", "Default" : true, "Description" : "A 1.75 in opening in one end wall, sized by eye for an SB50 and 6 AWG leads." }
+    definition.connectorNotch is boolean;
+
+    annotation { "Name" : "Mounting tabs", "Default" : true, "Description" : "Floor tabs past both long walls, holes on the 0.5 in grid." }
+    definition.mountTabs is boolean;
+
+    if (definition.mountTabs)
+    {
+      annotation { "Name" : "Tab width" }
+      isLength(definition.tabWidth, FRC_TABW_BOUNDS);
+
+      annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.holeSize is FRCHoleSize;
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcBatteryMountBuild(context, id, frcDefinition(definition));
+  },
+  {
+    batteryPose : FRCBatteryPose.UPRIGHT, batteryClear : 0.125 * inch,
+    trayThickness : 0.09 * inch, wallHeight : 2.5 * inch, strapSlots : true,
+    strapWidth : 1.5 * inch, slotClear : 0.06 * inch, connectorNotch : true,
+    mountTabs : true, tabWidth : 1 * inch, holeSize : FRCHoleSize.NO10_CLEAR,
+    partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Bearing Block", "Feature Name Template" : "Bearing block" }
+export const frcBearingBlock = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Sketch plane or flat face", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Bearing outside diameter", "Description" : "Named by outside diameter, with the shaft bore beside it. 1.375 in is flanged, 0.750 in a bronze bushing." }
+    definition.bearingOD is FRCBearingOD;
+
+    annotation { "Name" : "Fit", "Description" : "Press stays put once driven in, slip assembles by hand, clearance passes through freely.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.fit is FRCFitClass;
+
+    annotation { "Name" : "Outline" }
+    definition.style is FRCBlockStyle;
+
+    annotation { "Name" : "Size outline from the bearing", "Default" : true }
+    definition.autoSize is boolean;
+
+    if (definition.autoSize)
+    {
+      annotation { "Name" : "Wall around the bearing" }
+      isLength(definition.wall, FRC_BLOCKWALL_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Width" }
+      isLength(definition.blockWidth, FRC_BLOCKSIZE_BOUNDS);
+
+      annotation { "Name" : "Height" }
+      isLength(definition.blockHeight, FRC_BLOCKSIZE_BOUNDS);
+    }
+
+    annotation { "Name" : "Thickness" }
+    isLength(definition.thickness, FRC_WALL_BOUNDS);
+
+    annotation { "Name" : "Bearing seat runs through", "Default" : true }
+    definition.throughSeat is boolean;
+
+    if (!definition.throughSeat)
+    {
+      annotation { "Name" : "Seat depth" }
+      isLength(definition.seatDepth, FRC_WALL_BOUNDS);
+
+      annotation { "Name" : "Clear the shaft", "Description" : "Cuts a shaft clearance hole behind the bearing seat.", "Default" : true }
+      definition.shaftHole is boolean;
+
+      if (definition.shaftHole)
+      {
+        annotation { "Name" : "Shaft clearance diameter" }
+        isLength(definition.shaftClear, FRC_BOREDIA_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Mounting holes" }
+    definition.holes is FRCBlockHoles;
+
+    if (definition.holes != FRCBlockHoles.NONE)
+    {
+      annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.holeSize is FRCHoleSize;
+    }
+
+    if (definition.holes == FRCBlockHoles.GRID)
+    {
+      annotation { "Name" : "Holes along" }
+      isInteger(definition.countX, FRC_COUNT_BOUNDS);
+
+      annotation { "Name" : "Holes across" }
+      isInteger(definition.countY, FRC_COUNT_BOUNDS);
+
+      annotation { "Name" : "Spacing" }
+      isLength(definition.pitch, FRC_ROWPITCH_BOUNDS);
+    }
+    else if (definition.holes == FRCBlockHoles.CIRCLE)
+    {
+      annotation { "Name" : "Bolt circle diameter", "Description" : "On the auto-sized block 1.5 in leaves about 0.09 in of plate inside and outside the holes." }
+      isLength(definition.boltCircle, FRC_BOLTCIRCLE_BOUNDS);
+
+      annotation { "Name" : "Number of holes" }
+      isInteger(definition.boltCount, FRC_BOLTCOUNT_BOUNDS);
+    }
+
+    annotation { "Name" : "Angle" }
+    isAngle(definition.angle, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcBearingBlockBuild(context, id, frcDefinition(definition));
+  },
+  {
+    bearingOD : FRCBearingOD.OD_1125, fit : FRCFitClass.PRESS,
+    style : FRCBlockStyle.SQUARE, autoSize : true, wall : 0.375 * inch,
+    blockWidth : 1.875 * inch, blockHeight : 1.875 * inch, thickness : 0.125 * inch,
+    throughSeat : true, seatDepth : 0.125 * inch, shaftHole : true,
+    shaftClear : 0.53 * inch, holes : FRCBlockHoles.AM_PLATE,
+    holeSize : FRCHoleSize.NO10_CLEAR, countX : 2, countY : 2, pitch : 1 * inch,
+    boltCircle : 1.5 * inch, boltCount : 4, angle : 0 * degree,
+    partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Belt and Chain", "Feature Type Description" : "Solves a timing belt, roller chain or round cord between two shaft centers, and can draw the envelope.", "Feature Name Template" : "Belt and chain" }
+export const frcDrive = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Drive plane", "Description" : "Plane or flat face the drive lies on.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.drivePlane is Query;
+
+    annotation { "Name" : "The two shaft centers", "Filter" : EntityType.VERTEX, "MaxNumberOfPicks" : 2, "UIHint" : ["ALLOW_QUERY_ORDER"] }
+    definition.centers is Query;
+
+    annotation { "Name" : "Drive type" }
+    definition.kind is FRCDriveKind;
+
+    if (definition.kind == FRCDriveKind.BELT)
+    {
+      annotation { "Name" : "Belt profile" }
+      definition.profile is FRCBeltProfile;
+    }
+    else if (definition.kind == FRCDriveKind.CHAIN)
+    {
+      annotation { "Name" : "Chain size" }
+      definition.chain is FRCChainSize;
+    }
+    else
+    {
+      annotation { "Name" : "First pulley diameter", "Description" : "Measured over the cord." }
+      isLength(definition.cordDia1, FRC_DIA_BOUNDS);
+      annotation { "Name" : "Second pulley diameter", "Description" : "Measured over the cord." }
+      isLength(definition.cordDia2, FRC_DIA_BOUNDS);
+    }
+
+    if (definition.kind != FRCDriveKind.CORD)
+    {
+      annotation { "Name" : "Teeth on the first" }
+      isInteger(definition.teeth1, FRC_DRIVETEETH_BOUNDS);
+
+      annotation { "Name" : "Teeth on the second" }
+      isInteger(definition.teeth2, FRC_DRIVETEETH_BOUNDS);
+
+      annotation { "Name" : "What to solve for", "Description" : "Length means the belt, chain or cord. Spacing means the center distance." }
+      definition.solve is FRCDriveSolve;
+
+      if (definition.solve == FRCDriveSolve.FROM_LENGTH)
+      {
+        annotation { "Name" : "Belt teeth or chain links" }
+        isInteger(definition.beltLength, FRC_BELTLEN_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Show the drive envelope", "Default" : false }
+    definition.showPath is boolean;
+
+    if (definition.showPath)
+    {
+      annotation { "Name" : "Belt or chain width" }
+      isLength(definition.width, FRC_FACEWIDTH_BOUNDS);
+    }
+  }
+  {
+    frcDriveBuild(context, id, frcDefinition(definition));
+  },
+  {
+    kind : FRCDriveKind.BELT, profile : FRCBeltProfile.HTD_5,
+    chain : FRCChainSize.CH25, cordDia1 : 1.625 * inch, cordDia2 : 1.625 * inch,
+    teeth1 : 24, teeth2 : 24, solve : FRCDriveSolve.FROM_SPACING, beltLength : 100,
+    showPath : false, width : 0.375 * inch
+  });
+
+annotation { "Feature Type Name" : "Belt Path", "Feature Type Description" : "Runs a timing belt, roller chain or round cord around any number of picked pulleys, and draws the path and its envelope.", "Feature Name Template" : "Belt path" }
+export const frcBeltPath = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Drive plane", "Description" : "Plane or flat face the drive lies on.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.drivePlane is Query;
+
+    annotation { "Name" : "Pulley circles", "Description" : "Pick them in the order the belt runs.", "Filter" : EntityType.EDGE && GeometryType.CIRCLE, "UIHint" : ["ALLOW_QUERY_ORDER"] }
+    definition.pulleys is Query;
+
+    annotation { "Name" : "Picked at the pitch circle", "Default" : true, "Description" : "Clear this if you picked the outside edge of each pulley instead." }
+    definition.atPitch is boolean;
+
+    annotation { "Name" : "Drive type" }
+    definition.kind is FRCDriveKind;
+
+    if (definition.kind == FRCDriveKind.BELT)
+    {
+      annotation { "Name" : "Belt profile" }
+      definition.profile is FRCBeltProfile;
+    }
+    else if (definition.kind == FRCDriveKind.CHAIN)
+    {
+      annotation { "Name" : "Chain size" }
+      definition.chain is FRCChainSize;
+    }
+
+    // One boolean, and in frcBeltPathBuild it gates the path sketch and the
+    // envelope together. The label said envelope only and defaulted off, so a
+    // feature named Belt Path drew no path at its defaults. Naming both and
+    // defaulting on is what this tab can fix on its own; splitting them needs
+    // a second boolean in the builder.
+    annotation { "Name" : "Draw the path and its envelope", "Default" : true }
+    definition.showPath is boolean;
+
+    if (definition.showPath)
+    {
+      annotation { "Name" : "Belt or chain width" }
+      isLength(definition.width, FRC_FACEWIDTH_BOUNDS);
+    }
+  }
+  {
+    frcBeltPathBuild(context, id, frcDefinition(definition));
+  },
+  {
+    atPitch : true, kind : FRCDriveKind.BELT, profile : FRCBeltProfile.HTD_5,
+    chain : FRCChainSize.CH25, showPath : true, width : 0.375 * inch
+  });
+
+annotation { "Feature Type Name" : "Bolt Pattern", "Feature Name Template" : "Bolt pattern" }
+export const frcPattern = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Flat face to drill", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+    definition.face is Query;
+
+    annotation { "Name" : "Start point", "Description" : "Leave it empty to start the pattern at the origin of the face you picked.", "Filter" : EntityType.VERTEX, "MaxNumberOfPicks" : 1 }
+    definition.origin is Query;
+
+    annotation { "Name" : "Pattern" }
+    definition.kind is FRCPatternKind;
+
+    annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.holeSize is FRCHoleSize;
+
+    if (definition.kind == FRCPatternKind.CIRCLE)
+    {
+      annotation { "Name" : "Bolt circle diameter" }
+      isLength(definition.circleDia, FRC_DIA_BOUNDS);
+
+      annotation { "Name" : "Number of holes" }
+      isInteger(definition.circleCount, FRC_COUNT_BOUNDS);
+
+      annotation { "Name" : "Add a pilot bore in the middle", "Default" : false }
+      definition.pilot is boolean;
+
+      if (definition.pilot)
+      {
+        annotation { "Name" : "Pilot diameter", "Description" : "The finished bore. 0.755 in is the pilot the Falcon and NEO drawings give, over a 0.750 in boss." }
+        isLength(definition.pilotDia, FRC_DIA_BOUNDS);
+      }
+    }
+    else
+    {
+      annotation { "Name" : "Holes along" }
+      isInteger(definition.countX, FRC_COUNT_BOUNDS);
+
+      annotation { "Name" : "Spacing along" }
+      isLength(definition.pitchX, FRC_ROWPITCH_BOUNDS);
+
+      if (definition.kind == FRCPatternKind.GRID)
+      {
+        annotation { "Name" : "Holes across" }
+        isInteger(definition.countY, FRC_COUNT_BOUNDS);
+
+        annotation { "Name" : "Spacing across" }
+        isLength(definition.pitchY, FRC_ROWPITCH_BOUNDS);
+      }
+    }
+
+    // One field, two meanings, because frcPatternBuild spends it two ways: it
+    // rotates the u and v axes for a grid or a row, and it is the angular
+    // position of the first hole on a bolt circle.
+    annotation { "Name" : "Angle", "Description" : "Turns a grid or a row about the start point. On a bolt circle it sets where the first hole sits." }
+    isAngle(definition.angle, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+
+    annotation { "Name" : "Through all", "Default" : true }
+    definition.throughAll is boolean;
+
+    if (!definition.throughAll)
+    {
+      annotation { "Name" : "Depth" }
+      isLength(definition.depth, FRC_DEPTH_BOUNDS);
+    }
+  }
+  {
+    frcPatternBuild(context, id, frcDefinition(
+          definition.kind == FRCPatternKind.CIRCLE
+          ? mergeMaps(definition, { "countX" : definition.circleCount })
+          : definition));
+  },
+  {
+    kind : FRCPatternKind.GRID, holeSize : FRCHoleSize.NO10_CLEAR,
+    circleDia : 2 * inch, pilot : false, pilotDia : 0.755 * inch,
+    circleCount : 6, countX : 4, countY : 3, pitchX : 0.5 * inch, pitchY : 0.5 * inch,
+    angle : 0 * degree, throughAll : true, depth : 0.25 * inch
+  });
+
+annotation { "Feature Type Name" : "Bumper", "Feature Name Template" : "Bumper" }
+export const frcBumper = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Robot perimeter face", "Description" : "The face whose outline is the robot perimeter.", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+    definition.perimeter is Query;
+
+    annotation { "Name" : "Face height above the floor" }
+    isLength(definition.faceHeight, FRC_STANDOFF_BOUNDS);
+
+    annotation { "Name" : "Bumper bottom above the floor" }
+    isLength(definition.bumperBottom, FRC_STANDOFF_BOUNDS);
+
+    annotation { "Name" : "Bumper height" }
+    isLength(definition.bumperHeight, FRC_BUMPHEIGHT_BOUNDS);
+
+    annotation { "Name" : "What to create" }
+    definition.output is FRCBumperOutput;
+
+    annotation { "Name" : "Backing thickness" }
+    isLength(definition.backingThickness, FRC_WALL_BOUNDS);
+
+    annotation { "Name" : "Backing material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.backingMaterial is FRCMaterial;
+
+    // Shown in every mode. Backing only builds no padding, but the report
+    // still adds this to the backing to state how far the finished bumper
+    // stands out, and R403 and R402-A are both checked against it. Hiding
+    // it here told a team it passed a rule on a number it could not see.
+    annotation { "Name" : "Padding depth", "Description" : "Backing only builds none, but the rule checks still measure the finished bumper against it." }
+    isLength(definition.padDepth, FRC_PAD_BOUNDS);
+
+    if (definition.output == FRCBumperOutput.ALL)
+    {
+      annotation { "Name" : "Cover thickness" }
+      isLength(definition.coverThickness, FRC_COMP_BOUNDS);
+    }
+
+    annotation { "Name" : "Frame perimeter limit", "Description" : "The bare frame outline measured here, before the bumper band. R104 sets 120 in over the bumpers in 2026." }
+    isLength(definition.perimeterLimit, FRC_PERIMETER_BOUNDS);
+  }
+  {
+    frcBumperBuild(context, id, frcDefinition(definition));
+  },
+  {
+    faceHeight : 5 * inch, bumperBottom : 1.25 * inch, bumperHeight : 5 * inch,
+    output : FRCBumperOutput.BACK_PAD, backingThickness : 0.75 * inch,
+    backingMaterial : FRCMaterial.PLYWOOD, padDepth : 2.5 * inch,
+    coverThickness : 0.03 * inch, perimeterLimit : 110 * inch
+  });
+
+annotation { "Feature Type Name" : "Center of Gravity", "Feature Name Template" : "Center of gravity" }
+export const frcCenterOfGravity = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    frcWeighPredicate(definition);
+
+    annotation { "Name" : "Floor the robot stands on", "Description" : "A face or mate connector whose normal points up out of the carpet. Leave it empty to use the top plane.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.floorFace is Query;
+
+    annotation { "Name" : "Track, across the robot" }
+    isLength(definition.track, FRC_TRACK_BOUNDS);
+
+    annotation { "Name" : "Wheelbase, along the robot" }
+    isLength(definition.wheelbase, FRC_TRACK_BOUNDS);
+
+    annotation { "Name" : "Tread grip", "Description" : "Carpet: Colson 0.90, REV molded 0.87, slick neoprene 0.98, treaded neoprene 1.43, spikes 1.48, nitrile 1.54." }
+    isReal(definition.mu, FRC_MU_BOUNDS);
+
+    annotation { "Name" : "Allowance, lb", "Description" : "Wiring, fasteners, tape, electronics and the odd spare. Ten pounds is a common starting guess." }
+    isReal(definition.allowanceLb, FRC_ALLOWANCE_BOUNDS);
+
+    annotation { "Name" : "Allowance height above floor" }
+    isLength(definition.allowanceHeight, FRC_STANDOFF_BOUNDS);
+
+    annotation { "Name" : "Bumper set, lb" }
+    isReal(definition.bumperLb, FRC_BUMPERMASS_BOUNDS);
+
+    annotation { "Name" : "Bumper height above the floor" }
+    isLength(definition.bumperHeight, FRC_STANDOFF_BOUNDS);
+
+    annotation { "Name" : "Battery, lb", "Description" : "R601 puts the battery between 11.0 and 14.5 lb. It is outside both weight limits but still sits on the robot." }
+    isReal(definition.batteryLb, FRC_BUMPERMASS_BOUNDS);
+
+    annotation { "Name" : "Battery height above the floor" }
+    isLength(definition.batteryHeight, FRC_STANDOFF_BOUNDS);
+
+    annotation { "Name" : "Printed infill, percent", "Description" : "What your slicer is set to. A printed part is weighed at a reduced density from this and the wall count." }
+    isReal(definition.infillPct, FRC_INFILL_BOUNDS);
+
+    annotation { "Name" : "Printed wall count", "Description" : "Perimeters per side, as the slicer counts them. The shell is estimated from the part's surface area." }
+    isInteger(definition.wallCount, FRC_WALLS_BOUNDS);
+
+    annotation { "Name" : "Point at the center of gravity", "Description" : "Places a point in the model at the computed center of gravity.", "Default" : true }
+    definition.showPoint is boolean;
+  }
+  {
+    frcCenterOfGravityBuild(context, id, frcDefinition(
+          mergeMaps(definition, { "groups" : frcGroupList(definition) })));
+  },
+  mergeMaps(FRC_WEIGH_DEFAULTS, {
+      track : 23 * inch, wheelbase : 23 * inch, mu : 1.1,
+      allowanceLb : 10, allowanceHeight : 6 * inch,
+      bumperLb : 15, bumperHeight : 4.125 * inch,
+      batteryLb : 12.5, batteryHeight : 3 * inch,
+      infillPct : 20, wallCount : 3,
+      showPoint : true
+    }));
+
+annotation { "Feature Type Name" : "Climber", "Feature Name Template" : "Climber" }
+export const frcClimber = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Plane or flat face at the base", "Description" : "The climber extends along this plane's normal.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Vendor kit ladder", "Default" : true, "Description" : "AndyMark Climber in a Box and ThriftyBot telescoping kit: 2 in square into 1.5 into 1, all at 1/16 in wall." }
+    definition.vendorKit is boolean;
+
+    annotation { "Name" : "Moving stages", "Description" : "The kits come in one and two stage forms." }
+    isInteger(definition.stageCount, FRC_CLIMBSTAGE_BOUNDS);
+
+    if (definition.vendorKit == false)
+    {
+      annotation { "Name" : "Base tube square" }
+      isLength(definition.baseSquare, FRC_CLIMBTUBE_BOUNDS);
+
+      annotation { "Name" : "Size step per stage" }
+      isLength(definition.sizeStep, FRC_CLIMBSTEP_BOUNDS);
+
+      annotation { "Name" : "Wall thickness", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      isLength(definition.wallThickness, FRC_TUBEWALL_BOUNDS);
+    }
+
+    annotation { "Name" : "Travel per stage", "Description" : "AndyMark publishes 24.5 in as the kit maximum." }
+    isLength(definition.stageTravel, FRC_CLIMBTRAVEL_BOUNDS);
+
+    annotation { "Name" : "Tube length" }
+    isLength(definition.tubeLength, FRC_STAGELEN_BOUNDS);
+
+    annotation { "Name" : "Drawn pose", "Description" : "0 is retracted, 1 is extended." }
+    isReal(definition.pose, FRC_POSE_BOUNDS);
+
+    annotation { "Name" : "Height limit", "Description" : "The height cap moves with the season, so you set it here." }
+    isLength(definition.heightLimit, FRC_HEIGHTLIMIT_BOUNDS);
+
+    annotation { "Name" : "Draw a hook", "Default" : true, "Description" : "A generic open hook. The 2026 kit ships two hook styles but dimensions neither." }
+    definition.makeHook is boolean;
+
+    if (definition.makeHook)
+    {
+      annotation { "Name" : "Bar the hook grabs", "Description" : "The bar diameter is game specific, so you set it here." }
+      isLength(definition.barDiameter, FRC_BAR_BOUNDS);
+
+      annotation { "Name" : "Hook thickness" }
+      isLength(definition.hookThickness, FRC_PLATETHK_BOUNDS);
+    }
+
+    annotation { "Name" : "Weight on this climber, lb", "Description" : "The share of robot weight this climber carries. Two climbers sharing a level robot carry half each." }
+    isReal(definition.climbLoad, FRC_CLIMBLOAD_BOUNDS);
+
+    annotation { "Name" : "Ropes on the winch" }
+    isInteger(definition.ropes, FRC_ROPES_BOUNDS);
+
+    annotation { "Name" : "Winch drum diameter" }
+    isLength(definition.drumDiameter, FRC_DRUM_BOUNDS);
+
+    annotation { "Name" : "Motors on the winch" }
+    isInteger(definition.motorCount, FRC_MOTORCOUNT_BOUNDS);
+
+    annotation { "Name" : "Stall torque per motor, N m", "Description" : "At the motor, before the gearing. A NEO is 2.6, a Kraken X60 7.09." }
+    isReal(definition.motorStall, FRC_ARMSTALL_BOUNDS);
+
+    annotation { "Name" : "Total gear ratio to the drum", "Description" : "The AndyMark winch mounts any planetary with a 2 in bolt circle." }
+    isReal(definition.gearRatio, FRC_ARMRATIO_BOUNDS);
+
+    annotation { "Name" : "Constant force springs" }
+    isInteger(definition.springCount, FRC_SPRINGN_BOUNDS);
+
+    annotation { "Name" : "Spring force each, lb", "Description" : "AndyMark markets the kit spring at 3.5 lb; the am-4657 detail page lists 3.29 lbf." }
+    isReal(definition.springForce, FRC_SPRINGF_BOUNDS);
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcClimberBuild(context, id, frcDefinition(definition));
+  },
+  {
+    vendorKit : true, stageCount : 2, baseSquare : 2 * inch, sizeStep : 0.5 * inch,
+    wallThickness : 0.0625 * inch, stageTravel : 24.5 * inch, tubeLength : 28 * inch,
+    pose : 0, heightLimit : 78 * inch, makeHook : true, barDiameter : 1.66 * inch,
+    hookThickness : 0.25 * inch, climbLoad : 130, ropes : 1, drumDiameter : 1 * inch,
+    motorCount : 1, motorStall : 2.6, gearRatio : 45, springCount : 2,
+    springForce : 3.5, partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "COTS Pattern", "Feature Name Template" : "COTS pattern" }
+export const frcCots = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Flat face to drill", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+    definition.face is Query;
+
+    annotation { "Name" : "Where to place it", "Description" : "Leave it empty to place it at the origin of the face you picked.", "Filter" : EntityType.VERTEX, "MaxNumberOfPicks" : 1 }
+    definition.anchor is Query;
+
+    annotation { "Name" : "Pattern" }
+    definition.pattern is FRCCotsPattern;
+
+    // Two independent questions, so two separate ifs. A count is offered for
+    // the two faces whose source publishes none, and the bore controls for
+    // every pattern that has a bore. The Sport gearbox is both, and while
+    // these were one chained if it got neither right: the dialog showed it a
+    // count the builder ignored and hid a bore the builder cut anyway.
+    if (definition.pattern == FRCCotsPattern.CIM_FACE || definition.pattern == FRCCotsPattern.GEARBOX_SPORT)
+    {
+      annotation { "Name" : "Number of holes" }
+      isInteger(definition.holes, FRC_COUNT_BOUNDS);
+
+      annotation { "Name" : "First hole at" }
+      isAngle(definition.startAngle, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+    }
+
+    if (definition.pattern != FRCCotsPattern.MK4 && definition.pattern != FRCCotsPattern.CIM_FACE)
+    {
+      annotation { "Name" : "Cut the bore as well", "Default" : true }
+      definition.cutBore is boolean;
+
+      if (definition.cutBore)
+      {
+        annotation { "Name" : "Fit", "Description" : "Press stays put once driven in, slip assembles by hand, clearance passes through freely.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+        definition.fit is FRCFitClass;
+      }
+    }
+
+    annotation { "Name" : "Angle" }
+    isAngle(definition.angle, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+  }
+  {
+    frcCotsBuild(context, id, frcDefinition(definition));
+  },
+  {
+    pattern : FRCCotsPattern.MK4, holes : 6, startAngle : 0 * degree,
+    cutBore : true, fit : FRCFitClass.PRESS, angle : 0 * degree
+  });
+
+annotation { "Feature Type Name" : "Design Constants", "Feature Type Description" : "Sets the sizes a whole robot is dimensioned from as variables. Put it at the top of the Part Studio.", "Feature Name Template" : "Constants" }
+export const frcConstants = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Tube size" }
+    isLength(definition.tubeSize, FRC_DIA_BOUNDS);
+
+    annotation { "Name" : "Tube wall thickness" }
+    isLength(definition.tubeWall, FRC_TUBEWALL_BOUNDS);
+
+    annotation { "Name" : "Hole spacing" }
+    isLength(definition.holeSpacing, FRC_ROWPITCH_BOUNDS);
+
+    annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name." }
+    definition.fastenerHole is FRCHoleSize;
+
+    annotation { "Name" : "Bearing outside diameter", "Description" : "Named by outside diameter, with the shaft bore beside it. 1.375 in is flanged, 0.750 in a bronze bushing." }
+    definition.bearingOD is FRCBearingOD;
+
+    annotation { "Name" : "Shaft size" }
+    definition.hexSize is FRCHexSize;
+
+    annotation { "Name" : "Plate thickness", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.plateThickness, FRC_WALL_BOUNDS);
+
+    annotation { "Name" : "Gusset thickness", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.gussetThickness, FRC_WALL_BOUNDS);
+
+    annotation { "Name" : "End mill diameter" }
+    isLength(definition.endMill, FRC_TOOL_BOUNDS);
+
+    annotation { "Name" : "Custom part colors", "Description" : "Paints parts by what they are rather than what they are made of. Off leaves every part its material color.", "Default" : false }
+    definition.customColors is boolean;
+
+    if (definition.customColors)
+    {
+      annotation { "Name" : "Plates and gussets" }
+      definition.paintPlate is FRCTeamPaint;
+
+      annotation { "Name" : "Tube and structure" }
+      definition.paintStructure is FRCTeamPaint;
+
+      annotation { "Name" : "Gears, sprockets, pulleys" }
+      definition.paintDrive is FRCTeamPaint;
+
+      annotation { "Name" : "Shafts and spacers" }
+      definition.paintShaft is FRCTeamPaint;
+
+      annotation { "Name" : "Wheels and rollers" }
+      definition.paintWheel is FRCTeamPaint;
+
+      annotation { "Name" : "Bearing blocks" }
+      definition.paintBearing is FRCTeamPaint;
+
+      annotation { "Name" : "Bumpers" }
+      definition.paintBumper is FRCTeamPaint;
+
+      annotation { "Name" : "Pneumatics" }
+      definition.paintPneumatic is FRCTeamPaint;
+
+      annotation { "Name" : "Electronics and wiring" }
+      definition.paintElectrical is FRCTeamPaint;
+
+      annotation { "Name" : "Game piece contact" }
+      definition.paintGamepiece is FRCTeamPaint;
+
+      annotation { "Name" : "Envelopes and reference" }
+      definition.paintReference is FRCTeamPaint;
+
+      annotation { "Name" : "Layout copies" }
+      definition.paintLayout is FRCTeamPaint;
+
+      annotation { "Name" : "Everything else" }
+      definition.paintOther is FRCTeamPaint;
+    }
+  }
+  {
+    frcConstantsBuild(context, id, frcDefinition(definition));
+  },
+  {
+    tubeSize : 2 * inch, tubeWall : 0.0625 * inch, holeSpacing : 0.5 * inch,
+    fastenerHole : FRCHoleSize.NO10_CLEAR, bearingOD : FRCBearingOD.OD_1125,
+    hexSize : FRCHexSize.HX_500, plateThickness : 0.125 * inch,
+    gussetThickness : 0.125 * inch, endMill : 0.25 * inch, 
+    customColors : false, paintPlate : FRCTeamPaint.DEFAULT, paintStructure : FRCTeamPaint.DEFAULT, paintDrive : FRCTeamPaint.DEFAULT, paintShaft : FRCTeamPaint.DEFAULT, paintWheel : FRCTeamPaint.DEFAULT, paintBearing : FRCTeamPaint.DEFAULT, paintBumper : FRCTeamPaint.DEFAULT, paintPneumatic : FRCTeamPaint.DEFAULT, paintElectrical : FRCTeamPaint.DEFAULT, paintGamepiece : FRCTeamPaint.DEFAULT, paintReference : FRCTeamPaint.DEFAULT, paintLayout : FRCTeamPaint.DEFAULT, paintOther : FRCTeamPaint.DEFAULT
+  });
+
+annotation { "Feature Type Name" : "Dogbone Corners", "Feature Name Template" : "Dogbones" }
+export const frcDogbone = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Flat face carrying the pockets", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+    definition.faces is Query;
+
+    annotation { "Name" : "End mill diameter", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.toolDiameter, FRC_TOOL_BOUNDS);
+  }
+  {
+    frcDogboneBuild(context, id, frcDefinition(definition));
+  },
+  {
+    toolDiameter : 0.25 * inch
+  });
+
+annotation { "Feature Type Name" : "Drivetrain", "Feature Name Template" : "Drivetrain" }
+export const frcDrivetrain = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Motors on the drivetrain" }
+    isInteger(definition.motorCount, FRC_MOTORCOUNT_BOUNDS);
+
+    annotation { "Name" : "Free speed per motor, rpm", "Description" : "A NEO is 5880, a Kraken X60 6000." }
+    isReal(definition.freeSpeed, FRC_MOTORFREE_BOUNDS);
+
+    annotation { "Name" : "Stall torque per motor, N m", "Description" : "At the motor, before the gearing. A NEO is 2.6, a Kraken X60 7.09." }
+    isReal(definition.motorStall, FRC_ARMSTALL_BOUNDS);
+
+    annotation { "Name" : "Stall current per motor, A", "Description" : "A NEO is 105, a Kraken X60 366." }
+    isReal(definition.stallCurrent, FRC_AMPS_BOUNDS);
+
+    annotation { "Name" : "Current limit per motor, A", "Description" : "Whatever your motor controllers are set to." }
+    isReal(definition.currentLimit, FRC_AMPS_BOUNDS);
+
+    annotation { "Name" : "Total gear ratio to the wheel" }
+    isReal(definition.gearRatio, FRC_UPSTREAM_BOUNDS);
+
+    annotation { "Name" : "Wheel outside diameter" }
+    isLength(definition.wheelOuter, FRC_WHEELOD_BOUNDS);
+
+    annotation { "Name" : "Weight with bumpers, lb", "Description" : "Robot weight as it competes, bumpers and battery included." }
+    isReal(definition.robotWeight, FRC_CLIMBLOAD_BOUNDS);
+
+    annotation { "Name" : "Tread grip", "Description" : "Carpet: Colson 0.90, REV molded 0.87, slick neoprene 0.98, treaded neoprene 1.43, spikes 1.48, nitrile 1.54." }
+    isReal(definition.mu, FRC_MU_BOUNDS);
+
+    annotation { "Name" : "Drivetrain efficiency, percent", "Description" : "Around 85 to 90 for a gear or belt drive, and it is a rule of thumb." }
+    isReal(definition.driveEff, FRC_EFF_BOUNDS);
+
+    annotation { "Name" : "Sprint distance to time" }
+    isLength(definition.sprintDist, FRC_SPRINT_BOUNDS);
+  }
+  {
+    frcDrivetrainBuild(context, id, frcDefinition(definition));
+  },
+  {
+    motorCount : 4, freeSpeed : 5880, motorStall : 2.6, stallCurrent : 105,
+    currentLimit : 60, gearRatio : 6.75, wheelOuter : 4 * inch, robotWeight : 130,
+    mu : 1.1, driveEff : 85, sprintDist : 180 * inch
+  });
+
+annotation { "Feature Type Name" : "Electronics", "Feature Name Template" : "Electronics" }
+export const frcElectronics = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Plane or flat face to mount on", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Component" }
+    definition.component is FRCComponent;
+
+    if (definition.component == FRCComponent.CUSTOM)
+    {
+      annotation { "Name" : "Length" }
+      isLength(definition.customLength, FRC_DEPTH_BOUNDS);
+      annotation { "Name" : "Width" }
+      isLength(definition.customWidth, FRC_DEPTH_BOUNDS);
+      annotation { "Name" : "Height" }
+      isLength(definition.customHeight, FRC_DEPTH_BOUNDS);
+      annotation { "Name" : "Four corner holes", "Default" : true }
+      definition.customPattern is boolean;
+      if (definition.customPattern)
+      {
+        annotation { "Name" : "Hole spacing along the length" }
+        isLength(definition.customX, FRC_DEPTH_BOUNDS);
+        annotation { "Name" : "Hole spacing across the width" }
+        isLength(definition.customY, FRC_DEPTH_BOUNDS);
+        annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name." }
+        definition.customHole is FRCHoleSize;
+      }
+    }
+
+    annotation { "Name" : "What to create" }
+    definition.output is FRCElecOutput;
+
+    annotation { "Name" : "Offset along the face" }
+    isLength(definition.offsetX, FRC_OFFSET_BOUNDS);
+
+    annotation { "Name" : "Offset across the face" }
+    isLength(definition.offsetY, FRC_OFFSET_BOUNDS);
+
+    annotation { "Name" : "Angle" }
+    isAngle(definition.angle, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+
+    annotation { "Name" : "Cable tie slots", "Description" : "Cut where the part has no holes to tie to.", "Default" : true }
+    definition.tieSlots is boolean;
+
+    if (definition.tieSlots)
+    {
+      annotation { "Name" : "Cable tie size", "Description" : "The value in parentheses is the strap width.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.tieSize is FRCTieSize;
+    }
+
+    annotation { "Name" : "Pilot bore for motor faces", "Default" : true }
+    definition.pilotBore is boolean;
+
+    if (definition.output != FRCElecOutput.HOLES)
+    {
+      annotation { "Name" : "Use the vendor clearance", "Default" : true }
+      definition.useVendorClearance is boolean;
+
+      if (!definition.useVendorClearance)
+      {
+        annotation { "Name" : "Clearance around the part" }
+        isLength(definition.clearance, FRC_DEPTH_BOUNDS);
+      }
+    }
+  }
+  {
+    frcElectronicsBuild(context, id, frcDefinition(definition));
+  },
+  {
+    component : FRCComponent.ROBORIO, output : FRCElecOutput.HOLES,
+    customLength : 3 * inch, customWidth : 2 * inch, customHeight : 1 * inch,
+    customPattern : true, customX : 2.5 * inch, customY : 1.5 * inch,
+    customHole : FRCHoleSize.NO10_CLEAR,
+    offsetX : 0 * inch, offsetY : 0 * inch, angle : 0 * degree,
+    tieSlots : true, tieSize : FRCTieSize.TIE_190, pilotBore : true,
+    useVendorClearance : true, clearance : 0.5 * inch
+  });
+
+annotation { "Feature Type Name" : "Elevator", "Feature Name Template" : "Elevator" }
+export const frcElevator = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Elevator bottom", "Description" : "Plane or flat face at the bottom of the elevator. The elevator is built along its normal.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "How the stages are arranged" }
+    definition.style is FRCElevatorStyle;
+
+    annotation { "Name" : "Moving stages", "Description" : "The base is not counted." }
+    isInteger(definition.stageCount, FRC_STAGECOUNT_BOUNDS);
+
+    annotation { "Name" : "How to size the stages" }
+    definition.sizing is FRCElevatorSizing;
+
+    if (definition.sizing == FRCElevatorSizing.FROM_TRAVEL)
+    {
+      annotation { "Name" : "Total travel" }
+      isLength(definition.totalTravel, FRC_TRAVEL_TOTAL_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Stage length" }
+      isLength(definition.stageLength, FRC_STAGELEN_BOUNDS);
+    }
+
+    annotation { "Name" : "Overlap kept at full extension", "Description" : "What stays inside the parent stage. A fifth of the stage length is the usual floor, and it is a rule of thumb." }
+    isLength(definition.stageOverlap, FRC_OVERLAP_BOUNDS);
+
+    annotation { "Name" : "Base as long as a stage", "Default" : true }
+    definition.matchBase is boolean;
+
+    if (!definition.matchBase)
+    {
+      annotation { "Name" : "Base length" }
+      isLength(definition.baseLength, FRC_STAGELEN_BOUNDS);
+    }
+
+    annotation { "Name" : "Section width", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.sectionWidth, FRC_SECTION_BOUNDS);
+
+    annotation { "Name" : "Section height", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.sectionHeight, FRC_SECTION_BOUNDS);
+
+    annotation { "Name" : "Wall thickness", "Description" : "Zero leaves every stage solid.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.wallThickness, FRC_FRAMEWALL_BOUNDS);
+
+    annotation { "Name" : "Clearance between stages", "Description" : "Per side nested, across the stack side by side. 0.25 in REV MAXLift, 0.5 in ThriftyBot, 0.75 in REV-20-2051." }
+    isLength(definition.stageGap, FRC_STAGEGAP_BOUNDS);
+
+    annotation { "Name" : "Rigging" }
+    definition.rigging is FRCElevatorRig;
+
+    annotation { "Name" : "Carriage load, lb", "Description" : "What the carriage carries, for the drive load line. Zero leaves that line out." }
+    isReal(definition.carriageLoad, FRC_CARRIAGELOAD_BOUNDS);
+
+    annotation { "Name" : "Height limit", "Description" : "Whatever this season's rules allow, or your own packaging limit." }
+    isLength(definition.heightLimit, FRC_HEIGHTLIMIT_BOUNDS);
+
+    annotation { "Name" : "Drawn pose", "Description" : "0 is retracted, 1 is extended." }
+    isReal(definition.pose, FRC_POSE_BOUNDS);
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcElevatorBuild(context, id, frcDefinition(definition));
+  },
+  {
+    style : FRCElevatorStyle.NESTED, stageCount : 2,
+    sizing : FRCElevatorSizing.FROM_TRAVEL, totalTravel : 45 * inch,
+    stageLength : 28 * inch, stageOverlap : 6 * inch, matchBase : true,
+    baseLength : 28 * inch, sectionWidth : 2 * inch, sectionHeight : 2 * inch,
+    wallThickness : 0.0625 * inch, stageGap : 0.0625 * inch,
+    rigging : FRCElevatorRig.CASCADE, carriageLoad : 15,
+    heightLimit : 78 * inch, pose : 0, partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Extrude Individual", "Feature Name Template" : "Extrude individual" }
+export const frcExtrudeIndividual = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Regions or faces to extrude", "Filter" : EntityType.FACE }
+    definition.regions is Query;
+
+    annotation { "Name" : "Depth" }
+    isLength(definition.depth, FRC_DEPTH_BOUNDS);
+
+    annotation { "Name" : "Direction" }
+    definition.side is FRCExtrudeSide;
+
+    if (definition.side == FRCExtrudeSide.TWO)
+    {
+      annotation { "Name" : "Depth the other way" }
+      isLength(definition.secondDepth, FRC_DEPTH_BOUNDS);
+    }
+
+    annotation { "Name" : "Flip", "Default" : false }
+    definition.flipSide is boolean;
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Every solid this makes is finished with it.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcExtrudeIndividualBuild(context, id, frcDefinition(definition));
+  },
+  {
+    depth : 0.25 * inch, side : FRCExtrudeSide.ONE, secondDepth : 0.25 * inch,
+    flipSide : false, partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Fillet Edges", "Feature Name Template" : "Fillet edges" }
+export const frcFilletEdges = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Parts to break the edges on", "Filter" : EntityType.BODY && BodyType.SOLID }
+    definition.bodies is Query;
+
+    annotation { "Name" : "Which edges", "Description" : "Sharp outside corners covers only those, not every edge." }
+    definition.scope is FRCFilletScope;
+
+    if (definition.scope == FRCFilletScope.VERTICAL)
+    {
+      annotation { "Name" : "Face they are square to", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+      definition.reference is Query;
+    }
+
+    annotation { "Name" : "Size radius from the process", "Default" : true }
+    definition.autoRadius is boolean;
+
+    if (definition.autoRadius)
+    {
+      annotation { "Name" : "Manufacturing process", "Description" : "How the part gets cut. Manual means a drill press, bandsaw and files.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.process is FRCProcess;
+
+      if (definition.process == FRCProcess.CNC)
+      {
+        annotation { "Name" : "End mill diameter", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+        isLength(definition.toolDiameter, FRC_TOOL_BOUNDS);
+      }
+    }
+    else
+    {
+      annotation { "Name" : "Radius" }
+      isLength(definition.radius, FRC_EDGEFILLET_BOUNDS);
+    }
+  }
+  {
+    frcFilletEdgesBuild(context, id, frcDefinition(definition));
+  },
+  {
+    scope : FRCFilletScope.CONVEX, autoRadius : true, process : FRCProcess.CNC,
+    toolDiameter : 0.25 * inch, radius : 0.03 * inch
+  });
+
+annotation { "Feature Type Name" : "Finger Joint", "Feature Name Template" : "Finger joint" }
+export const frcFingerJoint = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "First part", "Filter" : EntityType.BODY && BodyType.SOLID, "MaxNumberOfPicks" : 1 }
+    definition.baseParts is Query;
+
+    annotation { "Name" : "Parts to joint to it", "Filter" : EntityType.BODY && BodyType.SOLID }
+    definition.tabParts is Query;
+
+    annotation { "Name" : "How to size the fingers" }
+    definition.countMode is FRCFingerCount;
+
+    if (definition.countMode == FRCFingerCount.AUTO)
+    {
+      annotation { "Name" : "Finger width, in thicknesses", "Description" : "In multiples of the stock thickness. Two is the usual default; below one the fingers snap during assembly." }
+      isReal(definition.widthRatio, FRC_RATIO_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Number of fingers" }
+      isInteger(definition.fingers, FRC_FINGERS_BOUNDS);
+    }
+
+    annotation { "Name" : "Part with the outer fingers" }
+    definition.sense is FRCPinSense;
+
+    annotation { "Name" : "Fit per side", "Description" : "Negative for an interference fit that presses together.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.fit, FRC_FIT_BOUNDS);
+
+    annotation { "Name" : "Cutter kerf", "Description" : "Measure it: cut a test square and halve the difference from nominal." }
+    isLength(definition.kerf, FRC_KERF_BOUNDS);
+
+    annotation { "Name" : "Corner relief" }
+    definition.relief is FRCJointRelief;
+
+    if (definition.relief != FRCJointRelief.NONE)
+    {
+      annotation { "Name" : "End mill diameter", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      isLength(definition.toolDiameter, FRC_TOOL_BOUNDS);
+    }
+  }
+  {
+    frcFingerJointBuild(context, id, frcDefinition(definition));
+  },
+  {
+    countMode : FRCFingerCount.AUTO, widthRatio : 2.0, fingers : 5,
+    sense : FRCPinSense.BASE_OUT, fit : 0 * inch, kerf : 0 * inch,
+    relief : FRCJointRelief.NONE, toolDiameter : 0.25 * inch
+  });
+
+annotation { "Feature Type Name" : "Frame", "Feature Name Template" : "Frame - #members members" }
+export const frcFrame = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Lines to build along", "Filter" : EntityType.EDGE }
+    definition.lines is Query;
+
+    annotation { "Name" : "Section width", "Description" : "Measured across the frame.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.sectionWidth, FRC_SECTION_BOUNDS);
+
+    annotation { "Name" : "Section height", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.sectionHeight, FRC_SECTION_BOUNDS);
+
+    annotation { "Name" : "Wall thickness", "Description" : "Zero leaves every member solid.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.wallThickness, FRC_FRAMEWALL_BOUNDS);
+
+    annotation { "Name" : "Which way is up" }
+    definition.upMode is FRCFrameUp;
+
+    if (definition.upMode == FRCFrameUp.PICKED)
+    {
+      annotation { "Name" : "Up reference", "Description" : "Face or mate connector whose normal points up.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+      definition.upFace is Query;
+    }
+
+    annotation { "Name" : "Joints" }
+    definition.joint is FRCFrameJoint;
+
+    annotation { "Name" : "Holes" }
+    definition.punch is FRCFramePunch;
+
+    if (definition.punch != FRCFramePunch.NONE)
+    {
+      annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.holeSize is FRCHoleSize;
+
+      annotation { "Name" : "Spacing along the member" }
+      isLength(definition.lengthPitch, FRC_PITCH_BOUNDS);
+
+      annotation { "Name" : "Spacing across the face" }
+      isLength(definition.rowPitch, FRC_ROWPITCH_BOUNDS);
+
+      annotation { "Name" : "First hole from the end" }
+      isLength(definition.holeStart, FRC_ROWPITCH_BOUNDS);
+
+      annotation { "Name" : "Rows across each face", "Description" : "Zero fits as many rows as the face will take." }
+      isInteger(definition.rowCount, FRC_FRAMEROWS_BOUNDS);
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcFrameBuild(context, id, frcDefinition(definition));
+  },
+  {
+    sectionWidth : 2 * inch, sectionHeight : 1 * inch, wallThickness : 0.0625 * inch,
+    upMode : FRCFrameUp.AUTO, joint : FRCFrameJoint.MITER, punch : FRCFramePunch.NONE,
+    holeSize : FRCHoleSize.NO10_CLEAR, lengthPitch : 0.5 * inch, rowPitch : 0.5 * inch,
+    holeStart : 0.5 * inch, rowCount : 0, partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Gear", "Feature Name Template" : "Gear" }
+export const frcGear = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Sketch plane or flat face", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Type" }
+    definition.kind is FRCGearKind;
+
+    annotation { "Name" : "Standard", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.standard is FRCGearStandard;
+
+    if (definition.standard == FRCGearStandard.MODULE)
+    {
+      annotation { "Name" : "Module" }
+      isLength(definition.module, FRC_TUBEWALL_BOUNDS);
+    }
+    else if (definition.standard == FRCGearStandard.CUSTOM_DP)
+    {
+      annotation { "Name" : "Diametral pitch" }
+      isReal(definition.customDP, { (unitless) : [1, 20, 200] } as RealBoundSpec);
+
+      annotation { "Name" : "Pressure angle" }
+      isAngle(definition.customPA, { (degree) : [10, 20, 30] } as AngleBoundSpec);
+    }
+
+    annotation { "Name" : "Number of teeth" }
+    isInteger(definition.teeth, FRC_TEETH_BOUNDS);
+
+    if (definition.kind == FRCGearKind.RACK)
+    {
+      annotation { "Name" : "Rack back thickness" }
+      isLength(definition.rackBack, FRC_WALL_BOUNDS);
+    }
+
+    annotation { "Name" : "Face width" }
+    isLength(definition.faceWidth, FRC_FACEWIDTH_BOUNDS);
+
+    if (definition.kind == FRCGearKind.SPUR)
+    {
+      frcBorePredicate(definition);
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcGearBuild(context, id, frcDefinition(definition));
+  },
+  mergeMaps(FRC_BORE_DEFAULTS, {
+      kind : FRCGearKind.SPUR, standard : FRCGearStandard.DP20, module : 1.5 * millimeter,
+      customDP : 20, customPA : 20 * degree, teeth : 18, rackBack : 0.25 * inch,
+      faceWidth : 0.375 * inch, partMaterial : FRCMaterial.STEEL
+    }));
+
+annotation { "Feature Type Name" : "Gearbox", "Feature Name Template" : "Gearbox" }
+export const frcGearbox = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "What to do" }
+    definition.mode is FRCGearboxMode;
+
+    annotation { "Name" : "Diametral pitch" }
+    isReal(definition.pitch, FRC_DP_BOUNDS);
+
+    annotation { "Name" : "Two stages", "Default" : true, "Description" : "Clear this for a single reduction." }
+    definition.twoStages is boolean;
+
+    if (definition.mode == FRCGearboxMode.PLAN)
+    {
+      annotation { "Name" : "Target reduction" }
+      isReal(definition.target, FRC_RATIO_TARGET_BOUNDS);
+
+      annotation { "Name" : "Smallest pinion" }
+      isInteger(definition.pinionMin, FRC_GBTEETH_BOUNDS);
+
+      annotation { "Name" : "Largest pinion" }
+      isInteger(definition.pinionMax, FRC_GBTEETH_BOUNDS);
+
+      annotation { "Name" : "Smallest gear" }
+      isInteger(definition.gearMin, FRC_GBTEETH_BOUNDS);
+
+      annotation { "Name" : "Largest gear" }
+      isInteger(definition.gearMax, FRC_GBTEETH_BOUNDS);
+
+      annotation { "Name" : "Even tooth counts only", "Default" : true, "Description" : "Searches even gear counts only, which is what the WCP 20 DP line sells. Pinions are searched at every count." }
+      definition.evenOnly is boolean;
+    }
+    else
+    {
+      annotation { "Name" : "Flat face to lay out on", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+      definition.face is Query;
+
+      annotation { "Name" : "First shaft center", "Description" : "Leave it empty to start the layout at the origin of the face you picked.", "Filter" : EntityType.VERTEX, "MaxNumberOfPicks" : 1 }
+      definition.anchor is Query;
+
+      annotation { "Name" : "Stage 1 driving teeth" }
+      isInteger(definition.drive1, FRC_GBTEETH_BOUNDS);
+
+      annotation { "Name" : "Stage 1 driven teeth" }
+      isInteger(definition.driven1, FRC_GBTEETH_BOUNDS);
+
+      annotation { "Name" : "Stage 1 angle" }
+      isAngle(definition.angle1, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+
+      if (definition.twoStages)
+      {
+        annotation { "Name" : "Stage 2 driving teeth" }
+        isInteger(definition.drive2, FRC_GBTEETH_BOUNDS);
+
+        annotation { "Name" : "Stage 2 driven teeth" }
+        isInteger(definition.driven2, FRC_GBTEETH_BOUNDS);
+
+        annotation { "Name" : "Stage 2 angle" }
+        isAngle(definition.angle2, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+      }
+
+      annotation { "Name" : "Draw the pitch circles", "Default" : true }
+      definition.drawPitch is boolean;
+
+      annotation { "Name" : "Bearing bores" }
+      definition.bores is FRCGearboxBores;
+
+      if (definition.bores != FRCGearboxBores.NONE)
+      {
+        annotation { "Name" : "Bearing outside diameter", "Description" : "Named by outside diameter, with the shaft bore beside it. 1.375 in is flanged, 0.750 in a bronze bushing." }
+        definition.bearingOD is FRCBearingOD;
+
+        annotation { "Name" : "Fit", "Description" : "Press stays put once driven in, slip assembles by hand, clearance passes through freely.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+        definition.fit is FRCFitClass;
+      }
+    }
+
+    annotation { "Name" : "Center distance allowance", "Description" : "WCP publishes 0.0015 to 0.003 in as standard spacing, and 0 for an exact fit." }
+    isLength(definition.allowance, FRC_BACKLASH_BOUNDS);
+  }
+  {
+    frcGearboxBuild(context, id, frcDefinition(
+          mergeMaps(definition, { "stages" : definition.twoStages ? 2 : 1 })));
+  },
+  {
+    mode : FRCGearboxMode.PLAN, pitch : 20, twoStages : true, target : 6.75,
+    pinionMin : 8, pinionMax : 16, gearMin : 18, gearMax : 84, evenOnly : true,
+    drive1 : 12, driven1 : 60, angle1 : 0 * degree,
+    drive2 : 18, driven2 : 54, angle2 : 30 * degree,
+    drawPitch : true, bores : FRCGearboxBores.DOWNSTREAM,
+    bearingOD : FRCBearingOD.OD_1125, fit : FRCFitClass.PRESS,
+    allowance : 0.002 * inch
+  });
+
+annotation { "Feature Type Name" : "Gusset", "Feature Name Template" : "Gusset - #bolts holes" }
+export const frcGusset = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Plane or flat face to build on", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Bolt locations", "Filter" : EntityType.VERTEX || (EntityType.FACE && GeometryType.CYLINDER) }
+    definition.holes is Query;
+
+    annotation { "Name" : "Shape", "Description" : "Wrap the holes is the convex hull of the bosses." }
+    definition.shape is FRCGussetShape;
+
+    annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.holeSize is FRCHoleSize;
+
+    annotation { "Name" : "Wall around each hole" }
+    isLength(definition.bossWall, FRC_WALL_BOUNDS);
+
+    if (definition.shape == FRCGussetShape.SKELETON)
+    {
+      annotation { "Name" : "Arm width" }
+      isLength(definition.armWidth, FRC_WALL_BOUNDS);
+    }
+
+    annotation { "Name" : "Thickness" }
+    isLength(definition.thickness, FRC_WALL_BOUNDS);
+
+    annotation { "Name" : "Lighten the web", "Default" : true }
+    definition.lighten is boolean;
+
+    if (definition.lighten)
+    {
+      annotation { "Name" : "Rib thickness" }
+      isLength(definition.ribWidth, FRC_WALL_BOUNDS);
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcGussetBuild(context, id, frcDefinition(definition));
+  },
+  {
+    shape : FRCGussetShape.HULL, holeSize : FRCHoleSize.NO10_CLEAR,
+    bossWall : 0.15 * inch, armWidth : 0.5 * inch, thickness : 0.125 * inch,
+    lighten : true, ribWidth : 0.15 * inch, partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Hole", "Feature Name Template" : "Hole" }
+export const frcHole = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "What to do", "Description" : "Resize works on holes that already exist. New puts holes at the points you select." }
+    definition.mode is FRCHoleMode;
+
+    if (definition.mode == FRCHoleMode.RESIZE)
+    {
+      annotation { "Name" : "Holes to resize", "Filter" : EntityType.FACE && GeometryType.CYLINDER }
+      definition.holeFaces is Query;
+    }
+    else
+    {
+      annotation { "Name" : "Face to drill into", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+      definition.targetFace is Query;
+      annotation { "Name" : "Hole locations", "Filter" : EntityType.VERTEX }
+      definition.locations is Query;
+      annotation { "Name" : "Through all", "Default" : true }
+      definition.throughAll is boolean;
+      if (!definition.throughAll)
+      {
+        annotation { "Name" : "Hole depth" }
+        isLength(definition.holeDepth, FRC_DEPTH_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Hole type" }
+    definition.boreType is FRCBoreType;
+
+    if (definition.boreType == FRCBoreType.BEARING)
+    {
+      annotation { "Name" : "Bearing outside diameter", "Description" : "Named by outside diameter, with the shaft bore beside it. 1.375 in is flanged, 0.750 in a bronze bushing." }
+      definition.bearingOD is FRCBearingOD;
+    }
+    else if (definition.boreType == FRCBoreType.SHAFT)
+    {
+      annotation { "Name" : "Shaft size" }
+      definition.shaftSize is FRCShaftSize;
+    }
+    else if (definition.boreType == FRCBoreType.FASTENER)
+    {
+      annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.fastenerSize is FRCHoleSize;
+    }
+    else
+    {
+      annotation { "Name" : "Nominal diameter" }
+      isLength(definition.customDiameter, FRC_DIA_BOUNDS);
+    }
+
+    if (definition.boreType != FRCBoreType.FASTENER)
+    {
+      annotation { "Name" : "Fit", "Description" : "Press stays put once driven in, slip assembles by hand, clearance passes through freely.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.fit is FRCFitClass;
+    }
+
+    annotation { "Name" : "Manufacturing process", "Description" : "How the part gets cut. Manual means a drill press, bandsaw and files.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.process is FRCProcess;
+
+    if (definition.process == FRCProcess.PRINTED)
+    {
+      annotation { "Name" : "Printed hole compensation", "Description" : "Printed holes come out undersize. Measure one test print and set this value." }
+      isLength(definition.printerComp, FRC_COMP_BOUNDS);
+    }
+  }
+  {
+    frcHoleBuild(context, id, frcDefinition(definition));
+  },
+  {
+    mode : FRCHoleMode.RESIZE, throughAll : true, holeDepth : 0.5 * inch,
+    boreType : FRCBoreType.BEARING, bearingOD : FRCBearingOD.OD_1125,
+    shaftSize : FRCShaftSize.RD_500, fastenerSize : FRCHoleSize.NO10_CLEAR,
+    customDiameter : 1.125 * inch, fit : FRCFitClass.PRESS,
+    process : FRCProcess.CNC, printerComp : 0.008 * inch
+  });
+
+annotation { "Feature Type Name" : "Insert Pocket", "Feature Name Template" : "Insert pocket" }
+export const frcInsertPocket = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Face the inserts go into", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+    definition.face is Query;
+
+    annotation { "Name" : "Insert locations", "Filter" : EntityType.VERTEX }
+    definition.locations is Query;
+
+    annotation { "Name" : "Insert type" }
+    definition.family is FRCInsertFamily;
+
+    annotation { "Name" : "Thread" }
+    definition.thread is FRCInsertThread;
+
+    annotation { "Name" : "Insert length" }
+    definition.lengthChoice is FRCInsertLength;
+
+    if (definition.family == FRCInsertFamily.PRINTED)
+    {
+      annotation { "Name" : "Printed hole compensation", "Description" : "Charts assume a drilled hole; printed, add two to three tenths of a millimeter. Zero if you drill or ream." }
+      isLength(definition.printerComp, FRC_COMP_BOUNDS);
+    }
+
+    annotation { "Name" : "Size the depth from the insert", "Description" : "Sets pocket depth from the insert length.", "Default" : true }
+    definition.autoDepth is boolean;
+
+    if (!definition.autoDepth)
+    {
+      annotation { "Name" : "Pocket depth" }
+      isLength(definition.pocketDepth, FRC_DEPTH_BOUNDS);
+    }
+
+    annotation { "Name" : "Run the hole through the part", "Default" : false }
+    definition.through is boolean;
+  }
+  {
+    frcInsertPocketBuild(context, id, frcDefinition(definition));
+  },
+  {
+    family : FRCInsertFamily.PRINTED, thread : FRCInsertThread.M3,
+    lengthChoice : FRCInsertLength.LONG, printerComp : 0.2 * millimeter,
+    autoDepth : true, pocketDepth : 0.25 * inch, through : false
+  });
+
+annotation { "Feature Type Name" : "Inspection", "Feature Name Template" : "Inspection" }
+export const frcInspection = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Robot parts to measure", "Filter" : EntityType.BODY && BodyType.SOLID }
+    definition.bodies is Query;
+
+    annotation { "Name" : "Material", "Description" : "Every part is weighed at this density. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+
+    annotation { "Name" : "Floor the robot stands on", "Description" : "A face or mate connector whose normal points up out of the carpet. Leave it empty to use the top plane.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.floorFace is Query;
+
+    annotation { "Name" : "Frame width, with bumpers" }
+    isLength(definition.frameWidth, FRC_FRAMESIZE_BOUNDS);
+
+    annotation { "Name" : "Frame length, with bumpers" }
+    isLength(definition.frameLength, FRC_FRAMESIZE_BOUNDS);
+
+    annotation { "Name" : "Robot height" }
+    isLength(definition.robotHeight, FRC_HEIGHTLIMIT_BOUNDS);
+
+    annotation { "Name" : "Frame perimeter limit", "Description" : "Measured with the bumpers on. R104 sets 120 in in 2026." }
+    isLength(definition.perimeterLimit, FRC_PERIMETER_BOUNDS);
+
+    annotation { "Name" : "Height limit" }
+    isLength(definition.heightLimit, FRC_HEIGHTLIMIT_BOUNDS);
+
+    annotation { "Name" : "Robot weight, lb" }
+    isReal(definition.weightLb, FRC_WEIGHTLIM_BOUNDS);
+
+    annotation { "Name" : "Robot weight limit, lb", "Description" : "R103 puts the robot alone at 115.0 lb in 2026. It moves with the season, so you set it here." }
+    isReal(definition.weightLimitLb, FRC_WEIGHTLIM_BOUNDS);
+
+    annotation { "Name" : "With bumpers limit, lb", "Description" : "R408 puts robot plus bumpers at 135.0 lb in 2026." }
+    isReal(definition.bumpersLimitLb, FRC_WEIGHTLIM_BOUNDS);
+
+    annotation { "Name" : "Draw the envelope", "Default" : false }
+    definition.showEnvelope is boolean;
+  }
+  {
+    frcInspectionBuild(context, id, frcDefinition(definition));
+  },
+  {
+    partMaterial : FRCMaterial.AL_6061, frameWidth : 27 * inch, frameLength : 27 * inch,
+    robotHeight : 48 * inch, perimeterLimit : 120 * inch, heightLimit : 78 * inch,
+    weightLb : 115, weightLimitLb : 115, bumpersLimitLb : 135, showEnvelope : false
+  });
+
+annotation { "Feature Type Name" : "Lighten", "Feature Name Template" : "Lighten - #ribs ribs" }
+export const frcLighten = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Faces to lighten", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 24 }
+    definition.faces is Query;
+
+    annotation { "Name" : "Loading", "Description" : "Edge-on: gussets, side plates, frame rails. Across the face: shelves, mounts. Not structural: covers, panels." }
+    definition.loading is FRCLoading;
+
+    annotation { "Name" : "Pattern", "Description" : "Truss ribs are routed between the bolt holes, tying every hole into the mesh." }
+    definition.pattern is FRCLightenPattern;
+
+    if (definition.pattern != FRCLightenPattern.NONE && definition.pattern != FRCLightenPattern.TRUSS)
+    {
+      annotation { "Name" : "Pattern angle" }
+      isAngle(definition.patternAngle, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+    }
+
+    annotation { "Name" : "Manufacturing process", "Description" : "How the part gets cut. Manual means a drill press, bandsaw and files.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.process is FRCProcess;
+
+    if (definition.process == FRCProcess.CNC)
+    {
+      annotation { "Name" : "End mill diameter", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      isLength(definition.toolDiameter, FRC_TOOL_BOUNDS);
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+
+    annotation { "Name" : "Part type", "Description" : "Only read when Design Constants has custom part colors on. Lighten is usually run on a plate.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partClass is FRCPartClass;
+
+    annotation { "Name" : "Automatic wall and rib size", "Default" : true }
+    definition.autoSize is boolean;
+
+    if (definition.autoSize)
+    {
+      annotation { "Name" : "Weight saving", "Description" : "Aggressive sits at the corrected buckling limit, margin included. The others add margin above it." }
+      definition.aggression is FRCAggression;
+    }
+    else
+    {
+      annotation { "Name" : "Wall thickness", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      isLength(definition.wallThickness, FRC_WALL_BOUNDS);
+      annotation { "Name" : "Rib thickness", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      isLength(definition.ribThickness, FRC_WALL_BOUNDS);
+      if (definition.pattern != FRCLightenPattern.TRUSS)
+      {
+        annotation { "Name" : "Pocket size" }
+        isLength(definition.pocketSize, FRC_POCKET_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Depth", "Description" : "Through cuts all the way out the back of the part." }
+    definition.depthMode is FRCLightenDepth;
+
+    if (definition.depthMode == FRCLightenDepth.FLOOR && !definition.autoSize)
+    {
+      annotation { "Name" : "Floor thickness" }
+      isLength(definition.floorThickness, FRC_FLOOR_BOUNDS);
+    }
+    else if (definition.depthMode == FRCLightenDepth.BLIND)
+    {
+      annotation { "Name" : "Pocket depth" }
+      isLength(definition.pocketDepth, FRC_WALL_BOUNDS);
+    }
+    else if (definition.depthMode == FRCLightenDepth.UP_TO_FACE)
+    {
+      annotation { "Name" : "Face to cut up to", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+      definition.upToFace is Query;
+    }
+    else if (definition.depthMode == FRCLightenDepth.UP_TO_VERTEX)
+    {
+      annotation { "Name" : "Vertex to cut up to", "Filter" : EntityType.VERTEX, "MaxNumberOfPicks" : 1 }
+      definition.upToVertex is Query;
+    }
+
+    annotation { "Name" : "Keep some areas solid", "Description" : "Regions left at full material, with no pocket and no wall around them.", "Default" : false }
+    definition.excludeAreas is boolean;
+
+    if (definition.excludeAreas)
+    {
+      annotation { "Name" : "Regions to keep solid", "Filter" : EntityType.FACE }
+      definition.excludeRegions is Query;
+    }
+
+    annotation { "Name" : "Lighten into other parts", "Description" : "The pocket is subtracted from these as well, and they are weighed with the plate.", "Default" : false }
+    definition.multipleBodies is boolean;
+
+    if (definition.multipleBodies)
+    {
+      annotation { "Name" : "Other parts", "Filter" : EntityType.BODY && BodyType.SOLID }
+      definition.otherBodies is Query;
+    }
+
+    annotation { "Name" : "Round pocket corners", "Default" : true }
+    definition.roundCorners is boolean;
+
+    annotation { "Name" : "Fillet outside edges", "Default" : false }
+    definition.filletOutsideEdges is boolean;
+
+    if (definition.filletOutsideEdges)
+    {
+      annotation { "Name" : "Outside edge radius" }
+      isLength(definition.edgeFilletRadius, FRC_EDGEFILLET_BOUNDS);
+    }
+
+    // Honeycomb and circles have no straight rib family for a nub to sit
+    // on, so the toggle would do nothing and is not offered. A single
+    // pocket does have ribs now: the ties that hold a boss the perimeter
+    // wall does not reach.
+    if (definition.pattern != FRCLightenPattern.HONEYCOMB
+      && definition.pattern != FRCLightenPattern.CIRCLES)
+    {
+      annotation { "Name" : "Cable tie nubs", "Description" : "Puts a pair of retaining bumps on up to ten of the longest ribs, spaced well apart.", "Default" : false }
+      definition.cableTieNubs is boolean;
+
+      if (definition.cableTieNubs)
+      {
+        annotation { "Name" : "Cable tie size", "Description" : "The value in parentheses is the strap width.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+        definition.tieSize is FRCTieSize;
+      }
+    }
+  }
+  {
+    frcLightenBuild(context, id, frcDefinition(definition));
+  },
+  {
+    loading : FRCLoading.EDGE_ON, pattern : FRCLightenPattern.TRUSS,
+    patternAngle : 0 * degree, process : FRCProcess.CNC, toolDiameter : 0.25 * inch,
+    partMaterial : FRCMaterial.AL_6061, partClass : FRCPartClass.PLATE,
+    autoSize : true, aggression : FRCAggression.AGGRESSIVE,
+    wallThickness : 0.125 * inch, ribThickness : 0.125 * inch, pocketSize : 1.5 * inch,
+    depthMode : FRCLightenDepth.AUTO, floorThickness : 0.0625 * inch,
+    pocketDepth : 0.125 * inch, roundCorners : true, filletOutsideEdges : false,
+    edgeFilletRadius : 0.25 * inch, cableTieNubs : false, tieSize : FRCTieSize.TIE_190,
+    excludeAreas : false, multipleBodies : false
+  });
+
+annotation { "Feature Type Name" : "Mate Connectors", "Feature Name Template" : "Mate connectors" }
+export const frcMateConnectors = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Holes, faces and vertices", "Description" : "Cylindrical faces and circular edges are treated as holes.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR }
+    definition.entities is Query;
+
+    annotation { "Name" : "Place connectors" }
+    definition.mcTarget is FRCMCTarget;
+
+    annotation { "Name" : "Both ends of each hole", "Default" : false }
+    definition.atBothEnds is boolean;
+
+    annotation { "Name" : "Flip the Z axis", "Default" : false }
+    definition.flipAxis is boolean;
+  }
+  {
+    frcMateConnectorsBuild(context, id, frcDefinition(definition));
+  },
+  {
+    mcTarget : FRCMCTarget.ALL, atBothEnds : false, flipAxis : false
+  });
+
+annotation { "Feature Type Name" : "Measure", "Feature Name Template" : "Measure" }
+export const frcMeasure = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "What to measure", "Description" : "Bounding box extent is measured along the direction picked below it." }
+    definition.mode is FRCMeasureMode;
+
+    if (definition.mode == FRCMeasureMode.DISTANCE || definition.mode == FRCMeasureMode.ANGLE_BETWEEN)
+    {
+      annotation { "Name" : "First pick", "Filter" : EntityType.FACE || EntityType.EDGE || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+      definition.first is Query;
+
+      annotation { "Name" : "Second pick", "Filter" : EntityType.FACE || EntityType.EDGE || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+      definition.second is Query;
+    }
+    else if (definition.mode == FRCMeasureMode.LENGTH)
+    {
+      annotation { "Name" : "Edges", "Filter" : EntityType.EDGE }
+      definition.edges is Query;
+    }
+    else if (definition.mode == FRCMeasureMode.DIAMETER)
+    {
+      annotation { "Name" : "Hole or circle", "Filter" : (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE), "MaxNumberOfPicks" : 1 }
+      definition.circle is Query;
+    }
+    else
+    {
+      annotation { "Name" : "Parts to measure across", "Filter" : EntityType.BODY && BodyType.SOLID }
+      definition.bodies is Query;
+
+      annotation { "Name" : "Direction", "Filter" : (EntityType.FACE && GeometryType.PLANE) || EntityType.EDGE || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+      definition.direction is Query;
+    }
+
+    // Angle mode rounds to three decimals of a degree and never reads roundTo,
+    // so the field is hidden there rather than sitting in the dialog doing
+    // nothing. FRC_ROUNDTO_BOUNDS and not FRC_BACKLASH_BOUNDS: backlash is a
+    // gear allowance capped at 0.0787 in, which cannot express an eighth or a
+    // quarter. FRC_ROUNDTO_BOUNDS runs 0 to 1 in and its default is the
+    // 0.001 in already in the defaults map below.
+    if (definition.mode != FRCMeasureMode.ANGLE_BETWEEN)
+    {
+      annotation { "Name" : "Round to" }
+      isLength(definition.roundTo, FRC_ROUNDTO_BOUNDS);
+    }
+
+    annotation { "Name" : "Set a variable", "Default" : true }
+    definition.publishVariable is boolean;
+
+    if (definition.publishVariable)
+    {
+      annotation { "Name" : "Variable name" }
+      definition.varName is string;
+    }
+  }
+  {
+    frcMeasureBuild(context, id, frcDefinition(definition));
+  },
+  {
+    mode : FRCMeasureMode.DISTANCE, roundTo : 0.001 * inch,
+    publishVariable : true, varName : "frcMeasured"
+  });
+
+annotation { "Feature Type Name" : "Origin Cube", "Feature Name Template" : "Origin cube" }
+export const frcOriginCube = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Place on a mate connector", "Description" : "Leave it empty to build at the origin.", "Filter" : BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Size" }
+    isLength(definition.cubeSize, FRC_CUBE_BOUNDS);
+
+    annotation { "Name" : "Center it on the origin", "Default" : false }
+    definition.centered is boolean;
+  }
+  {
+    frcOriginCubeBuild(context, id, frcDefinition(definition));
+  },
+  {
+    cubeSize : 1 * inch, centered : false
+  });
+
+annotation { "Feature Type Name" : "Parts", "Feature Type Description" : "Sets material, naming and color on parts already built, and lists the stock each one needs.", "Feature Name Template" : "Parts" }
+export const frcParts = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Parts", "Filter" : EntityType.BODY && BodyType.SOLID }
+    definition.bodies is Query;
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density, and its color unless the color scheme or the reals below override it.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+
+    annotation { "Name" : "These parts are", "Description" : "Which color the studio scheme paints them, when Design Constants has custom colors on." }
+    definition.partClass is FRCPartClass;
+
+    annotation { "Name" : "Write material onto the parts", "Default" : true }
+    definition.setMaterial is boolean;
+
+    annotation { "Name" : "Naming" }
+    definition.naming is FRCNameMode;
+
+    if (definition.naming != FRCNameMode.KEEP)
+    {
+      annotation { "Name" : "Prefix" }
+      definition.prefix is string;
+
+      if (definition.naming == FRCNameMode.NUMBER)
+      {
+        annotation { "Name" : "Start at" }
+        isInteger(definition.startAt, FRC_STARTAT_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Color the parts", "Description" : "The studio color scheme if Design Constants publishes one, otherwise the material color.", "Default" : false }
+    definition.colorParts is boolean;
+
+    annotation { "Name" : "List the stock each part needs", "Default" : true }
+    definition.cutList is boolean;
+  }
+  {
+    frcPartsBuild(context, id, frcDefinition(definition));
+  },
+  {
+    partMaterial : FRCMaterial.AL_6061, partClass : FRCPartClass.OTHER, setMaterial : true,
+    naming : FRCNameMode.KEEP, prefix : "FRC",
+    startAt : 1, colorParts : false, cutList : true
+  });
+
+annotation { "Feature Type Name" : "Pneumatic Cylinder", "Feature Name Template" : "Cylinder" }
+export const frcPneumatic = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Cylinder rear", "Description" : "Plane or flat face at the rear of the cylinder. The cylinder extends along its normal.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Bore", "Description" : "AutomationDirect's NITRA A-series bores. The full ladder runs 7/16 to 2 in." }
+    definition.cylBore is FRCCylBore;
+
+    if (definition.cylBore == FRCCylBore.CUSTOM)
+    {
+      annotation { "Name" : "Bore diameter" }
+      isLength(definition.customBore, FRC_CYLBORE_BOUNDS);
+
+      annotation { "Name" : "Rod diameter" }
+      isLength(definition.customRod, FRC_CYLROD_BOUNDS);
+    }
+
+    annotation { "Name" : "Mount" }
+    definition.mountStyle is FRCCylMount;
+
+    annotation { "Name" : "Stroke", "Description" : "The catalog tables run in whole inches, mostly 1 to 12." }
+    isLength(definition.strokeLength, FRC_STROKE_BOUNDS);
+
+    annotation { "Name" : "Length adder", "Description" : "Overall retracted length minus stroke. Zero uses the catalog table; set it for a bore or mount not listed." }
+    isLength(definition.customAdder, FRC_CYLADDER_BOUNDS);
+
+    annotation { "Name" : "Double acting", "Default" : true, "Description" : "Clear this for single acting with a spring return." }
+    definition.doubleActing is boolean;
+
+    annotation { "Name" : "Working pressure, psi", "Description" : "The 2026 rules cap working pressure at 60 psi (R807). The catalog quotes forces at 100." }
+    isReal(definition.workingPressure, FRC_PSI_BOUNDS);
+
+    annotation { "Name" : "Drawn pose", "Description" : "0 is retracted, 1 is extended." }
+    isReal(definition.pose, FRC_POSE_BOUNDS);
+  }
+  {
+    frcPneumaticBuild(context, id, frcDefinition(definition));
+  },
+  {
+    cylBore : FRCCylBore.B112, customBore : 1.5 * inch, customRod : 0.4375 * inch,
+    mountStyle : FRCCylMount.PIVOT, strokeLength : 4 * inch, customAdder : 0 * inch,
+    doubleActing : true, workingPressure : 60, pose : 0
+  });
+
+annotation { "Feature Type Name" : "Pulley", "Feature Name Template" : "Pulley" }
+export const frcPulley = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Sketch plane or flat face", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Belt profile" }
+    definition.profile is FRCBeltProfile;
+
+    if (definition.profile == FRCBeltProfile.POLYCORD)
+    {
+      annotation { "Name" : "Cord size" }
+      definition.cordSize is FRCCordSize;
+      if (definition.cordSize == FRCCordSize.CORD_CUSTOM)
+      {
+        annotation { "Name" : "Cord diameter" }
+        isLength(definition.cordDia, FRC_TUBEWALL_BOUNDS);
+      }
+      annotation { "Name" : "Diameter over the cord" }
+      isLength(definition.overCord, FRC_DIA_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Number of teeth" }
+      isInteger(definition.teeth, FRC_TEETH_BOUNDS);
+    }
+
+    annotation { "Name" : "Belt width" }
+    isLength(definition.beltWidth, FRC_FACEWIDTH_BOUNDS);
+
+    annotation { "Name" : "Add flanges", "Default" : true }
+    definition.flanges is boolean;
+
+    if (definition.flanges)
+    {
+      annotation { "Name" : "Flange thickness" }
+      isLength(definition.flangeThickness, FRC_TUBEWALL_BOUNDS);
+
+      annotation { "Name" : "Flange height" }
+      isLength(definition.flangeHeight, FRC_TUBEWALL_BOUNDS);
+    }
+
+    frcBorePredicate(definition);
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcPulleyBuild(context, id, frcDefinition(definition));
+  },
+  mergeMaps(FRC_BORE_DEFAULTS, {
+      profile : FRCBeltProfile.HTD_5, teeth : 24, beltWidth : 0.375 * inch,
+      cordSize : FRCCordSize.CORD_250, cordDia : 0.25 * inch, overCord : 1.625 * inch,
+      flanges : true, flangeThickness : 0.05 * inch, flangeHeight : 0.08 * inch,
+      partMaterial : FRCMaterial.AL_6061
+    }));
+
+annotation { "Feature Type Name" : "Roller", "Feature Name Template" : "Roller" }
+export const frcRoller = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Roller end", "Description" : "Plane or flat face at one end of the roller. The roller is built along its normal.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Roller length" }
+    isLength(definition.rollerLength, FRC_ROLLERLEN_BOUNDS);
+
+    annotation { "Name" : "Build the tube as well", "Default" : true }
+    definition.makeTube is boolean;
+
+    if (definition.makeTube)
+    {
+      annotation { "Name" : "Tube outside diameter", "Description" : "Common FRC roller tube is 1.000 in over 0.875 in, or 1.250 in over 1.125 in." }
+      isLength(definition.tubeOuter, FRC_ROLLERTUBE_BOUNDS);
+    }
+
+    annotation { "Name" : "Bore through the middle", "Description" : "The tube bore when there is a tube, and the wheel bore when there is not. Zero leaves the wheels solid." }
+    isLength(definition.tubeInner, FRC_ROLLERTUBE_BOUNDS);
+
+    annotation { "Name" : "Wheel outside diameter" }
+    isLength(definition.wheelOuter, FRC_WHEELOD_BOUNDS);
+
+    annotation { "Name" : "Wheel width" }
+    isLength(definition.wheelWidth, FRC_TREADWIDTH_BOUNDS);
+
+    annotation { "Name" : "Number of wheels" }
+    isInteger(definition.wheelCount, FRC_WHEELCOUNT_BOUNDS);
+
+    annotation { "Name" : "How the wheels are spaced" }
+    definition.spacingMode is FRCRollerSpacing;
+
+    if (definition.spacingMode == FRCRollerSpacing.EVEN)
+    {
+      annotation { "Name" : "Clearance at each end" }
+      isLength(definition.endMargin, FRC_STAGEGAP_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Spacing between wheel centers" }
+      isLength(definition.wheelPitch, FRC_ROWPITCH_BOUNDS);
+    }
+
+    annotation { "Name" : "Roller contact", "Description" : "What the roller squeezes against." }
+    definition.contactKind is FRCRollerContact;
+
+    if (definition.contactKind == FRCRollerContact.GAME_PIECE)
+    {
+      annotation { "Name" : "Game piece diameter" }
+      isLength(definition.pieceDiameter, FRC_PIECEDIA_BOUNDS);
+    }
+    else if (definition.contactKind == FRCRollerContact.OPPOSING)
+    {
+      annotation { "Name" : "Opposing roller diameter" }
+      isLength(definition.opposingOuter, FRC_WHEELOD_BOUNDS);
+    }
+
+    annotation { "Name" : "Compression", "Description" : "How far the wheel is squeezed. Unpublished; a quarter inch to an inch circulates, start at half an inch." }
+    isLength(definition.compression, FRC_COMPRESSION_BOUNDS);
+
+    annotation { "Name" : "Drivetrain free speed, ft/s" }
+    isReal(definition.driveSpeed, FRC_DRIVESPEED_BOUNDS);
+
+    annotation { "Name" : "Surface speed ratio", "Description" : "Multiple of drivetrain surface speed. Rule of thumb: two for one roller over a ball, two gripping need less." }
+    isReal(definition.speedFactor, FRC_SPEEDFACTOR_BOUNDS);
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcRollerBuild(context, id, frcDefinition(definition));
+  },
+  {
+    rollerLength : 10 * inch, makeTube : true, tubeOuter : 1.25 * inch,
+    tubeInner : 1.125 * inch, wheelOuter : 2 * inch, wheelWidth : 0.5 * inch,
+    wheelCount : 4, spacingMode : FRCRollerSpacing.EVEN, endMargin : 0.5 * inch,
+    wheelPitch : 2 * inch, contactKind : FRCRollerContact.GAME_PIECE,
+    pieceDiameter : 5.906 * inch, opposingOuter : 2 * inch,
+    compression : 0.5 * inch, driveSpeed : 15, speedFactor : 2,
+    partMaterial : FRCMaterial.POLYCARB
+  });
+
+annotation { "Feature Type Name" : "Shaft", "Feature Name Template" : "Shaft" }
+export const frcShaft = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Sketch plane or flat face", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    frcBorePredicate(definition);
+
+    annotation { "Name" : "Length" }
+    isLength(definition.partLength, FRC_SHAFTLEN_BOUNDS);
+
+    annotation { "Name" : "Hollow (tube axle)", "Default" : false }
+    definition.hollow is boolean;
+
+    if (definition.hollow)
+    {
+      annotation { "Name" : "Through hole diameter" }
+      isLength(definition.throughDia, FRC_BOREDIA_BOUNDS);
+    }
+
+    annotation { "Name" : "End treatment" }
+    definition.endType is FRCShaftEnd;
+
+    if (definition.endType == FRCShaftEnd.CHAMFER)
+    {
+      annotation { "Name" : "Chamfer size" }
+      isLength(definition.chamferSize, FRC_TUBEWALL_BOUNDS);
+    }
+    else if (definition.endType == FRCShaftEnd.RING)
+    {
+      annotation { "Name" : "Groove distance from each end" }
+      isLength(definition.grooveInset, FRC_BOREDIA_BOUNDS);
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcShaftBuild(context, id, frcDefinition(definition));
+  },
+  mergeMaps(FRC_BORE_DEFAULTS, {
+      partLength : 6 * inch, hollow : false, throughDia : 0.196 * inch,
+      endType : FRCShaftEnd.CHAMFER, chamferSize : 0.03 * inch, grooveInset : 0.25 * inch,
+      partMaterial : FRCMaterial.AL_7075
+    }));
+
+annotation { "Feature Type Name" : "Sheet Layout", "Feature Name Template" : "Sheet layout" }
+export const frcSheetLayout = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Parts to lay out", "Filter" : EntityType.BODY && BodyType.SOLID }
+    definition.bodies is Query;
+
+    annotation { "Name" : "Sheet size" }
+    definition.sheet is FRCSheetSize;
+
+    if (definition.sheet == FRCSheetSize.CUSTOM)
+    {
+      annotation { "Name" : "Sheet width" }
+      isLength(definition.sheetWidth, FRC_SHEET_BOUNDS);
+
+      annotation { "Name" : "Sheet length" }
+      isLength(definition.sheetLength, FRC_SHEET_BOUNDS);
+    }
+
+    annotation { "Name" : "Gap between parts" }
+    isLength(definition.gap, FRC_GAP_BOUNDS);
+
+    annotation { "Name" : "Margin at the sheet edge" }
+    isLength(definition.margin, FRC_GAP_BOUNDS);
+
+    annotation { "Name" : "Group by thickness", "Default" : true }
+    definition.byThickness is boolean;
+
+    annotation { "Name" : "Turn parts to fit", "Description" : "Parts may be turned a quarter turn to fit.", "Default" : true }
+    definition.allowTurn is boolean;
+
+    annotation { "Name" : "Draw the sheet outlines", "Default" : true }
+    definition.showSheets is boolean;
+  }
+  {
+    frcSheetLayoutBuild(context, id, frcDefinition(definition));
+  },
+  {
+    sheet : FRCSheetSize.S24X48, sheetWidth : 24 * inch, sheetLength : 48 * inch,
+    gap : 0.25 * inch, margin : 0.5 * inch, byThickness : true,
+    allowTurn : true, showSheets : true
+  });
+
+annotation { "Feature Type Name" : "Shooter", "Feature Name Template" : "Shooter" }
+export const frcShooter = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Shooter axis end", "Description" : "Plane or flat face at one end of the shooter axis. The wheels are built along its normal.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Arrangement" }
+    definition.style is FRCShooterStyle;
+
+    annotation { "Name" : "Wheel outside diameter" }
+    isLength(definition.wheelOuter, FRC_WHEELOD_BOUNDS);
+
+    annotation { "Name" : "Wheel width" }
+    isLength(definition.wheelWidth, FRC_TREADWIDTH_BOUNDS);
+
+    annotation { "Name" : "Number of wheels on the shaft" }
+    isInteger(definition.wheelCount, FRC_WHEELCOUNT_BOUNDS);
+
+    annotation { "Name" : "Spacing between wheel centers" }
+    isLength(definition.wheelPitch, FRC_SHOOTPITCH_BOUNDS);
+
+    annotation { "Name" : "Bore through the wheels", "Description" : "Zero leaves them solid. The bore is part of the inertia, so put the real one in." }
+    isLength(definition.boreDiameter, FRC_BOREDIA_BOUNDS);
+
+    if (definition.style == FRCShooterStyle.DUAL_OPPOSED)
+    {
+      annotation { "Name" : "Opposing wheel diameter" }
+      isLength(definition.secondOuter, FRC_WHEELOD_BOUNDS);
+
+      annotation { "Name" : "Opposing wheel speed ratio", "Description" : "As a multiple of the first wheel. Equal speeds give a flat shot. Slowing one side puts backspin on the piece." }
+      isReal(definition.speedRatio, FRC_SPEEDRATIO_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Build the hood", "Default" : true }
+      definition.buildHood is boolean;
+
+      if (definition.buildHood)
+      {
+        annotation { "Name" : "Hood starts at", "Description" : "Measured around the wheel axis in the sketch plane." }
+        isAngle(definition.hoodStart, FRC_HOODANGLE_BOUNDS);
+
+        annotation { "Name" : "Hood wrap", "Description" : "No vendor publishes a wrap angle, so prototype it." }
+        isAngle(definition.hoodWrap, FRC_HOODWRAP_BOUNDS);
+
+        annotation { "Name" : "Hood thickness" }
+        isLength(definition.hoodThickness, FRC_HOODTHICK_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Game piece diameter" }
+    isLength(definition.pieceDiameter, FRC_PIECEDIA_BOUNDS);
+
+    annotation { "Name" : "Game piece mass, lb" }
+    isReal(definition.pieceMass, FRC_PIECEMASS_BOUNDS);
+
+    annotation { "Name" : "Game piece shape" }
+    definition.pieceShape is FRCPieceShape;
+
+    if (definition.pieceShape == FRCPieceShape.CUSTOM)
+    {
+      annotation { "Name" : "Shape factor k", "Description" : "From I = k m r squared. A solid ball is 0.4, a hollow ball 0.667, a solid disc 0.5, a ring 1." }
+      isReal(definition.shapeFactor, FRC_SHAPEFACTOR_BOUNDS);
+    }
+
+    annotation { "Name" : "Compression", "Description" : "How far the piece is squeezed. No vendor publishes a figure, so prototype it." }
+    isLength(definition.compression, FRC_COMPRESSION_BOUNDS);
+
+    annotation { "Name" : "What to solve for" }
+    definition.solveMode is FRCShooterSolve;
+
+    if (definition.solveMode == FRCShooterSolve.FROM_WHEEL_SPEED)
+    {
+      annotation { "Name" : "Speed before the shot, rpm", "Description" : "The exit speed is solved from this with the wheel size and the piece inertia." }
+      isReal(definition.wheelRPM, FRC_SHOOTRPM_BOUNDS);
+    }
+    else if (definition.solveMode == FRCShooterSolve.FROM_EXIT_SPEED)
+    {
+      annotation { "Name" : "Exit speed wanted, ft/s" }
+      isReal(definition.exitSpeed, FRC_EXITSPEED_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Distance to the target" }
+      isLength(definition.targetDistance, FRC_TARGETDIST_BOUNDS);
+
+      annotation { "Name" : "Target height above the muzzle" }
+      isLength(definition.targetRise, FRC_TARGETRISE_BOUNDS);
+
+      annotation { "Name" : "Launch angle" }
+      isAngle(definition.launchAngle, FRC_LAUNCHANGLE_BOUNDS);
+    }
+
+    annotation { "Name" : "Added inertia, lb in squared", "Description" : "Flywheel inertia from pulleys, hubs, shafts and real wheel spokes, none of which this feature draws." }
+    isReal(definition.addedInertia, FRC_ADDEDINERTIA_BOUNDS);
+
+    annotation { "Name" : "Report recovery time", "Default" : false }
+    definition.reportRecovery is boolean;
+
+    if (definition.reportRecovery)
+    {
+      annotation { "Name" : "Motors on the flywheel" }
+      isInteger(definition.motorCount, FRC_MOTORCOUNT_BOUNDS);
+
+      annotation { "Name" : "Free speed at the wheel, rpm", "Description" : "The motor free speed through the gearing, not the motor's own." }
+      isReal(definition.motorFree, FRC_MOTORFREE_BOUNDS);
+
+      annotation { "Name" : "Torque per motor, N m", "Description" : "At the wheel, at your current limit, through the gearing." }
+      isReal(definition.motorTorque, FRC_MOTORTORQUE_BOUNDS);
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcShooterBuild(context, id, frcDefinition(definition));
+  },
+  {
+    style : FRCShooterStyle.SINGLE_HOOD, wheelOuter : 4 * inch, wheelWidth : 1 * inch,
+    wheelCount : 2, wheelPitch : 2 * inch, boreDiameter : 0.5 * inch,
+    secondOuter : 4 * inch, speedRatio : 1, buildHood : true, hoodStart : 180 * degree,
+    hoodWrap : 90 * degree, hoodThickness : 0.125 * inch, pieceDiameter : 7 * inch,
+    pieceMass : 0.5, pieceShape : FRCPieceShape.SOLID_BALL, shapeFactor : 0.4,
+    compression : 0.5 * inch, solveMode : FRCShooterSolve.FROM_WHEEL_SPEED,
+    wheelRPM : 4000, exitSpeed : 40, targetDistance : 120 * inch, targetRise : 72 * inch,
+    launchAngle : 45 * degree, addedInertia : 0, reportRecovery : false,
+    motorCount : 2, motorFree : 6000, motorTorque : 0.5,
+    partMaterial : FRCMaterial.POLYCARB
+  });
+
+annotation { "Feature Type Name" : "Slot", "Feature Name Template" : "Slot" }
+export const frcSlot = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Flat face to slot", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+    definition.face is Query;
+
+    annotation { "Name" : "Slot locations", "Filter" : EntityType.VERTEX }
+    definition.locations is Query;
+
+    annotation { "Name" : "Where the point sits" }
+    definition.anchor is FRCSlotAnchor;
+
+    annotation { "Name" : "Direction" }
+    definition.aim is FRCSlotAim;
+
+    if (definition.aim == FRCSlotAim.EDGE)
+    {
+      annotation { "Name" : "Edge to run along", "Filter" : EntityType.EDGE, "MaxNumberOfPicks" : 1 }
+      definition.reference is Query;
+    }
+
+    annotation { "Name" : "Angle" }
+    isAngle(definition.angle, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+
+    annotation { "Name" : "Travel", "Description" : "Round ends: the bolt moves this far and the cut is a slot width longer. Square ends: the cut is this long." }
+    isLength(definition.travel, FRC_TRAVEL_BOUNDS);
+
+    annotation { "Name" : "Set the slot width by hand", "Default" : false }
+    definition.customWidth is boolean;
+
+    if (definition.customWidth)
+    {
+      annotation { "Name" : "Slot width" }
+      isLength(definition.slotWidth, FRC_BOREDIA_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.holeSize is FRCHoleSize;
+    }
+
+    annotation { "Name" : "Ends" }
+    definition.ends is FRCSlotEnds;
+
+    annotation { "Name" : "Through all", "Default" : true }
+    definition.throughAll is boolean;
+
+    if (!definition.throughAll)
+    {
+      annotation { "Name" : "Depth" }
+      isLength(definition.depth, FRC_DEPTH_BOUNDS);
+    }
+  }
+  {
+    frcSlotBuild(context, id, frcDefinition(definition));
+  },
+  {
+    anchor : FRCSlotAnchor.CENTERED, aim : FRCSlotAim.ANGLE, angle : 0 * degree,
+    travel : 1 * inch, customWidth : false, slotWidth : 0.196 * inch,
+    holeSize : FRCHoleSize.NO10_CLEAR, ends : FRCSlotEnds.ROUND,
+    throughAll : true, depth : 0.25 * inch
+  });
+
+annotation { "Feature Type Name" : "Spacer", "Feature Name Template" : "Spacer" }
+export const frcSpacer = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Sketch plane or flat face", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Type" }
+    definition.kind is FRCSpacerKind;
+
+    annotation { "Name" : "Outside diameter" }
+    isLength(definition.outerDia, FRC_DIA_BOUNDS);
+
+    annotation { "Name" : "Length" }
+    isLength(definition.partLength, FRC_DEPTH_BOUNDS);
+
+    if (definition.kind == FRCSpacerKind.HAT)
+    {
+      annotation { "Name" : "Shoulder diameter" }
+      isLength(definition.shoulderDia, FRC_DIA_BOUNDS);
+
+      annotation { "Name" : "Shoulder thickness" }
+      isLength(definition.shoulderThk, FRC_TUBEWALL_BOUNDS);
+    }
+
+    if (definition.kind == FRCSpacerKind.STANDOFF)
+    {
+      annotation { "Name" : "Hex outside", "Default" : false }
+      definition.standoffHex is boolean;
+
+      annotation { "Name" : "Thread", "Description" : "Tap drill for the threaded ends. A clear size cuts a hole too large to thread." }
+      definition.thread is FRCHoleSize;
+
+      annotation { "Name" : "Tap through", "Default" : false }
+      definition.tapThrough is boolean;
+
+      if (!definition.tapThrough)
+      {
+        annotation { "Name" : "Tapped depth from each end" }
+        isLength(definition.threadDepth, FRC_DEPTH_BOUNDS);
+      }
+    }
+    else
+    {
+      frcBorePredicate(definition);
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcSpacerBuild(context, id, frcDefinition(definition));
+  },
+  mergeMaps(FRC_BORE_DEFAULTS, {
+      kind : FRCSpacerKind.ROUND, outerDia : 0.75 * inch, partLength : 0.5 * inch,
+      shoulderDia : 1.25 * inch, shoulderThk : 0.0625 * inch,
+      standoffHex : false, thread : FRCHoleSize.NO10_TAP, tapThrough : false,
+      threadDepth : 0.20 * inch,
+      bore : FRCDriveBore.ROUND, partMaterial : FRCMaterial.AL_6061
+    }));
+
+annotation { "Feature Type Name" : "Sprocket", "Feature Name Template" : "Sprocket" }
+export const frcSprocket = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Sketch plane or flat face", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Chain size" }
+    definition.chain is FRCChainSize;
+
+    if (definition.chain == FRCChainSize.CUSTOM)
+    {
+      annotation { "Name" : "Chain pitch" }
+      isLength(definition.chainPitch, FRC_PITCH_BOUNDS);
+      annotation { "Name" : "Roller diameter" }
+      isLength(definition.rollerDia, FRC_BOREDIA_BOUNDS);
+    }
+
+    annotation { "Name" : "Number of teeth" }
+    isInteger(definition.teeth, FRC_SPROCKETTEETH_BOUNDS);
+
+    annotation { "Name" : "Thickness" }
+    isLength(definition.thickness, FRC_FACEWIDTH_BOUNDS);
+
+    annotation { "Name" : "Roller clearance" }
+    isLength(definition.rollerClearance, FRC_COMP_BOUNDS);
+
+    annotation { "Name" : "Lighten the web", "Default" : false }
+    definition.lighten is boolean;
+
+    if (definition.lighten)
+    {
+      annotation { "Name" : "Number of spokes" }
+      isInteger(definition.spokes, FRC_SPOKES_BOUNDS);
+      annotation { "Name" : "Spoke width" }
+      isLength(definition.spokeWidth, FRC_WALL_BOUNDS);
+      annotation { "Name" : "Rim thickness" }
+      isLength(definition.rimWidth, FRC_WALL_BOUNDS);
+    }
+
+    frcBorePredicate(definition);
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcSprocketBuild(context, id, frcDefinition(definition));
+  },
+  mergeMaps(FRC_BORE_DEFAULTS, {
+      chain : FRCChainSize.CH25, chainPitch : 0.25 * inch, rollerDia : 0.130 * inch,
+      teeth : 16, thickness : 0.2 * inch, rollerClearance : 0.002 * inch,
+      lighten : false, spokes : 5, spokeWidth : 0.2 * inch, rimWidth : 0.15 * inch,
+      partMaterial : FRCMaterial.AL_6061
+    }));
+
+annotation { "Feature Type Name" : "Swerve Chassis", "Feature Name Template" : "Swerve chassis" }
+export const frcSwerveChassis = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Plane the frame sits on", "Description" : "Plane or flat face the frame sits on. The rails are built up from it.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Swerve module", "Description" : "Vendor data the frame is cut from. Only the SDS MK4c, MK4n, MK5i, MK5n and MK4 publish a hole pattern." }
+    definition.swerveModule is FRCSwerveModule;
+
+    annotation { "Name" : "Different modules per corner", "Default" : false }
+    definition.mixedModules is boolean;
+
+    if (definition.mixedModules)
+    {
+      annotation { "Name" : "Front right module" }
+      definition.moduleFrontRight is FRCSwerveModule;
+
+      annotation { "Name" : "Front left module" }
+      definition.moduleFrontLeft is FRCSwerveModule;
+
+      annotation { "Name" : "Back left module" }
+      definition.moduleBackLeft is FRCSwerveModule;
+
+      annotation { "Name" : "Back right module" }
+      definition.moduleBackRight is FRCSwerveModule;
+    }
+
+    annotation { "Name" : "Frame width", "Description" : "Outside to outside." }
+    isLength(definition.frameWidth, FRC_FRAMESIZE_BOUNDS);
+
+    annotation { "Name" : "Square frame", "Default" : true }
+    definition.squareFrame is boolean;
+
+    if (!definition.squareFrame)
+    {
+      annotation { "Name" : "Frame length", "Description" : "Outside to outside." }
+      isLength(definition.frameLength, FRC_FRAMESIZE_BOUNDS);
+    }
+
+    annotation { "Name" : "Frame perimeter limit", "Description" : "Whatever this season's rules allow." }
+    isLength(definition.perimeterLimit, FRC_PERIMETER_BOUNDS);
+
+    annotation { "Name" : "Rail width, across the frame", "Description" : "SDS rails stand a 2 by 1 tube upright: 1 in wide, 2 in tall.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.railWidth, FRC_RAILSIZE_BOUNDS);
+
+    annotation { "Name" : "Rail height", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.railHeight, FRC_RAILSIZE_BOUNDS);
+
+    annotation { "Name" : "Rail wall thickness", "Description" : "Sold for 2 by 1: 1 mm, 0.0625, 0.080, 0.09375, 0.125, 0.188 in, plus REV's 0.125 by 1 mm asymmetric tube.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.wallThickness, FRC_FRAMEWALL_BOUNDS);
+
+    annotation { "Name" : "Rail hole grid", "Description" : "Stock 0.5 in pitch pattern the tube vendors sell. MAX adds a MAXSpline bore every 2 in through the tall faces." }
+    definition.tubeGrid is FRCChassisTubeGrid;
+
+    annotation { "Name" : "Corners", "Description" : "A module with a vendor rail print always cuts its corner open by the print, whatever is chosen here." }
+    definition.cornerJoint is FRCChassisJoint;
+
+    if (definition.cornerJoint == FRCChassisJoint.MODULE_CORNER)
+    {
+      annotation { "Name" : "Corner opening", "Description" : "How much rail is left out at each corner for a corner mounted module. SDS prints use 4.250 in on their own." }
+      isLength(definition.cornerGap, FRC_CORNERGAP_BOUNDS);
+    }
+
+    annotation { "Name" : "Axis inset across the width", "Description" : "Rail outside face to steering axis, four corners. SDS MK4 drawing: 3.00 in from the plate corner." }
+    isLength(definition.axisInsetX, FRC_AXISINSET_BOUNDS);
+
+    annotation { "Name" : "Axis inset along the length", "Description" : "Steering axis inset measured along the frame length." }
+    isLength(definition.axisInsetY, FRC_AXISINSET_BOUNDS);
+
+    annotation { "Name" : "Mount style", "Description" : "Both are sold by SDS and WCP. WCP publishes a 2 in ground clearance swing; SDS none for its bottom mount." }
+    definition.mountStyle is FRCSwerveMount;
+
+    annotation { "Name" : "Height kit", "Description" : "The kits SDS sells. WCP, REV and ThriftyBot sell none; WCP moves height by mount style instead." }
+    definition.heightKit is FRCSwerveHeightKit;
+
+    annotation { "Name" : "Module holes" }
+    definition.mountHoles is FRCChassisHoles;
+
+    if (definition.mountHoles != FRCChassisHoles.NONE)
+    {
+      annotation { "Name" : "Typed pattern", "Description" : "Used wherever the module has no vendor print, the MK4i default included. Take the numbers off its CAD." }
+      definition.patternKind is FRCChassisPattern;
+
+      if (definition.patternKind == FRCChassisPattern.GRID)
+      {
+        annotation { "Name" : "Holes across" }
+        isInteger(definition.patternCountX, FRC_PATTERNCOUNT_BOUNDS);
+
+        annotation { "Name" : "Spacing across" }
+        isLength(definition.patternPitchX, FRC_ROWPITCH_BOUNDS);
+
+        annotation { "Name" : "Holes along" }
+        isInteger(definition.patternCountY, FRC_PATTERNCOUNT_BOUNDS);
+
+        annotation { "Name" : "Spacing along" }
+        isLength(definition.patternPitchY, FRC_ROWPITCH_BOUNDS);
+      }
+      else
+      {
+        annotation { "Name" : "Bolt circle diameter" }
+        isLength(definition.circleDiameter, FRC_DIA_BOUNDS);
+
+        annotation { "Name" : "Number of holes" }
+        isInteger(definition.circleHoles, FRC_CIRCLEHOLES_BOUNDS);
+      }
+    }
+
+    if (definition.mountHoles == FRCChassisHoles.THROUGH_FACE)
+    {
+      annotation { "Name" : "Rails the modules bolt to" }
+      definition.faceRail is FRCChassisFace;
+
+      annotation { "Name" : "Pattern height up the rail" }
+      isLength(definition.faceHeight, FRC_AXISINSET_BOUNDS);
+    }
+
+    annotation { "Name" : "Hole size", "Description" : "Typed pattern and both grids. 10-32 clearance 0.196 in, passes a 3/16 in rivet; REV 0.200, ThriftyBot 0.197.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.holeSize is FRCHoleSize;
+
+    annotation { "Name" : "Belly pan", "Default" : true }
+    definition.bellyPan is boolean;
+
+    if (definition.bellyPan)
+    {
+      annotation { "Name" : "Belly pan thickness", "Description" : "1/16 in and 0.09 in aluminum are what teams report using. No vendor publishes a spec.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      isLength(definition.panThickness, FRC_PANTHICK_BOUNDS);
+
+      annotation { "Name" : "Belly pan inset", "Description" : "From the frame edge." }
+      isLength(definition.panInset, FRC_PANINSET_BOUNDS);
+
+      annotation { "Name" : "Grid of holes in the pan", "Default" : false }
+      definition.panGrid is boolean;
+
+      if (definition.panGrid)
+      {
+        annotation { "Name" : "Grid spacing" }
+        isLength(definition.panPitch, FRC_ROWPITCH_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Module support plates", "Default" : false, "Description" : "A plate under each corner, drilled to line through with the module holes. Unpublished; size it to your module." }
+    definition.supportPlates is boolean;
+
+    if (definition.supportPlates)
+    {
+      annotation { "Name" : "Support plate size" }
+      isLength(definition.supportSize, FRC_CORNERGAP_BOUNDS);
+
+      annotation { "Name" : "Support plate thickness" }
+      isLength(definition.supportThickness, FRC_PLATETHK_BOUNDS);
+    }
+
+    annotation { "Name" : "Corner gussets", "Default" : false, "Description" : "Triangular plates over the joined corners. Skipped where a module print opens the corner." }
+    definition.cornerGussets is boolean;
+
+    if (definition.cornerGussets)
+    {
+      annotation { "Name" : "Gusset leg" }
+      isLength(definition.gussetLeg, FRC_CORNERGAP_BOUNDS);
+
+      annotation { "Name" : "Gusset thickness", "Description" : "WCP catalogs its aluminum gussets at 0.098 in.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      isLength(definition.gussetThickness, FRC_PANTHICK_BOUNDS);
+    }
+
+    annotation { "Name" : "Corner cover plates", "Default" : false, "Description" : "A cover over each open corner, spanning the module opening, with the module clearance hole if one is set." }
+    definition.cornerCovers is boolean;
+
+    if (definition.cornerCovers)
+    {
+      annotation { "Name" : "Cover thickness" }
+      isLength(definition.cornerCoverThickness, FRC_PANTHICK_BOUNDS);
+    }
+
+    // The cover plates cut the same clearance hole as the pan and are
+    // switched on independently of it, so this cannot live inside the
+    // belly pan block: with the pan off and covers on it would drive the
+    // cover hole from a field the dialog never showed.
+    if (definition.bellyPan || definition.cornerCovers)
+    {
+      annotation { "Name" : "Module clearance diameter", "Description" : "Hole the module body drops through the pan and any cover. Unpublished; take it off the CAD. Zero cuts none." }
+      isLength(definition.moduleClearance, FRC_MODULECLEAR_BOUNDS);
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcSwerveChassisBuild(context, id, frcDefinition(definition));
+  },
+  {
+    swerveModule : FRCSwerveModule.SDS_MK4I, mixedModules : false,
+    moduleFrontRight : FRCSwerveModule.SDS_MK4I, moduleFrontLeft : FRCSwerveModule.SDS_MK4I,
+    moduleBackLeft : FRCSwerveModule.SDS_MK4I, moduleBackRight : FRCSwerveModule.SDS_MK4I,
+    frameWidth : 27 * inch, squareFrame : true, frameLength : 27 * inch,
+    perimeterLimit : 110 * inch, railWidth : 1 * inch, railHeight : 2 * inch,
+    wallThickness : 0.125 * inch, tubeGrid : FRCChassisTubeGrid.NONE,
+    cornerJoint : FRCChassisJoint.MITER, cornerGap : 3 * inch,
+    axisInsetX : 2.5 * inch, axisInsetY : 2.5 * inch,
+    mountStyle : FRCSwerveMount.TOP_MOUNT, heightKit : FRCSwerveHeightKit.NONE,
+    mountHoles : FRCChassisHoles.MODULE, patternKind : FRCChassisPattern.GRID,
+    patternCountX : 2, patternPitchX : 2 * inch, patternCountY : 3, patternPitchY : 2 * inch,
+    circleDiameter : 4 * inch, circleHoles : 6, faceRail : FRCChassisFace.SIDE_RAILS,
+    faceHeight : 1 * inch, holeSize : FRCHoleSize.NO10_CLEAR, bellyPan : true,
+    panThickness : 0.09 * inch, panInset : 0 * inch, moduleClearance : 0 * inch,
+    panGrid : false, panPitch : 2 * inch, supportPlates : false,
+    supportSize : 5 * inch, supportThickness : 0.25 * inch, cornerGussets : false,
+    gussetLeg : 3 * inch, gussetThickness : 0.098 * inch, cornerCovers : false,
+    cornerCoverThickness : 0.09 * inch, partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Teardrop Hole", "Feature Type Description" : "Reshapes a hole into a teardrop or a keyhole so that a 3D printer can bridge its roof.", "Feature Name Template" : "Teardrop hole - #holes holes" }
+export const frcTeardropHole = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "What to do", "Description" : "Convert reshapes holes that already exist. New cuts them at the points you pick." }
+    definition.mode is FRCTeardropMode;
+
+    if (definition.mode == FRCTeardropMode.CONVERT)
+    {
+      annotation { "Name" : "Holes to reshape", "Filter" : EntityType.FACE && GeometryType.CYLINDER }
+      definition.holeFaces is Query;
+    }
+    else
+    {
+      annotation { "Name" : "Face to cut into", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+      definition.targetFace is Query;
+
+      annotation { "Name" : "Hole locations", "Filter" : EntityType.VERTEX }
+      definition.locations is Query;
+
+      annotation { "Name" : "Set the diameter by hand", "Default" : false }
+      definition.customSize is boolean;
+
+      if (definition.customSize)
+      {
+        annotation { "Name" : "Hole diameter" }
+        isLength(definition.holeDiameter, FRC_DIA_BOUNDS);
+
+        annotation { "Name" : "Fit", "Description" : "Press stays put once driven in, slip assembles by hand, clearance passes through freely.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+        definition.fit is FRCFitClass;
+      }
+      else
+      {
+        annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+        definition.holeSize is FRCHoleSize;
+      }
+
+      annotation { "Name" : "Printed hole compensation", "Description" : "Printed holes come out undersize. Measure one test print and set this value." }
+      isLength(definition.printerComp, FRC_COMP_BOUNDS);
+
+      annotation { "Name" : "Through all", "Default" : true }
+      definition.throughAll is boolean;
+
+      if (!definition.throughAll)
+      {
+        annotation { "Name" : "Hole depth" }
+        isLength(definition.holeDepth, FRC_DEPTH_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Hole shape", "Description" : "Pointed adds a roof nothing has to bridge. Cut flat keeps the hole within the height of its bore." }
+    definition.shape is FRCTeardropShape;
+
+    if (definition.shape != FRCTeardropShape.KEYHOLE)
+    {
+      annotation { "Name" : "Overhang angle", "Description" : "How far a printed wall leans off the build direction before it sags. Most slicers assume 45 deg.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      isAngle(definition.overhang, FRC_OVERHANG_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Keyhole slot width", "Description" : "The screw shank slides along this. The hole itself has to be wider than the slot." }
+      isLength(definition.slotWidth, FRC_BOREDIA_BOUNDS);
+
+      annotation { "Name" : "Keyhole slot travel", "Description" : "How far the screw slides, measured from the hole center. It has to clear the hole radius." }
+      isLength(definition.travel, FRC_DEPTH_BOUNDS);
+    }
+
+    annotation { "Name" : "Build direction", "Description" : "Face or plane whose normal is the way the printer builds. The point and slot go that way. Empty means up.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.upFace is Query;
+
+    annotation { "Name" : "Flip the build direction", "Default" : false }
+    definition.flipUp is boolean;
+  }
+  {
+    frcTeardropHoleBuild(context, id, frcDefinition(definition));
+  },
+  {
+    mode : FRCTeardropMode.CONVERT, customSize : false, holeDiameter : 0.25 * inch,
+    fit : FRCFitClass.CLEARANCE, holeSize : FRCHoleSize.NO10_CLEAR,
+    printerComp : 0.008 * inch, throughAll : true, holeDepth : 0.5 * inch,
+    shape : FRCTeardropShape.POINT, overhang : 45 * degree,
+    slotWidth : 0.125 * inch, travel : 0.5 * inch, flipUp : false
+  });
+
+annotation { "Feature Type Name" : "Tube", "Feature Name Template" : "Tube - #tubes tubes" }
+export const frcTube = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Solid extrusions to convert", "Filter" : EntityType.BODY && BodyType.SOLID }
+    definition.bodies is Query;
+
+    annotation { "Name" : "Wall thickness", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.wallThickness, FRC_TUBEWALL_BOUNDS);
+
+    annotation { "Name" : "Faces to punch" }
+    definition.faceChoice is FRCTubeFaces;
+
+    if (definition.faceChoice != FRCTubeFaces.NONE)
+    {
+      annotation { "Name" : "Hole pattern", "Description" : "Named by vendor, with the hole diameter that vendor punches beside it.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.standard is FRCTubeStandard;
+
+      if (definition.standard == FRCTubeStandard.CUSTOM)
+      {
+        annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+        definition.holeSize is FRCHoleSize;
+
+        annotation { "Name" : "Spacing along the tube" }
+        isLength(definition.lengthPitch, FRC_PITCH_BOUNDS);
+
+        annotation { "Name" : "Spacing across the face" }
+        isLength(definition.rowPitch, FRC_ROWPITCH_BOUNDS);
+
+        annotation { "Name" : "First hole from the end" }
+        isLength(definition.holeStart, FRC_ROWPITCH_BOUNDS);
+      }
+
+      annotation { "Name" : "How many rows across each face" }
+      definition.rowMode is FRCTubeRows;
+
+      annotation { "Name" : "Center the pattern on the tube", "Default" : true }
+      definition.centerPattern is boolean;
+
+      annotation { "Name" : "Spline bores", "Description" : "Cut on the wide faces.", "Default" : false }
+      definition.splineBores is boolean;
+
+      if (definition.splineBores)
+      {
+        annotation { "Name" : "Spline profile", "Description" : "MAXSpline is the REV MAX Pattern, SplineXL the WCP Spline Pattern." }
+        definition.splineKind is FRCTubeSpline;
+
+        annotation { "Name" : "Spline spacing" }
+        isLength(definition.splinePitch, FRC_ROWPITCH_BOUNDS);
+
+        annotation { "Name" : "First spline from the end" }
+        isLength(definition.splineStart, FRC_ROWPITCH_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcTubeBuild(context, id, frcDefinition(definition));
+  },
+  {
+    wallThickness : 0.0625 * inch, faceChoice : FRCTubeFaces.ALL,
+    standard : FRCTubeStandard.WCP_AM, holeSize : FRCHoleSize.NO10_CLEAR,
+    lengthPitch : 0.5 * inch, rowPitch : 0.5 * inch, holeStart : 0.5 * inch,
+    rowMode : FRCTubeRows.AUTO, centerPattern : true, splineBores : false,
+    splineKind : FRCTubeSpline.MAXSPLINE, splinePitch : 2.0 * inch,
+    splineStart : 1.5 * inch, partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Turret", "Feature Name Template" : "Turret" }
+export const frcTurret = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Plane the turret rides on", "Description" : "Plane or flat face the turret rides on. The turret plate is built up from it, the base ring below.", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Bearing" }
+    definition.turretBearing is FRCTurretBearing;
+
+    if (definition.turretBearing != FRCTurretBearing.AM_TURNTABLE)
+    {
+      annotation { "Name" : "Bearing bore", "Description" : "Vendor ladder runs 2.5 to 10 in; outside diameter is bore plus 0.5 in, width 0.25 in. Also the pass-through." }
+      isLength(definition.bearingInner, FRC_TURRETID_BOUNDS);
+    }
+
+    if (definition.turretBearing == FRCTurretBearing.CUSTOM)
+    {
+      annotation { "Name" : "Bearing outside diameter" }
+      isLength(definition.bearingOuter, FRC_TURRETOD_BOUNDS);
+
+      annotation { "Name" : "Bearing width" }
+      isLength(definition.bearingWidth, FRC_TURRETW_BOUNDS);
+    }
+
+    if (definition.turretBearing == FRCTurretBearing.AM_TURNTABLE)
+    {
+      annotation { "Name" : "Holes per bolt circle", "Description" : "AndyMark publishes the two circles and the 0.201 in hole but not the count. Check the bearing in hand." }
+      isInteger(definition.mountHoleCount, FRC_MOUNTCOUNT_BOUNDS);
+    }
+
+    annotation { "Name" : "Cut the ring gear", "Default" : true }
+    definition.makeRing is boolean;
+
+    if (definition.makeRing)
+    {
+      annotation { "Name" : "Gear pitch" }
+      definition.ringPitch is FRCTurretPitch;
+
+      annotation { "Name" : "Ring teeth", "Description" : "The WCP GreyT ring is 140 teeth at 10 DP; the AndyMark turret ring is 200 at 20 DP." }
+      isInteger(definition.ringTeeth, FRC_RINGTEETH_BOUNDS);
+
+      annotation { "Name" : "Pinion teeth", "Description" : "WCP drives with a 10 tooth 10 DP steel pinion; AndyMark with 20 teeth at 20 DP." }
+      isInteger(definition.pinionTeeth, FRC_PINION_BOUNDS);
+
+      annotation { "Name" : "Draw the pinion", "Default" : true }
+      definition.drawPinion is boolean;
+
+      annotation { "Name" : "Ratio ahead of the pinion", "Description" : "Gearbox ratio ahead of the pinion. For the total reduction line in the report." }
+      isReal(definition.upstreamRatio, FRC_UPSTREAM_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Plate outside diameter" }
+      isLength(definition.plateOuter, FRC_TURRETOD_BOUNDS);
+    }
+
+    annotation { "Name" : "Plate thickness", "Description" : "The WCP GreyT ring gear plate is 1/8 in.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    isLength(definition.plateThickness, FRC_PLATETHK_BOUNDS);
+
+    annotation { "Name" : "Base ring", "Default" : true }
+    definition.baseRing is boolean;
+
+    if (definition.baseRing)
+    {
+      annotation { "Name" : "Base ring outside diameter" }
+      isLength(definition.baseOuter, FRC_TURRETOD_BOUNDS);
+
+      annotation { "Name" : "Base ring thickness" }
+      isLength(definition.baseThickness, FRC_PLATETHK_BOUNDS);
+    }
+
+    annotation { "Name" : "Planned rotation range", "Description" : "For the report. 200 to 270 degrees is typical; wires set the real limit." }
+    isAngle(definition.rotationRange, FRC_ROTRANGE_BOUNDS);
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcTurretBuild(context, id, frcDefinition(definition));
+  },
+  {
+    turretBearing : FRCTurretBearing.XCONTACT, bearingInner : 7 * inch,
+    bearingOuter : 7.5 * inch, bearingWidth : 0.25 * inch, mountHoleCount : 8,
+    makeRing : true, ringPitch : FRCTurretPitch.DP10, ringTeeth : 140,
+    pinionTeeth : 10, drawPinion : true, upstreamRatio : 3,
+    plateOuter : 10 * inch, plateThickness : 0.125 * inch,
+    baseRing : true, baseOuter : 9 * inch, baseThickness : 0.25 * inch,
+    rotationRange : 270 * degree, partMaterial : FRCMaterial.AL_6061
+  });
+
+annotation { "Feature Type Name" : "Weight Budget", "Feature Name Template" : "Weight budget" }
+export const frcWeight = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    frcWeighPredicate(definition);
+
+    annotation { "Name" : "Allowance, lb", "Description" : "Wiring, fasteners, tape, electronics and the odd spare. Ten pounds is a common starting guess." }
+    isReal(definition.allowanceLb, FRC_ALLOWANCE_BOUNDS);
+
+    annotation { "Name" : "Bumper set, lb" }
+    isReal(definition.bumperLb, FRC_BUMPERMASS_BOUNDS);
+
+    annotation { "Name" : "Heaviest parts to list" }
+    isInteger(definition.topN, FRC_TOPN_BOUNDS);
+
+    annotation { "Name" : "Robot weight limit, lb", "Description" : "R103 puts the robot alone at 115.0 lb in 2026. It moves with the season, so you set it here." }
+    isReal(definition.robotLimitLb, FRC_WEIGHTLIM_BOUNDS);
+
+    annotation { "Name" : "With bumpers limit, lb", "Description" : "R408 puts robot plus bumpers at 135.0 lb in 2026." }
+    isReal(definition.bumpersLimitLb, FRC_WEIGHTLIM_BOUNDS);
+
+    annotation { "Name" : "Printed infill, percent", "Description" : "What your slicer is set to. A printed part is weighed at a reduced density from this and the wall count." }
+    isReal(definition.infillPct, FRC_INFILL_BOUNDS);
+
+    annotation { "Name" : "Printed wall count", "Description" : "Perimeters per side, as the slicer counts them. The shell is estimated from the part's surface area." }
+    isInteger(definition.wallCount, FRC_WALLS_BOUNDS);
+  }
+  {
+    frcWeightBuild(context, id, frcDefinition(
+          mergeMaps(definition, { "groups" : frcGroupList(definition) })));
+  },
+  mergeMaps(FRC_WEIGH_DEFAULTS, {
+      allowanceLb : 10, bumperLb : 15, topN : 5,
+      robotLimitLb : 115, bumpersLimitLb : 135,
+      infillPct : 20, wallCount : 3
+    }));
+
+annotation { "Feature Type Name" : "Wheel", "Feature Name Template" : "Wheel" }
+export const frcWheel = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Sketch plane or flat face", "Filter" : (EntityType.FACE && GeometryType.PLANE) || (EntityType.FACE && GeometryType.CYLINDER) || (EntityType.EDGE && GeometryType.CIRCLE) || EntityType.VERTEX || BodyType.MATE_CONNECTOR, "MaxNumberOfPicks" : 1 }
+    definition.location is Query;
+
+    annotation { "Name" : "Style" }
+    definition.style is FRCWheelStyle;
+
+    if (definition.style == FRCWheelStyle.HUB)
+    {
+      annotation { "Name" : "Hub diameter" }
+      isLength(definition.hubDiameter, FRC_DIA_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Diameter" }
+      isLength(definition.diameter, FRC_WHEELDIA_BOUNDS);
+    }
+
+    annotation { "Name" : "Width" }
+    isLength(definition.width, FRC_WHEELWIDTH_BOUNDS);
+
+    if (definition.style == FRCWheelStyle.TRACTION)
+    {
+      annotation { "Name" : "Tread" }
+      definition.tread is FRCTread;
+
+      if (definition.tread == FRCTread.CUSTOM)
+      {
+        annotation { "Name" : "Tread thickness" }
+        isLength(definition.treadThickness, FRC_TUBEWALL_BOUNDS);
+      }
+
+      annotation { "Name" : "Diameter includes the tread", "Default" : true }
+      definition.sizeOverTread is boolean;
+
+      annotation { "Name" : "Tread width" }
+      isLength(definition.treadWidth, FRC_TREADWIDTH_BOUNDS);
+
+      annotation { "Name" : "Flange above the seat" }
+      isLength(definition.flangeStand, FRC_FLANGE_BOUNDS);
+    }
+
+    annotation { "Name" : "Bolt pattern" }
+    definition.pattern is FRCWheelPattern;
+
+    if (definition.pattern == FRCWheelPattern.CUSTOM)
+    {
+      annotation { "Name" : "Bolt circle diameter" }
+      isLength(definition.boltCircle, FRC_BOLTCIRCLE_BOUNDS);
+
+      annotation { "Name" : "Number of holes" }
+      isInteger(definition.boltCount, FRC_BOLTCOUNT_BOUNDS);
+    }
+
+    if (definition.pattern != FRCWheelPattern.NONE)
+    {
+      annotation { "Name" : "Hole size", "Description" : "Clear passes the screw, tap is drilled for threading. The drill diameter is beside each name.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.boltSize is FRCHoleSize;
+
+      annotation { "Name" : "First hole at" }
+      isAngle(definition.boltStart, ANGLE_360_ZERO_DEFAULT_BOUNDS);
+    }
+
+    frcBorePredicate(definition);
+
+    if (definition.style != FRCWheelStyle.HUB)
+    {
+      annotation { "Name" : "Lighten the web", "Default" : false }
+      definition.lighten is boolean;
+
+      if (definition.lighten)
+      {
+        annotation { "Name" : "Number of spokes" }
+        isInteger(definition.spokes, FRC_SPOKES_BOUNDS);
+
+        annotation { "Name" : "Spoke width" }
+        isLength(definition.spokeWidth, FRC_WALL_BOUNDS);
+
+        annotation { "Name" : "Rim thickness" }
+        isLength(definition.rimWidth, FRC_WALL_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Material", "Description" : "Sets the part density and color. Pool noodle is closed-cell foam, wire bundle a routed wire run.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+    definition.partMaterial is FRCMaterial;
+  }
+  {
+    frcWheelBuild(context, id, frcDefinition(definition));
+  },
+  mergeMaps(FRC_BORE_DEFAULTS, {
+      style : FRCWheelStyle.TRACTION, hubDiameter : 2.19 * inch, diameter : 4 * inch,
+      width : 1.25 * inch, tread : FRCTread.ROUGHTOP, treadThickness : 0.313 * inch,
+      sizeOverTread : true, treadWidth : 1 * inch, flangeStand : 0.05 * inch,
+      pattern : FRCWheelPattern.BC_1875_6, boltCircle : 1.875 * inch, boltCount : 6,
+      boltSize : FRCHoleSize.NO10_CLEAR, boltStart : 0 * degree, lighten : false,
+      spokes : 5, spokeWidth : 0.2 * inch, rimWidth : 0.15 * inch,
+      partMaterial : FRCMaterial.AL_6061
+    }));
+
+annotation { "Feature Type Name" : "Wire Path", "Feature Name Template" : "Wire path" }
+export const frcWirePath = defineFeature(function(context is Context, id is Id, definition is map)
+  precondition
+  {
+    annotation { "Name" : "Plate face", "Description" : "The face the wires run across.", "Filter" : EntityType.FACE && GeometryType.PLANE, "MaxNumberOfPicks" : 1 }
+    definition.plate is Query;
+
+    annotation { "Name" : "How to route" }
+    definition.mode is FRCWireMode;
+
+    if (definition.mode == FRCWireMode.SKETCH)
+    {
+      annotation { "Name" : "Path to follow", "Filter" : EntityType.EDGE }
+      definition.pathEdges is Query;
+    }
+    else
+    {
+      annotation { "Name" : "Start and end points", "Filter" : EntityType.VERTEX, "MaxNumberOfPicks" : 2 }
+      definition.endPoints is Query;
+
+      if (definition.mode == FRCWireMode.ROUTED)
+      {
+        annotation { "Name" : "Routing step", "Description" : "A smaller step finds narrower ribs but takes longer to solve." }
+        isLength(definition.routeStep, FRC_WALL_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Size the bundle from the wires", "Default" : true }
+    definition.autoBundle is boolean;
+
+    if (definition.autoBundle)
+    {
+      annotation { "Name" : "Wire gauge" }
+      definition.gauge is FRCWireGauge;
+
+      annotation { "Name" : "Wires in the bundle" }
+      isInteger(definition.wireCount, FRC_WIRECOUNT_BOUNDS);
+    }
+    else
+    {
+      annotation { "Name" : "Bundle diameter" }
+      isLength(definition.bundleDia, FRC_DIA_BOUNDS);
+    }
+
+    annotation { "Name" : "Cut cable tie slots", "Default" : true }
+    definition.tieSlots is boolean;
+
+    if (definition.tieSlots)
+    {
+      annotation { "Name" : "Cable tie size", "Description" : "The value in parentheses is the strap width.", "UIHint" : UIHint.REMEMBER_PREVIOUS_VALUE }
+      definition.tieSize is FRCTieSize;
+
+      annotation { "Name" : "Space the ties automatically", "Default" : true }
+      definition.autoSpacing is boolean;
+
+      if (!definition.autoSpacing)
+      {
+        annotation { "Name" : "Tie spacing" }
+        isLength(definition.tieSpacing, FRC_ROWPITCH_BOUNDS);
+      }
+    }
+
+    annotation { "Name" : "Show the wire run as a part", "Default" : false }
+    definition.showBundle is boolean;
+  }
+  {
+    frcWirePathBuild(context, id, frcDefinition(definition));
+  },
+  {
+    mode : FRCWireMode.ROUTED, routeStep : 0.25 * inch,
+    autoBundle : true, gauge : FRCWireGauge.AWG12, wireCount : 2,
+    bundleDia : 0.375 * inch, tieSlots : true, tieSize : FRCTieSize.TIE_190,
+    autoSpacing : true, tieSpacing : 3 * inch, showBundle : false
+  });

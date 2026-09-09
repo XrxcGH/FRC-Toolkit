@@ -1,0 +1,1229 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+export import(path : "82d221137a697995b51d4734", version : "da6966cb2fb984d08cceddd0");
+
+// ===========================================================================
+//  FRC MANUFACTURING GEOMETRY: drive solving and shop-floor cleanup
+// ---------------------------------------------------------------------------
+//  FRC Belt and Chain, FRC Belt Path, FRC Fillet Edges, FRC Dogbone Corners
+//  and FRC Measure are declared in the FRC Toolkit tab and do their work here.
+//  The belt and chain tables come from FRC Motion Geometry, which is why it is
+//  imported above.
+// ===========================================================================
+
+export const FRC_DRIVETEETH_BOUNDS = { (unitless) : [6, 24, 300] } as IntegerBoundSpec;
+export const FRC_BELTLEN_BOUNDS = { (unitless) : [10, 100, 900] } as IntegerBoundSpec;
+
+/**
+ * Timing belts are stocked in whole steps of this many teeth. HTD 5 mm and
+ * GT2 3 mm belts at WCP, REV, VEX and AndyMark all step by five, so a count
+ * that is not a multiple of five is not a belt anyone can put in a cart.
+ */
+export const FRC_BELT_TOOTH_STEP = 5;
+
+// ############################ BELT AND CHAIN ############################
+
+export enum FRCDriveKind
+{
+    annotation { "Name" : "Timing belt" }  BELT,
+    annotation { "Name" : "Roller chain" } CHAIN,
+    annotation { "Name" : "Round cord" }   CORD
+}
+
+/** Length means the belt, chain or cord. Spacing means the center distance. */
+export enum FRCDriveSolve
+{
+    annotation { "Name" : "Find length from spacing" }  FROM_SPACING,
+    annotation { "Name" : "Find spacing from length" }  FROM_LENGTH
+}
+
+/**
+ * Wrapped length of an open belt over two pulleys of pitch radii r1 and r2 at
+ * center distance c. This is the exact expression, not the usual series
+ * approximation, so the tooth count it returns is the one that fits.
+ *
+ * The small pulley wraps 2 * alpha and the large one takes the rest of the
+ * turn. Getting those two the wrong way round still gives the right answer for
+ * equal pulleys, which is what makes the mistake easy to miss, but on a 60 to
+ * 12 tooth reduction at 5 in centers it under-reports by 1.8 in, which is nine
+ * teeth of HTD 5 mm belt.
+ */
+export function frcWrapLength(r1 is ValueWithUnits, r2 is ValueWithUnits,
+    c is ValueWithUnits) returns ValueWithUnits
+{
+    const big = max(r1, r2);
+    const small = min(r1, r2);
+    if (c <= big - small)
+        return 0 * inch;
+    const alpha = acos((big - small) / c);
+    return 2 * c * sin(alpha) + 2 * small * (alpha / radian)
+        + 2 * big * (PI - alpha / radian);
+}
+
+/** Center distance that gives exactly `len` of belt, found by bisection. */
+export function frcSolveCenter(r1 is ValueWithUnits, r2 is ValueWithUnits,
+    len is ValueWithUnits) returns ValueWithUnits
+{
+    var lo = abs(r1 - r2) + 1e-4 * inch;
+    var hi = len / 2;
+    if (frcWrapLength(r1, r2, hi) < len)
+        return hi;
+    for (var i = 0; i < 60; i += 1)
+    {
+        const mid = (lo + hi) / 2;
+        if (frcWrapLength(r1, r2, mid) < len)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return (lo + hi) / 2;
+}
+
+/**
+ * The smallest tooth count at or above `exactTeeth` that a belt vendor will
+ * actually sell.
+ *
+ * Rounding the exact requirement up with ceil() alone is the obvious thing and
+ * it is wrong four times out of five: it hands back 79 or 143 teeth, and no
+ * FRC supplier stocks either. Belts come in steps of five teeth, so the count
+ * has to climb to the next step before it means anything to a team ordering
+ * parts. Rounding up rather than to nearest is deliberate, because a belt one
+ * step short cannot be fitted at all, while a belt one step long only costs
+ * center distance, which the caller then reports.
+ */
+export function frcStockableBeltTeeth(exactTeeth is number) returns number
+{
+    if (exactTeeth <= 0)
+        return FRC_BELT_TOOTH_STEP;
+    return ceil(exactTeeth / FRC_BELT_TOOTH_STEP) * FRC_BELT_TOOTH_STEP;
+}
+
+export function frcDriveBuild(context is Context, id is Id, definition is map)
+{
+    const tf = evaluateQuery(context, definition.plane);
+    if (size(tf) == 0)
+        throw regenError("Select the plane or flat face the drive lies on.", ["drivePlane"]);
+
+    // Pattern and mirror support. The envelope is sketched on the picked plane,
+    // so that plane is the reference the pattern transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.plane });
+
+    const pl = frcPickFrame(context, definition.plane, XY_PLANE);
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+
+    const ends = evaluateQuery(context, definition.centers);
+    if (size(ends) < 2)
+        throw regenError("Pick the two shaft centers.", ["centers"]);
+    var a = vector(0, 0) * inch;
+    var b = vector(0, 0) * inch;
+    try
+    {
+        const p1 = evVertexPoint(context, { "vertex" : ends[0] }) - cSys.origin;
+        const p2 = evVertexPoint(context, { "vertex" : ends[size(ends) - 1] }) - cSys.origin;
+        a = vector(dot(p1, cSys.xAxis), dot(p1, yAxis));
+        b = vector(dot(p2, cSys.xAxis), dot(p2, yAxis));
+    }
+    catch
+    {
+        throw regenError("Those centers could not be read. Pick vertices or sketch points.", ["centers"], definition.centers);
+    }
+    const actualC = norm(b - a);
+    if (actualC < 1e-4 * inch)
+        throw regenError("Both centers landed in the same place. Pick two different points.", ["centers"], definition.centers);
+
+    var pitch = 0 * inch;
+    var r1 = 0 * inch;
+    var r2 = 0 * inch;
+    var unitName = "";
+    if (definition.kind == FRCDriveKind.BELT)
+    {
+        const bd = frcBeltData(definition.profile);
+        pitch = bd.pitch;
+        r1 = bd.pitch * definition.teeth1 / (2 * PI);
+        r2 = bd.pitch * definition.teeth2 / (2 * PI);
+        unitName = "belt teeth";
+    }
+    else if (definition.kind == FRCDriveKind.CHAIN)
+    {
+        const cd = frcChainData(definition.chain);
+        pitch = cd.pitch;
+        r1 = cd.pitch / (2 * sin((180 / definition.teeth1) * degree));
+        r2 = cd.pitch / (2 * sin((180 / definition.teeth2) * degree));
+        unitName = "chain links";
+    }
+    else
+    {
+        pitch = 1 * inch;
+        r1 = definition.cordDia1 / 2;
+        r2 = definition.cordDia2 / 2;
+    }
+
+    // frcWrapLength returns zero when the centers are closer together than
+    // the pitch radii differ, because no loop can wrap a pulley that sits
+    // inside another. The envelope sketch below takes acos of the same
+    // ratio with no such guard, so the case has to be stopped here.
+    if (actualC <= abs(r1 - r2))
+        throw regenError("Those centers are too close for these pulley sizes: the smaller pitch circle sits inside the larger. Move the centers apart, or use smaller pulleys.", ["centers"], definition.centers);
+
+    const lenAtActual = frcWrapLength(r1, r2, actualC);
+    var counted = 0;
+    var exactTeeth = 0;
+    var fitC = actualC;
+    var slack = 0 * inch;
+    var fitOk = true;
+    var offStock = false;
+    // Round cord is cut off a spool, so it has no stock length to count up to
+    // and nothing in this block applies to it. It used to be handed the wrapped
+    // length in inches as its "count", which the report then printed a second
+    // time as a nearest size.
+    if (definition.kind != FRCDriveKind.CORD)
+    {
+        // The fractional count is the honest requirement. Everything below is
+        // the climb from it to something a team can actually buy.
+        exactTeeth = lenAtActual / pitch;
+        if (definition.solve == FRCDriveSolve.FROM_SPACING)
+        {
+            if (definition.kind == FRCDriveKind.BELT)
+                counted = frcStockableBeltTeeth(exactTeeth);
+            else
+            {
+                counted = ceil(exactTeeth);
+                // A chain has to close on an even number of links. An odd
+                // count needs an offset link, which is the weakest part of
+                // the run and the first thing to fail under load.
+                if (counted % 2 == 1)
+                    counted += 1;
+            }
+        }
+        else
+        {
+            // Here the count came from the user, who may already have the belt
+            // in hand, so it is taken as given. It is still worth saying when
+            // it is not a size anyone sells.
+            counted = definition.length;
+            offStock = definition.kind == FRCDriveKind.BELT
+                && counted % FRC_BELT_TOOTH_STEP != 0;
+        }
+        fitC = frcSolveCenter(r1, r2, counted * pitch);
+        slack = fitC - actualC;
+
+        // frcSolveCenter bisects between the pulleys touching and half the
+        // loop length, so a loop too short for the pair does not fail. It
+        // bottoms out on the low bound and returns a center distance the
+        // pulleys cannot physically sit at, sometimes at or below zero. Catch
+        // that here: a number this feature prints is a number somebody drills
+        // to, so a warning is the only honest output.
+        if (fitC <= 0 * inch || fitC < r1 + r2
+            || abs(frcWrapLength(r1, r2, fitC) - counted * pitch) > 1e-3 * inch)
+            fitOk = false;
+    }
+
+    var made = false;
+    if (definition.showPath)
+    {
+        const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : pl });
+        skCircle(sk, "p1", { "center" : a, "radius" : r1 });
+        skCircle(sk, "p2", { "center" : b, "radius" : r2 });
+        const big = max(r1, r2);
+        const small = min(r1, r2);
+        const alpha = acos((big - small) / actualC);
+        const cBig = (r1 >= r2) ? a : b;
+        const cSmall = (r1 >= r2) ? b : a;
+        const w = (cSmall - cBig) / actualC;
+        const nrm = vector(-w[1], w[0]);
+        for (var side in [-1, 1])
+        {
+            const d1 = w * cos(alpha) + nrm * (side * sin(alpha));
+            const p1 = cBig + d1 * big;
+            const p2 = cSmall + d1 * small;
+            const L = norm(p2 - p1);
+            if (L < 1e-6 * inch)
+                continue;
+            const quad = frcBar(p1, (p2 - p1) / L, L, definition.width);
+            skPolyline(sk, "t" ~ side, { "points" : append(quad, quad[0]) });
+        }
+        skSolve(sk);
+        opExtrude(context, id + "x", { "entities" : qSketchRegion(id + "s", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.width });
+        made = true;
+        setProperty(context, { "entities" : qCreatedBy(id + "x", EntityType.BODY),
+                    "propertyType" : PropertyType.NAME, "value" : "Drive Envelope" });
+        // The envelope is reference geometry and carries no material: it is
+        // the space the drive sweeps, not a thing anybody cuts, and a material
+        // on it would only invite the weight report to count it. The color
+        // follows the studio scheme at the transparency it has always had,
+        // because seeing the mechanism through it is the whole use of an
+        // envelope, and the team paint carries no alpha of its own.
+        setProperty(context, { "entities" : qCreatedBy(id + "x", EntityType.BODY),
+                    "propertyType" : PropertyType.APPEARANCE,
+                    "value" : frcTeamColorA(context, FRCPartClass.REFERENCE,
+                        color(0.20, 0.65, 0.35, 0.35), 0.35) });
+    }
+
+    // The envelope is the only body this feature makes, so there is nothing to
+    // move when the path was not drawn.
+    if (made)
+        transformResultIfNecessary(context, id, remainderTransform);
+
+    var lines = "";
+    if (definition.kind == FRCDriveKind.CORD)
+        // Cord comes off a spool by the foot, so there is no nearest size to
+        // name, only the wrapped length.
+        lines ~= "Cut " ~ frcInches(lenAtActual) ~ " of cord for "
+            ~ frcInches(actualC) ~ " centers. ";
+    else
+    {
+        // Not "nearest". The count is ceil of the requirement and then one
+        // more if that came out odd, so it is always at or above what is
+        // needed and never the nearer of the two. Rounding up is the right
+        // behaviour, because a chain a link short cannot be fitted at all,
+        // but the panel has to say which way it went, so the exact
+        // requirement is quoted beside the count.
+        lines ~= "Use " ~ counted ~ " " ~ unitName
+            ~ ((definition.kind == FRCDriveKind.BELT)
+                ? (", " ~ roundToPrecision(exactTeeth, 2) ~ " needed. ") : ". ");
+        if (!fitOk)
+            lines ~= "WARNING That loop is too short to reach around both "
+                ~ "pulleys, so there is no center distance. Use fewer teeth "
+                ~ "or a longer loop. ";
+        else
+        {
+            // The stock size is not free: it moves the center distance. A team
+            // decides between moving a shaft and hanging a tensioner off this
+            // one number, so it leads the panel.
+            lines ~= "Centers come out " ~ frcInches(fitC) ~ " against "
+                ~ frcInches(actualC) ~ " as drawn, so move a shaft "
+                ~ frcThou(slack) ~ " or take it up on a tensioner. ";
+            if (abs(slack) > 0.02 * inch)
+                lines ~= "NOTE Over 20 thou out, "
+                    ~ ((definition.kind == FRCDriveKind.BELT)
+                        ? "more than a belt will stretch away. "
+                        : "so move a shaft or add a tensioner. ");
+            if (offStock)
+                lines ~= "NOTE " ~ counted ~ " teeth is not a stocked size; next up is "
+                    ~ frcStockableBeltTeeth(counted) ~ " teeth. ";
+        }
+    }
+    if (definition.kind == FRCDriveKind.CHAIN)
+        lines ~= "Keep chain centers between " ~ frcInches(30 * pitch) ~ " and "
+            ~ frcInches(50 * pitch) ~ ", on an even link count.";
+    else if (definition.kind == FRCDriveKind.BELT)
+        lines ~= "Belts do not stretch: set a first stage 0 to 3 thou tight, "
+            ~ "an intake 15 to 20 thou loose.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################## BELT PATH ###############################
+
+/**
+ * The closed path a belt or chain takes over any number of pulleys, given
+ * their centers in belt order.
+ *
+ * Each pulley is assigned a signed radius: positive where the belt passes on
+ * one side of the center, negative where it passes on the other. The sign
+ * follows from the shape of the center polygon, so a pulley at a convex corner
+ * is wrapped from the outside and one at a reflex corner is an idler pressing
+ * into the span, and neither has to be declared. From there the common tangent
+ * between consecutive pulleys is exact, and the wrap at each pulley is the
+ * angle between the tangent that arrives and the tangent that leaves.
+ *
+ * Returns the total length, the wrap angle and side at each pulley, whether
+ * each pulley is an idler, and the contact angles the drawn path is built
+ * from. Checked against the two pulley closed form, against three and four
+ * equal pulleys where the answer is the tangent polygon plus one full circle,
+ * and against the drawn geometry, whose perimeter matches the computed length
+ * to five decimals.
+ *
+ * `sides` and `idler` are not the same thing and a caller should not read one
+ * for the other. `sides` is geometry, the side of its centre the belt passes
+ * on, and its sign follows the winding of the centre polygon, so it is the
+ * opposite way round on a clockwise pick. `idler` is the question a report
+ * asks, is this pulley pressed into the span, and it is the same answer
+ * whichever way round the circles were picked.
+ */
+export function frcBeltLoop(centers is array, radii is array) returns map
+{
+    const n = size(centers);
+    // FRC Belt Path rejects fewer than two circles before it calls this, so the
+    // guard is unreachable from there. It stays because this is an exported
+    // helper that another caller can reach directly, and with one pulley the
+    // tangent solve below has no distance between consecutive centers to work
+    // with. Returning a map rather than throwing costs a caller nothing.
+    if (n < 2)
+        return { "ok" : false, "why" : "A belt needs at least two pulleys." };
+
+    var area = 0 * meter * meter;
+    for (var i = 0; i < n; i += 1)
+    {
+        const a = centers[i];
+        const b = centers[(i + 1) % n];
+        area = area + (a[0] * b[1] - a[1] * b[0]);
+    }
+    const orient = (area >= 0 * meter * meter) ? 1 : -1;
+
+    var sides = [];
+    var idlers = [];
+    for (var i = 0; i < n; i += 1)
+    {
+        const a = centers[i] - centers[(i + n - 1) % n];
+        const b = centers[(i + 1) % n] - centers[i];
+        const turn = (a[0] * b[1] - a[1] * b[0]) * orient;
+        sides = append(sides, (turn >= 0 * meter * meter) ? -orient : orient);
+        // A pulley at a reflex corner of the centre polygon is pressed into
+        // the span from the inside, which is what makes it an idler. `turn`
+        // already has `orient` multiplied through it, so it reads the same
+        // whichever way round the circles were picked. `sides` does not: it
+        // is the geometric side of the centre the belt passes on, and that
+        // flips with the winding, so a label taken from its sign called every
+        // driven pulley an idler as soon as the picks came out clockwise.
+        idlers = append(idlers, turn < 0 * meter * meter);
+    }
+
+    var tangents = 0 * meter;
+    var arrive = makeArray(n, 0 * radian);
+    var leave = makeArray(n, 0 * radian);
+    for (var i = 0; i < n; i += 1)
+    {
+        const j = (i + 1) % n;
+        const dv = centers[j] - centers[i];
+        const d = sqrt(dv[0] * dv[0] + dv[1] * dv[1]);
+        if (d < 1e-6 * meter)
+            return { "ok" : false,
+                     "why" : "Two of those pulleys sit on top of each other. Move one apart." };
+        const k = (sides[i] * radii[i] - sides[j] * radii[j]) / d;
+        if (abs(k) > 1)
+            return { "ok" : false,
+                     "why" : "Two of those pulleys overlap, so no belt can pass over both. Move them apart." };
+        const psi = acos(k);
+        tangents = tangents + d * sin(psi);
+        const phi = atan2(dv[1], dv[0]) + psi;
+        leave[i] = phi;
+        arrive[j] = phi;
+    }
+
+    var arcs = 0 * meter;
+    var wraps = [];
+    var total = 0 * radian;
+    for (var i = 0; i < n; i += 1)
+    {
+        var w = (sides[i] > 0) ? (arrive[i] - leave[i]) : (leave[i] - arrive[i]);
+        while (w < 0 * radian)
+            w = w + 2 * PI * radian;
+        while (w >= 2 * PI * radian)
+            w = w - 2 * PI * radian;
+        wraps = append(wraps, w);
+        arcs = arcs + radii[i] * (w / radian);
+        total = total + (sides[i] > 0 ? -w : w);
+    }
+    return { "ok" : true, "length" : tangents + arcs, "tangents" : tangents, "arcs" : arcs,
+             "wrap" : wraps, "sides" : sides, "idler" : idlers, "arrive" : arrive,
+             "leave" : leave, "turn" : total };
+}
+
+/**
+ * The pitch radius of a sprocket whose OUTSIDE edge was picked.
+ *
+ * A timing belt rides on a pitch circle that lies outside the pulley, one
+ * pitch line differential out, which is why the belt branch below adds. A
+ * sprocket is the other way round: its pitch circle lies INSIDE its outside
+ * diameter, and by how much depends on the tooth count, which this dialog
+ * never asks for. It does not have to. ANSI B29.1 gives the outside diameter
+ * as P (0.6 + cot(180 / N)), so a picked outside radius and the chain pitch
+ * determine N outright:
+ *
+ *     cot(pi / N) = 2 r / P - 0.6,  so  N = pi / atan(1 / that),
+ *
+ * and the pitch radius follows as P / (2 sin(pi / N)). Before this the chain
+ * branch applied no correction at all, so a 16 tooth #25 sprocket picked at
+ * its outside edge came in 0.0627 in oversize, about 1.6 links over a two
+ * sprocket run.
+ *
+ * Returns the radius unchanged when the pick cannot be a sprocket outside
+ * edge for this chain, because guessing is worse than not correcting.
+ */
+export function frcSprocketPitchRadius(rOuter is ValueWithUnits,
+    pitch is ValueWithUnits) returns ValueWithUnits
+{
+    if (pitch <= 0 * inch || rOuter <= 0 * inch)
+        return rOuter;
+    const c = 2 * rOuter / pitch - 0.6;
+    // cot(pi / N) is 1.73 at six teeth and grows with the count, so anything
+    // under that is not a sprocket on this chain.
+    if (c < 1.5)
+        return rOuter;
+    const n = PI / (atan(1 / c) / radian);
+    if (n < 6 || n > 200)
+        return rOuter;
+    return pitch / (2 * sin(PI / n * radian));
+}
+
+/** Where the belt touches pulley `i` at contact angle `a`. */
+export function frcBeltTouch(centers is array, radii is array, sides is array,
+    i is number, a is ValueWithUnits) returns Vector
+{
+    return centers[i] + vector(cos(a), sin(a)) * (sides[i] * radii[i]);
+}
+
+export function frcBeltPathBuild(context is Context, id is Id, definition is map)
+{
+    const tf = evaluateQuery(context, definition.plane);
+    if (size(tf) == 0)
+        throw regenError("Select the plane or flat face the drive lies on.", ["drivePlane"]);
+    const pl = frcPickFrame(context, definition.plane, XY_PLANE);
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+
+    const circles = evaluateQuery(context, definition.pulleys);
+    if (size(circles) < 2)
+        throw regenError("Pick at least two pulley circles, in the order the belt runs.", ["pulleys"]);
+    if (size(circles) > 12)
+        throw regenError("That is more pulleys than one belt should run over. Split the drive.", ["pulleys"], definition.pulleys);
+
+    // Pattern and mirror support. The picked circles are what put the belt path
+    // in space, so they are the reference the pattern transform is measured
+    // against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.pulleys });
+
+    // A timing belt rides on its pitch circle, which sits one pitch line
+    // differential outside the pulley's own outside diameter.
+    var pld = 0 * inch;
+    var pitch = 0 * inch;
+    var unitName = "in of cord";
+    if (definition.kind == FRCDriveKind.BELT)
+    {
+        const bd = frcBeltData(definition.profile);
+        pld = bd.pld;
+        pitch = bd.pitch;
+        unitName = "belt teeth";
+    }
+    else if (definition.kind == FRCDriveKind.CHAIN)
+    {
+        const cd = frcChainData(definition.chain);
+        pitch = cd.pitch;
+        unitName = "chain links";
+    }
+
+    var centers = [];
+    var radii = [];
+    for (var e in circles)
+    {
+        var got = false;
+        try silent
+        {
+            const c = evCurveDefinition(context, { "edge" : e });
+            const rel = c.coordSystem.origin - cSys.origin;
+            centers = append(centers, vector(dot(rel, cSys.xAxis), dot(rel, yAxis)));
+            // A belt pitch circle is outside the pulley and a sprocket pitch
+            // circle is inside it, so the two kinds correct in opposite
+            // directions. Cord is left alone: its neutral axis depends on a
+            // cord diameter this dialog does not ask for.
+            radii = append(radii, definition.atPitch
+                ? c.radius
+                : ((definition.kind == FRCDriveKind.CHAIN)
+                    ? frcSprocketPitchRadius(c.radius, pitch)
+                    : c.radius + pld));
+            got = true;
+        }
+        if (!got)
+            throw regenError("Those have to be full circles. Pick the pitch circle or the outside edge of each pulley.", ["pulleys"], e);
+    }
+
+    const loop = frcBeltLoop(centers, radii);
+    if (!loop.ok)
+        throw regenError(loop.why, ["pulleys"], definition.pulleys);
+
+    const n = size(centers);
+    var made = false;
+    if (definition.showPath)
+    {
+        const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : pl });
+        for (var i = 0; i < n; i += 1)
+        {
+            const j = (i + 1) % n;
+            const pOut = frcBeltTouch(centers, radii, loop.sides, i, loop.leave[i]);
+            const pIn = frcBeltTouch(centers, radii, loop.sides, j, loop.arrive[j]);
+            skLineSegment(sk, "t" ~ i, { "start" : pOut, "end" : pIn });
+            const w = loop.wrap[i];
+            if (w > 1e-4 * radian)
+            {
+                const mid = loop.arrive[i] + (loop.sides[i] > 0 ? -w / 2 : w / 2);
+                skArc(sk, "a" ~ i, {
+                            "start" : frcBeltTouch(centers, radii, loop.sides, i, loop.arrive[i]),
+                            "mid" : frcBeltTouch(centers, radii, loop.sides, i, mid),
+                            "end" : pOut });
+            }
+        }
+        skSolve(sk);
+
+        // The envelope comes off its own sketch and not off the path above.
+        // The path is one closed curve, so the only region it bounds is the
+        // whole inside of the loop, and extruding that gave a solid slab that
+        // swallowed every pulley it was drawn around. FRC Belt and Chain, one
+        // feature up this tab and doing the same job, builds its envelope
+        // from the pitch discs and a bar along each tangent span, which is
+        // the footprint the drive really occupies and leaves the middle of
+        // the loop open. This is that construction over any number of
+        // pulleys, so the two features now agree on what an envelope is.
+        const ske = newSketchOnPlane(context, id + "e", { "sketchPlane" : pl });
+        for (var i = 0; i < n; i += 1)
+            skCircle(ske, "d" ~ i, { "center" : centers[i], "radius" : radii[i] });
+        for (var i = 0; i < n; i += 1)
+        {
+            const j = (i + 1) % n;
+            const pOut = frcBeltTouch(centers, radii, loop.sides, i, loop.leave[i]);
+            const pIn = frcBeltTouch(centers, radii, loop.sides, j, loop.arrive[j]);
+            const L = norm(pIn - pOut);
+            if (L < 1e-6 * inch)
+                continue;
+            const quad = frcBar(pOut, (pIn - pOut) / L, L, definition.width);
+            skPolyline(ske, "b" ~ i, { "points" : append(quad, quad[0]) });
+        }
+        skSolve(ske);
+        const regions = qSketchRegion(id + "e", false);
+        if (size(evaluateQuery(context, regions)) > 0)
+        {
+            opExtrude(context, id + "x", { "entities" : regions, "direction" : pl.normal,
+                        "endBound" : BoundingType.BLIND, "endDepth" : definition.width });
+            made = true;
+            setProperty(context, { "entities" : qCreatedBy(id + "x", EntityType.BODY),
+                        "propertyType" : PropertyType.NAME, "value" : "Belt Envelope" });
+            // Reference geometry, no material, and translucent for the same
+            // reason as the envelope in FRC Belt and Chain above: an opaque
+            // one hides the pulleys it is drawn around. The team paint has no
+            // alpha, so this one's is handed over beside it.
+            setProperty(context, { "entities" : qCreatedBy(id + "x", EntityType.BODY),
+                        "propertyType" : PropertyType.APPEARANCE,
+                        "value" : frcTeamColorA(context, FRCPartClass.REFERENCE,
+                            color(0.20, 0.65, 0.35, 0.35), 0.35) });
+        }
+    }
+
+    // The envelope is the only body this feature makes, so there is nothing to
+    // move when the path was not drawn.
+    if (made)
+        transformResultIfNecessary(context, id, remainderTransform);
+
+    var lines = "";
+    if (pitch > 0 * inch)
+    {
+        var count = ceil(loop.length / pitch);
+        if (definition.kind == FRCDriveKind.CHAIN && count % 2 == 1)
+            count += 1;
+        // Same stocking rule as FRC Belt and Chain, for the same reason: a
+        // count that is not a multiple of five is not a belt on sale anywhere.
+        else if (definition.kind == FRCDriveKind.BELT)
+            count = frcStockableBeltTeeth(loop.length / pitch);
+        // The count is rounded up and then made even, so it is never the
+        // nearer of the two sizes, which is why the panel quotes how much
+        // longer than the path it comes out.
+        lines ~= "Use " ~ count ~ " " ~ unitName ~ ", "
+            ~ frcInches(count * pitch - loop.length) ~ " longer than the "
+            ~ frcInches(loop.length) ~ " path"
+            ~ ((definition.kind == FRCDriveKind.BELT)
+                ? ", so take the slack up on an idler. " : ". ");
+    }
+    else
+        lines ~= "Cut " ~ frcInches(loop.length) ~ " of cord for this path. ";
+    // Only the pulleys that are short of mesh are named. The rest carry no
+    // decision: a pulley with plenty of teeth engaged is not something a
+    // team acts on, and listing all of them buried the ones that matter.
+    var low = "";
+    var nLow = 0;
+    for (var i = 0; i < n; i += 1)
+    {
+        const w = loop.wrap[i] / degree;
+        // Teeth in mesh, and the warning under six, describe a pulley the
+        // belt drives through. An idler runs on the back of a timing belt
+        // and has no tooth engaged at all, so neither the count nor the
+        // warning says anything true about one. The four pulley case used to
+        // report its idler as "2.1 teeth, low".
+        if (pitch > 0 * inch && !loop.idler[i])
+        {
+            const mesh = 2 * PI * radii[i] * (w / 360) / pitch;
+            if (mesh < 6)
+            {
+                nLow += 1;
+                low = low ~ ((nLow > 1) ? ", " : "") ~ (i + 1) ~ " ("
+                    ~ roundToPrecision(mesh, 1) ~ " teeth)";
+            }
+        }
+    }
+    if (nLow > 0)
+        lines ~= "WARNING Pulley" ~ ((nLow == 1) ? " " : "s ") ~ low
+            ~ ((nLow == 1) ? " has" : " have")
+            ~ " under six teeth in mesh, so the belt will skip. Move an idler out.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################ FILLET EDGES ##############################
+
+export enum FRCFilletScope
+{
+    annotation { "Name" : "Every edge" }              ALL,
+    annotation { "Name" : "Edges square to a face" }  VERTICAL,
+    annotation { "Name" : "Sharp outside corners" }   CONVEX
+}
+
+export function frcFilletEdgesBuild(context is Context, id is Id, definition is map)
+{
+    const bodies = evaluateQuery(context, definition.bodies);
+    if (size(bodies) == 0)
+        throw regenError("Select the parts to break the edges on.", ["bodies"]);
+
+    const r = definition.autoRadius
+        ? frcMinCornerRadius(definition.process, definition.toolDiameter)
+        : definition.radius;
+
+    var refNormal = vector(0, 0, 1);
+    if (definition.scope == FRCFilletScope.VERTICAL)
+    {
+        const rf = evaluateQuery(context, definition.reference);
+        if (size(rf) == 0)
+            throw regenError("Select the face the edges are square to.", ["reference"]);
+        refNormal = evPlane(context, { "face" : rf[0] }).normal;
+    }
+
+    var done = 0;
+    var skipped = 0;
+    var absorbed = 0;
+    for (var bi = 0; bi < size(bodies); bi += 1)
+    {
+        var edges = [];
+        for (var e in evaluateQuery(context, qOwnedByBody(bodies[bi], EntityType.EDGE)))
+        {
+            if (definition.scope == FRCFilletScope.ALL)
+            {
+                edges = append(edges, e);
+                continue;
+            }
+            var keep = false;
+            try silent
+            {
+                if (definition.scope == FRCFilletScope.VERTICAL)
+                {
+                    const ln = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5 });
+                    keep = abs(dot(ln.direction, refNormal)) > 0.999;
+                }
+                else
+                    keep = evEdgeConvexity(context, { "edge" : e }) == EdgeConvexityType.CONVEX;
+            }
+            if (keep)
+                edges = append(edges, e);
+        }
+        if (size(edges) == 0)
+            continue;
+        var ok = false;
+        try silent
+        {
+            opFillet(context, id + ("f" ~ bi), { "entities" : qUnion(edges), "radius" : r });
+            ok = true;
+        }
+        if (ok)
+            done += size(edges);
+        else
+        {
+            // One pass over the whole body can fail on a single awkward edge,
+            // so fall back to filleting them one at a time.
+            for (var k = 0; k < size(edges); k += 1)
+            {
+                // A fillet rebuilds the faces around the edge it rounds, and
+                // in doing so it can swallow neighboring edges that were
+                // queued before it ran. Their queries come back empty
+                // afterwards. Nothing is wrong when that happens, the corner
+                // is already broken, so those are counted apart from the edges
+                // that genuinely had no room for the radius. Testing each edge
+                // as it comes up is the same sweep as re-validating the whole
+                // remaining queue after every success, for a linear number of
+                // queries instead of a quadratic one.
+                //
+                // Without this the report calls them failures, and a team
+                // reads that count as corners waiting for a file.
+                if (isQueryEmpty(context, edges[k]))
+                {
+                    absorbed += 1;
+                    continue;
+                }
+                var one = false;
+                try silent
+                {
+                    // A failed opFillet poisons its id, so every attempt has
+                    // to take a fresh one.
+                    opFillet(context, id + ("f" ~ bi ~ "_" ~ k),
+                        { "entities" : edges[k], "radius" : r });
+                    one = true;
+                }
+                if (one)
+                    done += 1;
+                else
+                    skipped += 1;
+            }
+        }
+    }
+
+    var lines = "Rounded " ~ done ~ " edges at " ~ frcInches(r) ~ ". ";
+    if (absorbed > 0)
+        lines ~= "" ~ absorbed ~ " more were taken by a neighboring fillet. ";
+    if (skipped > 0)
+        lines ~= "NOTE " ~ skipped
+            ~ " edges were skipped with no room for this radius; use a smaller one. ";
+    if (done == 0 && absorbed == 0 && skipped == 0)
+        lines ~= "No edge on those parts matched Which edges. Try another setting.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################## DOGBONES ################################
+
+/**
+ * A router leaves a radius in every inside corner, so a square part will not
+ * seat in an untreated pocket. The fix is to plunge the end mill once in each
+ * corner, on the bisector, one end mill radius from the corner. That is the
+ * closest the end mill can sit and still reach the corner point, and it leaves
+ * the smallest overcut in the walls.
+ *
+ * Corners are found rather than picked: an inside corner is an edge square to
+ * the chosen face, turning into the part, and shared by two walls that meet
+ * that face. The last of those is what keeps the feature on the face the user
+ * pointed at. A pocket machined into the far side of the same plate has
+ * vertical concave corners of its own, and they belong to the far face.
+ *
+ * Each corner is relieved only as deep as it actually runs. A corner that
+ * reaches the far side of the body is cut through and clear of it; a corner
+ * that stops at a pocket floor is cut to that floor and no further, so a blind
+ * pocket keeps its floor. Depth belongs to the corner, so corners are grouped
+ * by depth and each group gets its own sketch and extrude. In practice a plate
+ * has one or two depths.
+ *
+ * No edge re-validation is needed here, unlike FRC Fillet Edges. Every corner
+ * is found and turned into a plain point before any modeling op runs, and the
+ * relief is then cut by extrudes that touch nothing and a single boolean at
+ * the end, so nothing in flight can be consumed part way through.
+ */
+export function frcDogboneBuild(context is Context, id is Id, definition is map)
+{
+    const faces = evaluateQuery(context, definition.faces);
+    if (size(faces) == 0)
+        throw regenError("Select the flat face that carries the pockets.", ["faces"]);
+
+    // Pattern and mirror support. The picked face is what anchors the corner
+    // relief in space, so it is the reference the pattern transform is measured
+    // against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.faces });
+
+    const pl = evPlane(context, { "face" : faces[0] });
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    const bodyQ = qOwnerBody(faces[0]);
+    const thickness = frcMaterialDepth(context, bodyQ, cSys);
+    const r = definition.toolDiameter / 2;
+
+    // The walls of the picked face: every face that meets it along an edge.
+    // A pocket sunk into this face opens through it, so each of the pocket's
+    // side walls shares the pocket mouth with it and lands in here. A pocket
+    // sunk into the far side of the same plate does not, and neither do its
+    // corners. Adjacency is taken face to face, not face to edge, because a
+    // corner edge runs between two side walls and only touches the picked
+    // face at its top vertex, so it is never an edge of that face itself.
+    const sideQ = qUnion(evaluateQuery(context,
+        qAdjacent(faces[0], AdjacencyType.EDGE, EntityType.FACE)));
+
+    // Corners are collected by depth, because one extrude carries one depth.
+    // depths holds each distinct corner depth and groups holds the sketch
+    // points that go with it.
+    var depths = [];
+    var groups = [];
+    var cut = 0;
+    // The overcut a dogbone leaves in each wall, smallest and largest over
+    // the corners actually cut. It varies with the corner, so one figure
+    // cannot stand for all of them.
+    var overMin = 0 * inch;
+    var overMax = 0 * inch;
+    for (var e in evaluateQuery(context, qOwnedByBody(bodyQ, EntityType.EDGE)))
+    {
+        var isVertical = false;
+        var at = vector(0, 0, 0) * inch;
+        // How far this corner runs below the picked face, read off its own
+        // lower end. A vertical edge spans exactly the corner it forms, so
+        // this is the depth of the corner and not the depth of the body.
+        var deep = 0 * inch;
+        try silent
+        {
+            const ln = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5 });
+            isVertical = abs(dot(ln.direction, pl.normal)) > 0.999;
+            at = ln.origin;
+            const p0 = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0 }).origin;
+            const p1 = evEdgeTangentLine(context, { "edge" : e, "parameter" : 1 }).origin;
+            deep = max(-dot(p0 - pl.origin, pl.normal), -dot(p1 - pl.origin, pl.normal));
+        }
+        if (!isVertical || deep < 1e-5 * inch)
+            continue;
+        var concave = false;
+        try silent
+        {
+            concave = evEdgeConvexity(context, { "edge" : e }) == EdgeConvexityType.CONCAVE;
+        }
+        if (!concave)
+            continue;
+
+        // The two wall normals point out of the part, so their sum points into
+        // the pocket, which is the way the end mill has to move. Only walls
+        // that meet the picked face are counted, so the walls < 2 test below
+        // is also what rejects a corner belonging to some other face.
+        var away = vector(0, 0, 0);
+        var walls = 0;
+        for (var f in evaluateQuery(context, qIntersection([
+                        qAdjacent(e, AdjacencyType.EDGE, EntityType.FACE), sideQ])))
+        {
+            try silent
+            {
+                const p = evPlane(context, { "face" : f });
+                if (abs(dot(p.normal, pl.normal)) < 0.5)
+                {
+                    away = away + p.normal;
+                    walls += 1;
+                }
+            }
+        }
+        if (walls < 2 || norm(away) < 0.05)
+            continue;
+        const dir = away / norm(away);
+        // A dogbone on a corner of interior angle theta eats r (1 - sin(theta
+        // / 2)) into each wall, and norm(away) is exactly 2 sin(theta / 2),
+        // because that is how far apart two outward wall normals stand at
+        // such a corner. So the overcut comes off the vector already in hand
+        // with no angle to measure. It is 0.2929 r only at ninety degrees:
+        // 0.5 r at sixty, which is 1.71 times as much, and 0.134 r at a
+        // hundred and twenty. The guard above drops only a corner whose two
+        // walls are folded to within about three degrees of each other,
+        // because norm(away) under 0.05 means theta under 2.9 degrees. So
+        // sharp corners are cut routinely and understating them is the
+        // dangerous direction. The clamp covers an
+        // edge that somehow came back with more than two walls on it.
+        const oc = max(0 * inch, r * (1 - norm(away) / 2));
+        overMin = (cut == 0) ? oc : min(overMin, oc);
+        overMax = max(overMax, oc);
+        const c3 = at + dir * r - cSys.origin;
+
+        // File the corner under its own depth, opening a new group the first
+        // time a depth turns up. The number of groups is the number of pocket
+        // floors on this face, so the search stays short.
+        var slot = -1;
+        for (var g = 0; g < size(depths); g += 1)
+        {
+            if (abs(depths[g] - deep) < 1e-5 * inch)
+                slot = g;
+        }
+        if (slot == -1)
+        {
+            depths = append(depths, deep);
+            groups = append(groups, []);
+            slot = size(depths) - 1;
+        }
+        groups[slot] = append(groups[slot],
+            vector(dot(c3, cSys.xAxis), dot(c3, yAxis)));
+        cut += 1;
+    }
+    if (cut == 0)
+        throw regenError("No inside corners were found in the pockets on that face. Dogbones only apply to pockets a router has to cut, and only on the face they open through.", ["faces"], definition.faces);
+    if (cut > 400)
+        throw regenError("That part has more inside corners than one feature should handle. Split it up.", ["faces"], definition.faces);
+    if (size(depths) > 25)
+        throw regenError("Those pockets are cut to more different depths than one feature should handle. Split it up.", ["faces"], definition.faces);
+
+    const skPlane = plane(pl.origin + pl.normal * (0.02 * inch), pl.normal, pl.x);
+    var tools = [];
+    for (var g = 0; g < size(depths); g += 1)
+    {
+        // Sibling ids, one pair per depth, so nothing is nested and nothing
+        // repeats.
+        const sid = id + ("s" ~ g);
+        const sk = newSketchOnPlane(context, sid, { "sketchPlane" : skPlane });
+        for (var i = 0; i < size(groups[g]); i += 1)
+            skCircle(sk, "d" ~ i, { "center" : groups[g][i], "radius" : r });
+        skSolve(sk);
+        // The sketch stands 0.02 in clear of the face, so every cut spends
+        // that much before it reaches material and endDepth has to carry it.
+        // A corner that runs all the way to the far side of the body is a
+        // through cut and gets 0.1 in in total, which puts its floor 0.08 in
+        // past the back of the part and breaks it out cleanly, exactly as the
+        // old single depth of thickness + 0.1 in did. A corner that stops at a
+        // pocket floor gets only the 0.02 in of approach, so the relief ends
+        // level with that floor instead of punching through it.
+        //
+        // The 0.005 in band is deliberately wide. thickness comes from a
+        // bounding box, which can read a shade deep on a body with curved
+        // faces, and a through corner missed by that shade would be cut dead
+        // level with the back of the part instead of clear of it. Nothing
+        // legitimate lives in the band: a pocket that leaves 0.005 in of floor
+        // has no floor.
+        const extra = (depths[g] > thickness - 0.005 * inch) ? (0.1 * inch) : (0.02 * inch);
+        opExtrude(context, id + ("x" ~ g), { "entities" : qSketchRegion(sid, false),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : depths[g] + extra });
+        tools = append(tools, qCreatedBy(id + ("x" ~ g), EntityType.BODY));
+    }
+
+    // The move goes on before the subtraction, not after it. A subtraction
+    // consumes the cutters, so a transform at the end of the feature would
+    // find none of this feature's own bodies left to move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    try
+    {
+        opBoolean(context, id + "sub", { "tools" : qUnion(tools),
+                    "targets" : bodyQ, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    catch
+    {
+        throw regenError("The corner relief could not be cut. Try a smaller end mill.", ["toolDiameter"], definition.faces);
+    }
+
+    // The depths actually cut, smallest and largest. Each corner is relieved
+    // only as far as it runs, so a part carrying a 0.1 in pocket and a through
+    // cutout carries two of them. Neither is printed any more: the depth of a
+    // relief follows the pocket it sits in, so it is not a number a team acts
+    // on. The overcut below is.
+    var deepMin = depths[0];
+    var deepMax = depths[0];
+    for (var g = 1; g < size(depths); g += 1)
+    {
+        deepMin = min(deepMin, depths[g]);
+        deepMax = max(deepMax, depths[g]);
+    }
+
+    // Corners on the picked face only, where it used to be every inside corner
+    // on the whole body. A pocket on the far side of the plate is a job for a
+    // second Dogbone Corners run on that face, and is not counted here.
+    var lines = "Relieved " ~ cut ~ " corners on the face you picked, ";
+    // A range, because the corners on one part are not all the same angle and
+    // the figure is not the same for all of them. It used to print r * 0.2929
+    // for every corner, which is the ninety degree value: on a sixty degree
+    // corner the real overcut is 1.71 times that, and understating how much a
+    // relief eats into a sharp corner is what loses a part.
+    lines ~= "overcutting each wall " ~ frcInches(overMin)
+        ~ ((overMax > overMin + 1e-5 * inch) ? (" to " ~ frcInches(overMax)) : "")
+        ~ ". Cut these before posting, or square parts will not seat.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################### MEASURE ################################
+
+export const FRC_ROUNDTO_BOUNDS = { (meter) : [0, 2.54e-5, 0.0254], (centimeter) : 0.00254,
+    (millimeter) : 0.0254, (inch) : 0.001, (foot) : 0.0000833, (yard) : 0.0000278 } as LengthBoundSpec;
+
+/** Bounding box extent is measured along the direction picked below it. */
+export enum FRCMeasureMode
+{
+    annotation { "Name" : "Between two picks" }        DISTANCE,
+    annotation { "Name" : "Total length of edges" }    LENGTH,
+    annotation { "Name" : "Hole or circle diameter" }  DIAMETER,
+    annotation { "Name" : "Bounding box extent" }      EXTENT,
+    annotation { "Name" : "Angle, faces or edges" }    ANGLE_BETWEEN
+}
+
+/**
+ * The direction a pick stands for, returned as a plane whose normal is that
+ * direction so it can be handed straight to frcFaceCSys.
+ *
+ * frcPickFrame reads planar faces, mate connectors, circles and cylinders, but
+ * a straight edge falls through every one of its probes to the fallback plane,
+ * which would quietly measure along Z instead of along the edge that was
+ * picked. That one case is caught here first: evCurveDefinition returns a Line
+ * for a straight edge, and its direction is the one that was meant.
+ */
+export function frcMeasureFrame(context is Context, q is Query) returns Plane
+{
+    for (var e in evaluateQuery(context, q))
+    {
+        try silent
+        {
+            const c = evCurveDefinition(context, { "edge" : e });
+            if (c is Line)
+                return plane(c.origin, c.direction);
+        }
+    }
+    return frcPickFrame(context, q, XY_PLANE);
+}
+
+/**
+ * The unit direction of a face, edge or mate connector, or a zero vector when
+ * the pick has no single direction. A zero vector rather than a throw, so the
+ * caller can name the parameter that is at fault.
+ */
+export function frcMeasureDirection(context is Context, q is Query) returns Vector
+{
+    for (var e in evaluateQuery(context, q))
+    {
+        try silent
+        {
+            return evPlane(context, { "face" : e }).normal;
+        }
+        try silent
+        {
+            return evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5 }).direction;
+        }
+        try silent
+        {
+            return evMateConnector(context, { "mateConnector" : e }).zAxis;
+        }
+    }
+    return vector(0, 0, 0);
+}
+
+/**
+ * Measure the model as it stands and publish the answer as a Part Studio
+ * variable, so a belt run, a shaft length or a clearance gap is driven by the
+ * geometry instead of retyped every time the geometry moves.
+ *
+ * Every probe is wrapped, because the same pick can be a legal selection in
+ * the UI and still have nothing for the evaluator to read: a spline edge has
+ * no diameter, a fillet has no plane normal. A wrapped probe that comes back
+ * empty leaves `measured` undefined, which is what the single error at the end
+ * reports, against the parameter that supplied the pick.
+ */
+export function frcMeasureBuild(context is Context, id is Id, definition is map)
+{
+    var measured = undefined;
+    var note = "";
+    var fault = "first";
+    // The pick that goes with `fault`, so a failure can highlight the entity in
+    // the graphics area instead of only naming the field. Distance and angle
+    // both read the two picks, so both start out blamed.
+    var faultQ = qUnion([definition.first, definition.second]);
+
+    if (definition.mode == FRCMeasureMode.DISTANCE)
+    {
+        if (size(evaluateQuery(context, definition.first)) == 0
+            || size(evaluateQuery(context, definition.second)) == 0)
+            throw regenError("Pick the two things to measure between.", ["first", "second"]);
+        try silent
+        {
+            measured = evDistance(context, { "side0" : definition.first,
+                        "side1" : definition.second }).distance;
+        }
+    }
+    else if (definition.mode == FRCMeasureMode.LENGTH)
+    {
+        fault = "edges";
+        faultQ = definition.edges;
+        const picked = evaluateQuery(context, definition.edges);
+        if (size(picked) == 0)
+            throw regenError("Pick the edges to add up.", ["edges"]);
+        var total = 0 * inch;
+        var counted = 0;
+        for (var e in picked)
+        {
+            try silent
+            {
+                total = total + evLength(context, { "entities" : e });
+                counted += 1;
+            }
+        }
+        if (counted > 0)
+        {
+            measured = total;
+            note = " (" ~ counted ~ " edges)";
+        }
+    }
+    else if (definition.mode == FRCMeasureMode.DIAMETER)
+    {
+        fault = "circle";
+        faultQ = definition.circle;
+        const picked = evaluateQuery(context, definition.circle);
+        if (size(picked) == 0)
+            throw regenError("Pick a circular edge or a round face.", ["circle"]);
+        for (var e in picked)
+        {
+            try silent
+            {
+                const c = evCurveDefinition(context, { "edge" : e });
+                if (c is Circle)
+                    measured = 2 * c.radius;
+            }
+            // An imported hole often has no seam edge to grab, but the wall it
+            // was bored with is still a cylinder.
+            if (measured == undefined)
+            {
+                try silent
+                {
+                    const s = evSurfaceDefinition(context, { "face" : e });
+                    if (s is Cylinder)
+                        measured = 2 * s.radius;
+                }
+            }
+            if (measured != undefined)
+                break;
+        }
+    }
+    else if (definition.mode == FRCMeasureMode.EXTENT)
+    {
+        fault = "bodies";
+        faultQ = definition.bodies;
+        if (size(evaluateQuery(context, definition.bodies)) == 0)
+            throw regenError("Pick the parts to measure across.", ["bodies"]);
+        if (size(evaluateQuery(context, definition.direction)) == 0)
+            throw regenError("Pick a flat face, a straight edge or a mate connector to measure along.",
+                ["direction"]);
+
+        // The box is taken in a frame whose Z is the direction that was
+        // picked, so the span along Z is the extent along that direction.
+        // Tight, because Onshape's loose box is allowed to stand off a body
+        // with cylindrical or spline faces, and this number is published into
+        // a variable other features then drill and cut to.
+        const cs = frcFaceCSys(frcMeasureFrame(context, definition.direction));
+        try silent
+        {
+            const span = evBox3d(context, { "topology" : definition.bodies, "cSys" : cs,
+                        "tight" : true });
+            measured = span.maxCorner[2] - span.minCorner[2];
+        }
+    }
+    else
+    {
+        const d1 = frcMeasureDirection(context, definition.first);
+        const d2 = frcMeasureDirection(context, definition.second);
+        if (norm(d1) > 0.5 && norm(d2) > 0.5)
+            measured = acos(clamp(dot(d1, d2), -1, 1));
+    }
+
+    if (measured == undefined)
+        throw regenError("That pick could not be measured. Try a different selection.", [fault], faultQ);
+
+    var shown = "";
+    if (definition.mode == FRCMeasureMode.ANGLE_BETWEEN)
+    {
+        // roundTo is a length, so it says nothing about an angle. Three
+        // decimals of a degree is finer than any pick is placed.
+        measured = roundToPrecision(measured / degree, 3) * degree;
+        shown = "" ~ (measured / degree) ~ " deg";
+    }
+    else
+    {
+        // Rounding to a step rather than to a digit count, so a value can be
+        // pinned to the nearest thou or the nearest sixteenth as the shop
+        // needs. A step of zero leaves the raw measurement alone.
+        if (definition.roundTo > 0 * inch)
+            measured = roundToPrecision(measured / definition.roundTo, 0) * definition.roundTo;
+        shown = frcInches(measured);
+    }
+
+    if (definition.publishVariable)
+    {
+        if (definition.varName == undefined || definition.varName == "")
+            throw regenError("Give the variable a name, or turn off publishing.", ["varName"]);
+        setVariable(context, definition.varName, measured);
+    }
+
+    var lines = shown ~ note ~ ". ";
+    if (definition.publishVariable)
+        lines ~= "Published as the variable #" ~ definition.varName
+            ~ ", usable in any field and re-read on every regen.";
+    else
+        lines ~= "Not published as a variable.";
+    reportFeatureInfo(context, id, lines);
+}

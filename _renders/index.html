@@ -1,0 +1,340 @@
+<!doctype html><meta charset="utf-8"><title>FRC Toolkit expected-output renders</title>
+<style>
+:root{--bg:#fff;--fg:#111;--mut:#666;--line:#ddd}
+@media(prefers-color-scheme:dark){:root{--bg:#151515;--fg:#eee;--mut:#999;--line:#333}}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:28px 32px;max-width:1500px}
+h1{font-size:24px;margin:0 0 4px} .sub{color:var(--mut);margin:0 0 28px;max-width:70ch}
+h2{font-size:19px;margin:34px 0 6px;padding-bottom:5px;border-bottom:2px solid var(--line)}
+h3{font-size:15px;margin:20px 0 8px;color:var(--mut);text-transform:capitalize;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+figure{margin:0;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:#fff}
+figure img{width:100%;display:block;cursor:zoom-in}
+figcaption{font-size:11.5px;color:var(--mut);padding:6px 8px;background:var(--bg);word-break:break-all}
+#lb{position:fixed;inset:0;background:rgba(0,0,0,.9);display:none;align-items:center;justify-content:center;z-index:9;cursor:zoom-out}
+#lb img{max-width:96vw;max-height:96vh}
+nav{position:sticky;top:0;background:var(--bg);padding:8px 0 10px;border-bottom:1px solid var(--line);margin-bottom:4px;z-index:5}
+nav a{color:var(--fg);margin-right:16px;font-size:13px;text-decoration:none;border-bottom:1px dotted var(--mut)}
+</style>
+<h1>FRC Toolkit expected-output renders</h1>
+<p class="sub">Geometry computed from the shipped FeatureScript at the stated parameters, then drawn.
+This is the expected half; hold it beside what Onshape actually builds after pasting.
+Each sheet carries its own checks: a value the drawing measured against what the feature claims.
+A check that failed is printed in bold orange at the foot of the sheet, so a wrong sheet is
+visible without being read. Click any image to enlarge.</p>
+<nav>
+<a href="#Mechanism">Mechanism</a>
+<a href="#StructureandFabrication">Structure and Fabrication</a>
+<a href="#MotionandManufacturing">Motion and Manufacturing</a>
+<a href="#PlateGeometry">Plate Geometry</a>
+<a href="#ShopElectricalandHardware">Shop, Electrical and Hardware</a>
+</nav>
+<h2 id="Mechanism">Mechanism <span style="font-weight:400;color:#888">(55)</span></h2>
+<h3>armpivot <span style="font-weight:400">(5)</span></h3><div class="grid">
+<figure><img loading="lazy" src="mech_armpivot_angle_45.png"><figcaption>mech_armpivot_angle_45.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_armpivot_bearing_od1375.png"><figcaption>mech_armpivot_bearing_od1375.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_armpivot_bearing_od875.png"><figcaption>mech_armpivot_bearing_od875.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_armpivot_default.png"><figcaption>mech_armpivot_default.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_armpivot_fit_clearance.png"><figcaption>mech_armpivot_fit_clearance.png</figcaption></figure>
+</div>
+<h3>climber <span style="font-weight:400">(4)</span></h3><div class="grid">
+<figure><img loading="lazy" src="mech_climber_custom_sizes.png"><figcaption>mech_climber_custom_sizes.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_climber_no_hook.png"><figcaption>mech_climber_no_hook.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_climber_vendorkit_1stage.png"><figcaption>mech_climber_vendorkit_1stage.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_climber_vendorkit_2stage.png"><figcaption>mech_climber_vendorkit_2stage.png</figcaption></figure>
+</div>
+<h3>cylinder <span style="font-weight:400">(8)</span></h3><div class="grid">
+<figure><img loading="lazy" src="mech_cylinder_b1116_pivot.png"><figcaption>mech_cylinder_b1116_pivot.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_cylinder_b112_doubleend_error.png"><figcaption>mech_cylinder_b112_doubleend_error.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_cylinder_b112_nose.png"><figcaption>mech_cylinder_b112_nose.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_cylinder_b112_pivot.png"><figcaption>mech_cylinder_b112_pivot.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_cylinder_b114_doubleend.png"><figcaption>mech_cylinder_b114_doubleend.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_cylinder_b200_nose.png"><figcaption>mech_cylinder_b200_nose.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_cylinder_b34_pivot.png"><figcaption>mech_cylinder_b34_pivot.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_cylinder_custom_bore.png"><figcaption>mech_cylinder_custom_bore.png</figcaption></figure>
+</div>
+<h3>drivetrain <span style="font-weight:400">(1)</span></h3><div class="grid">
+<figure><img loading="lazy" src="mech_drivetrain_report.png"><figcaption>mech_drivetrain_report.png</figcaption></figure>
+</div>
+<h3>elevator <span style="font-weight:400">(4)</span></h3><div class="grid">
+<figure><img loading="lazy" src="mech_elevator_continuous.png"><figcaption>mech_elevator_continuous.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_elevator_from_stage_length.png"><figcaption>mech_elevator_from_stage_length.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_elevator_nested_from_travel.png"><figcaption>mech_elevator_nested_from_travel.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_elevator_side_by_side.png"><figcaption>mech_elevator_side_by_side.png</figcaption></figure>
+</div>
+<h3>roller <span style="font-weight:400">(4)</span></h3><div class="grid">
+<figure><img loading="lazy" src="mech_roller_even_gamepiece.png"><figcaption>mech_roller_even_gamepiece.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_roller_fixed_pitch.png"><figcaption>mech_roller_fixed_pitch.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_roller_opposing.png"><figcaption>mech_roller_opposing.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_roller_plate.png"><figcaption>mech_roller_plate.png</figcaption></figure>
+</div>
+<h3>shooter <span style="font-weight:400">(4)</span></h3><div class="grid">
+<figure><img loading="lazy" src="mech_shooter_dual_opposed.png"><figcaption>mech_shooter_dual_opposed.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_shooter_from_exit_speed.png"><figcaption>mech_shooter_from_exit_speed.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_shooter_from_target.png"><figcaption>mech_shooter_from_target.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_shooter_single_hood.png"><figcaption>mech_shooter_single_hood.png</figcaption></figure>
+</div>
+<h3>swerve <span style="font-weight:400">(20)</span></h3><div class="grid">
+<figure><img loading="lazy" src="mech_swerve_custom.png"><figcaption>mech_swerve_custom.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_face_pattern.png"><figcaption>mech_swerve_face_pattern.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_mixed_mk4c_mk4i.png"><figcaption>mech_swerve_mixed_mk4c_mk4i.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_mount_bottom.png"><figcaption>mech_swerve_mount_bottom.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_mount_top.png"><figcaption>mech_swerve_mount_top.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_rev_easyswerve.png"><figcaption>mech_swerve_rev_easyswerve.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_rev_maxswerve.png"><figcaption>mech_swerve_rev_maxswerve.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_sds_mk4.png"><figcaption>mech_swerve_sds_mk4.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_sds_mk4c.png"><figcaption>mech_swerve_sds_mk4c.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_sds_mk4i.png"><figcaption>mech_swerve_sds_mk4i.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_sds_mk4n.png"><figcaption>mech_swerve_sds_mk4n.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_sds_mk5i.png"><figcaption>mech_swerve_sds_mk5i.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_sds_mk5n.png"><figcaption>mech_swerve_sds_mk5n.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_thrifty.png"><figcaption>mech_swerve_thrifty.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_wcp_x2.png"><figcaption>mech_swerve_wcp_x2.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_wcp_x2c.png"><figcaption>mech_swerve_wcp_x2c.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_wcp_x2i.png"><figcaption>mech_swerve_wcp_x2i.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_wcp_x2s.png"><figcaption>mech_swerve_wcp_x2s.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_wcp_x2st.png"><figcaption>mech_swerve_wcp_x2st.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_swerve_wcp_x2t.png"><figcaption>mech_swerve_wcp_x2t.png</figcaption></figure>
+</div>
+<h3>turret <span style="font-weight:400">(5)</span></h3><div class="grid">
+<figure><img loading="lazy" src="mech_turret_20dp_error.png"><figcaption>mech_turret_20dp_error.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_turret_am5039.png"><figcaption>mech_turret_am5039.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_turret_custom_bearing.png"><figcaption>mech_turret_custom_bearing.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_turret_no_ring.png"><figcaption>mech_turret_no_ring.png</figcaption></figure>
+<figure><img loading="lazy" src="mech_turret_xcontact_10dp.png"><figcaption>mech_turret_xcontact_10dp.png</figcaption></figure>
+</div>
+<h2 id="StructureandFabrication">Structure and Fabrication <span style="font-weight:400;color:#888">(25)</span></h2>
+<h3>bumper <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="struct_bumper_back_pad.png"><figcaption>struct_bumper_back_pad.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_bumper_outputs.png"><figcaption>struct_bumper_outputs.png</figcaption></figure>
+</div>
+<h3>fingerjoint <span style="font-weight:400">(1)</span></h3><div class="grid">
+<figure><img loading="lazy" src="struct_fingerjoint_default.png"><figcaption>struct_fingerjoint_default.png</figcaption></figure>
+</div>
+<h3>frame <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="struct_frame_joints.png"><figcaption>struct_frame_joints.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_frame_miter.png"><figcaption>struct_frame_miter.png</figcaption></figure>
+</div>
+<h3>gearbox <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="struct_gearbox_layout.png"><figcaption>struct_gearbox_layout.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_gearbox_layout_bores.png"><figcaption>struct_gearbox_layout_bores.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_gearbox_plan.png"><figcaption>struct_gearbox_plan.png</figcaption></figure>
+</div>
+<h3>insertpocket <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="struct_insertpocket_printed.png"><figcaption>struct_insertpocket_printed.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_insertpocket_straight.png"><figcaption>struct_insertpocket_straight.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_insertpocket_tapered.png"><figcaption>struct_insertpocket_tapered.png</figcaption></figure>
+</div>
+<h3>sheetlayout <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="struct_sheetlayout_24x48.png"><figcaption>struct_sheetlayout_24x48.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_sheetlayout_48x96.png"><figcaption>struct_sheetlayout_48x96.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_sheetlayout_flat_noturn.png"><figcaption>struct_sheetlayout_flat_noturn.png</figcaption></figure>
+</div>
+<h3>slot <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="struct_slot_default.png"><figcaption>struct_slot_default.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_slot_relief_tbone.png"><figcaption>struct_slot_relief_tbone.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_slot_square.png"><figcaption>struct_slot_square.png</figcaption></figure>
+</div>
+<h3>teardrop <span style="font-weight:400">(4)</span></h3><div class="grid">
+<figure><img loading="lazy" src="struct_teardrop_flat_45.png"><figcaption>struct_teardrop_flat_45.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_teardrop_keyhole.png"><figcaption>struct_teardrop_keyhole.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_teardrop_point_45.png"><figcaption>struct_teardrop_point_45.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_teardrop_sweep_30_45_60.png"><figcaption>struct_teardrop_sweep_30_45_60.png</figcaption></figure>
+</div>
+<h3>wheel <span style="font-weight:400">(4)</span></h3><div class="grid">
+<figure><img loading="lazy" src="struct_wheel_hub.png"><figcaption>struct_wheel_hub.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_wheel_lighten.png"><figcaption>struct_wheel_lighten.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_wheel_plain.png"><figcaption>struct_wheel_plain.png</figcaption></figure>
+<figure><img loading="lazy" src="struct_wheel_traction.png"><figcaption>struct_wheel_traction.png</figcaption></figure>
+</div>
+<h2 id="MotionandManufacturing">Motion and Manufacturing <span style="font-weight:400;color:#888">(17)</span></h2>
+<h3>beltchain <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_beltchain_belt_24x24.png"><figcaption>motion_beltchain_belt_24x24.png</figcaption></figure>
+<figure><img loading="lazy" src="motion_beltchain_belt_60x12.png"><figcaption>motion_beltchain_belt_60x12.png</figcaption></figure>
+</div>
+<h3>beltpath <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_beltpath_3pulley.png"><figcaption>motion_beltpath_3pulley.png</figcaption></figure>
+<figure><img loading="lazy" src="motion_beltpath_idler.png"><figcaption>motion_beltpath_idler.png</figcaption></figure>
+</div>
+<h3>dogbone <span style="font-weight:400">(1)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_dogbone_corner.png"><figcaption>motion_dogbone_corner.png</figcaption></figure>
+</div>
+<h3>filletedges <span style="font-weight:400">(1)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_filletedges_report.png"><figcaption>motion_filletedges_report.png</figcaption></figure>
+</div>
+<h3>gear <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_gear_mesh_18t_30t.png"><figcaption>motion_gear_mesh_18t_30t.png</figcaption></figure>
+<figure><img loading="lazy" src="motion_gear_rack_18t.png"><figcaption>motion_gear_rack_18t.png</figcaption></figure>
+<figure><img loading="lazy" src="motion_gear_spur_18t_20dp.png"><figcaption>motion_gear_spur_18t_20dp.png</figcaption></figure>
+</div>
+<h3>measure <span style="font-weight:400">(1)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_measure_report.png"><figcaption>motion_measure_report.png</figcaption></figure>
+</div>
+<h3>pulley <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_pulley_htd5_24t.png"><figcaption>motion_pulley_htd5_24t.png</figcaption></figure>
+<figure><img loading="lazy" src="motion_pulley_polycord.png"><figcaption>motion_pulley_polycord.png</figcaption></figure>
+</div>
+<h3>shaft <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_shaft_hex_chamfer.png"><figcaption>motion_shaft_hex_chamfer.png</figcaption></figure>
+<figure><img loading="lazy" src="motion_shaft_hex_ring.png"><figcaption>motion_shaft_hex_ring.png</figcaption></figure>
+</div>
+<h3>spacer <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_spacer_hex.png"><figcaption>motion_spacer_hex.png</figcaption></figure>
+<figure><img loading="lazy" src="motion_spacer_round.png"><figcaption>motion_spacer_round.png</figcaption></figure>
+</div>
+<h3>sprocket <span style="font-weight:400">(1)</span></h3><div class="grid">
+<figure><img loading="lazy" src="motion_sprocket_25_16t.png"><figcaption>motion_sprocket_25_16t.png</figcaption></figure>
+</div>
+<h2 id="PlateGeometry">Plate Geometry <span style="font-weight:400;color:#888">(33)</span></h2>
+<h3>gusset <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="plate_gusset_hull.png"><figcaption>plate_gusset_hull.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_gusset_skeleton.png"><figcaption>plate_gusset_skeleton.png</figcaption></figure>
+</div>
+<h3>hole <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="plate_hole_new.png"><figcaption>plate_hole_new.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_hole_resize_default.png"><figcaption>plate_hole_resize_default.png</figcaption></figure>
+</div>
+<h3>lighten <span style="font-weight:400">(12)</span></h3><div class="grid">
+<figure><img loading="lazy" src="plate_lighten_circles.png"><figcaption>plate_lighten_circles.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_diagonal.png"><figcaption>plate_lighten_diagonal.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_grid.png"><figcaption>plate_lighten_grid.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_honeycomb.png"><figcaption>plate_lighten_honeycomb.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_isogrid.png"><figcaption>plate_lighten_isogrid.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_none.png"><figcaption>plate_lighten_none.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_tether.png"><figcaption>plate_lighten_tether.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_truss.png"><figcaption>plate_lighten_truss.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_trussa.png"><figcaption>plate_lighten_trussa.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_trussb.png"><figcaption>plate_lighten_trussb.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_trussc.png"><figcaption>plate_lighten_trussc.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_lighten_wallfit.png"><figcaption>plate_lighten_wallfit.png</figcaption></figure>
+</div>
+<h3>spoke <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="plate_spoke_land_after.png"><figcaption>plate_spoke_land_after.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_spoke_land_before.png"><figcaption>plate_spoke_land_before.png</figcaption></figure>
+</div>
+<h3>trial <span style="font-weight:400">(4)</span></h3><div class="grid">
+<figure><img loading="lazy" src="plate_trial_nohole.png"><figcaption>plate_trial_nohole.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_trial_plate1.png"><figcaption>plate_trial_plate1.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_trial_plate2.png"><figcaption>plate_trial_plate2.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_trial_symmetric.png"><figcaption>plate_trial_symmetric.png</figcaption></figure>
+</div>
+<h3>truss <span style="font-weight:400">(6)</span></h3><div class="grid">
+<figure><img loading="lazy" src="plate_truss_corner_asym.png"><figcaption>plate_truss_corner_asym.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_truss_corner_sym.png"><figcaption>plate_truss_corner_sym.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_truss_fix_plate1_after.png"><figcaption>plate_truss_fix_plate1_after.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_truss_fix_plate1_before.png"><figcaption>plate_truss_fix_plate1_before.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_truss_fix_plate2_after.png"><figcaption>plate_truss_fix_plate2_after.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_truss_fix_plate2_before.png"><figcaption>plate_truss_fix_plate2_before.png</figcaption></figure>
+</div>
+<h3>truss2 <span style="font-weight:400">(4)</span></h3><div class="grid">
+<figure><img loading="lazy" src="plate_truss2_nohole.png"><figcaption>plate_truss2_nohole.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_truss2_plate1.png"><figcaption>plate_truss2_plate1.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_truss2_plate2.png"><figcaption>plate_truss2_plate2.png</figcaption></figure>
+<figure><img loading="lazy" src="plate_truss2_symmetric.png"><figcaption>plate_truss2_symmetric.png</figcaption></figure>
+</div>
+<h3>tube <span style="font-weight:400">(1)</span></h3><div class="grid">
+<figure><img loading="lazy" src="plate_tube_defaults.png"><figcaption>plate_tube_defaults.png</figcaption></figure>
+</div>
+<h2 id="ShopElectricalandHardware">Shop, Electrical and Hardware <span style="font-weight:400;color:#888">(68)</span></h2>
+<h3>batterymount <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_batterymount_on_end.png"><figcaption>shop_batterymount_on_end.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_batterymount_on_side.png"><figcaption>shop_batterymount_on_side.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_batterymount_upright.png"><figcaption>shop_batterymount_upright.png</figcaption></figure>
+</div>
+<h3>bearingblock <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_bearingblock_am_plate.png"><figcaption>shop_bearingblock_am_plate.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_bearingblock_grid.png"><figcaption>shop_bearingblock_grid.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_bearingblock_round.png"><figcaption>shop_bearingblock_round.png</figcaption></figure>
+</div>
+<h3>boltpattern <span style="font-weight:400">(4)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_boltpattern_circle.png"><figcaption>shop_boltpattern_circle.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_boltpattern_circle_pilot.png"><figcaption>shop_boltpattern_circle_pilot.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_boltpattern_grid.png"><figcaption>shop_boltpattern_grid.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_boltpattern_row.png"><figcaption>shop_boltpattern_row.png</figcaption></figure>
+</div>
+<h3>centerofgravity <span style="font-weight:400">(1)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_centerofgravity_typical.png"><figcaption>shop_centerofgravity_typical.png</figcaption></figure>
+</div>
+<h3>cotspattern <span style="font-weight:400">(13)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_cotspattern_bp_0875_1250.png"><figcaption>shop_cotspattern_bp_0875_1250.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_bp_0875_2000.png"><figcaption>shop_cotspattern_bp_0875_2000.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_bp_1125_1500.png"><figcaption>shop_cotspattern_bp_1125_1500.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_bp_1125_2000.png"><figcaption>shop_cotspattern_bp_1125_2000.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_cim_face.png"><figcaption>shop_cotspattern_cim_face.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_gearbox_maxp.png"><figcaption>shop_cotspattern_gearbox_maxp.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_gearbox_sport.png"><figcaption>shop_cotspattern_gearbox_sport.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_gearbox_ultra.png"><figcaption>shop_cotspattern_gearbox_ultra.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_mk4.png"><figcaption>shop_cotspattern_mk4.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_motor_550.png"><figcaption>shop_cotspattern_motor_550.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_motor_775.png"><figcaption>shop_cotspattern_motor_775.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_motor_bag.png"><figcaption>shop_cotspattern_motor_bag.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_cotspattern_motor_cim.png"><figcaption>shop_cotspattern_motor_cim.png</figcaption></figure>
+</div>
+<h3>designconstants <span style="font-weight:400">(1)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_designconstants_defaults.png"><figcaption>shop_designconstants_defaults.png</figcaption></figure>
+</div>
+<h3>electronics <span style="font-weight:400">(26)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_electronics_battery.png"><figcaption>shop_electronics_battery.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_breaker.png"><figcaption>shop_electronics_breaker.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_candle.png"><figcaption>shop_electronics_candle.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_canivore.png"><figcaption>shop_electronics_canivore.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_custom.png"><figcaption>shop_electronics_custom.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_falcon.png"><figcaption>shop_electronics_falcon.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_kraken_x44.png"><figcaption>shop_electronics_kraken_x44.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_kraken_x60.png"><figcaption>shop_electronics_kraken_x60.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_limelight.png"><figcaption>shop_electronics_limelight.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_neo.png"><figcaption>shop_electronics_neo.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_neo_550.png"><figcaption>shop_electronics_neo_550.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_pcm.png"><figcaption>shop_electronics_pcm.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_pdh.png"><figcaption>shop_electronics_pdh.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_pdp.png"><figcaption>shop_electronics_pdp.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_pdp2.png"><figcaption>shop_electronics_pdp2.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_ph.png"><figcaption>shop_electronics_ph.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_pigeon2.png"><figcaption>shop_electronics_pigeon2.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_radio.png"><figcaption>shop_electronics_radio.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_roborio.png"><figcaption>shop_electronics_roborio.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_rpm.png"><figcaption>shop_electronics_rpm.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_spark_max.png"><figcaption>shop_electronics_spark_max.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_systemcore.png"><figcaption>shop_electronics_systemcore.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_talon_fxs.png"><figcaption>shop_electronics_talon_fxs.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_talon_srx.png"><figcaption>shop_electronics_talon_srx.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_victor_spx.png"><figcaption>shop_electronics_victor_spx.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_electronics_vrm.png"><figcaption>shop_electronics_vrm.png</figcaption></figure>
+</div>
+<h3>extrudeindividual <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_extrudeindividual_one.png"><figcaption>shop_extrudeindividual_one.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_extrudeindividual_symmetric.png"><figcaption>shop_extrudeindividual_symmetric.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_extrudeindividual_two.png"><figcaption>shop_extrudeindividual_two.png</figcaption></figure>
+</div>
+<h3>inspection <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_inspection_not_checked.png"><figcaption>shop_inspection_not_checked.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_inspection_ordinary.png"><figcaption>shop_inspection_ordinary.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_inspection_worst.png"><figcaption>shop_inspection_worst.png</figcaption></figure>
+</div>
+<h3>mateconnectors <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_mateconnectors_both_ends.png"><figcaption>shop_mateconnectors_both_ends.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_mateconnectors_typical.png"><figcaption>shop_mateconnectors_typical.png</figcaption></figure>
+</div>
+<h3>origincube <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_origincube_centered.png"><figcaption>shop_origincube_centered.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_origincube_cornered.png"><figcaption>shop_origincube_cornered.png</figcaption></figure>
+</div>
+<h3>parts <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_parts_keep.png"><figcaption>shop_parts_keep.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_parts_stock.png"><figcaption>shop_parts_stock.png</figcaption></figure>
+</div>
+<h3>weightbudget <span style="font-weight:400">(2)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_weightbudget_ordinary.png"><figcaption>shop_weightbudget_ordinary.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_weightbudget_worst.png"><figcaption>shop_weightbudget_worst.png</figcaption></figure>
+</div>
+<h3>wirepath <span style="font-weight:400">(3)</span></h3><div class="grid">
+<figure><img loading="lazy" src="shop_wirepath_routed.png"><figcaption>shop_wirepath_routed.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_wirepath_sketch.png"><figcaption>shop_wirepath_sketch.png</figcaption></figure>
+<figure><img loading="lazy" src="shop_wirepath_straight.png"><figcaption>shop_wirepath_straight.png</figcaption></figure>
+</div>
+<p class="sub" style="margin-top:34px">198 sheets, rebuilt 2026-09-03 01:09.</p>
+<div id="lb" onclick="this.style.display='none'"><img></div>
+<script>
+document.querySelectorAll('.grid img').forEach(function(i){
+  i.onclick=function(){var b=document.getElementById('lb');
+    b.querySelector('img').src=i.src;b.style.display='flex';};});
+</script>

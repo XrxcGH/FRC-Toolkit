@@ -1,0 +1,1703 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+
+// ===========================================================================
+//  FRC STRUCTURE GEOMETRY: slots, bumpers, wheels, frames and gearboxes
+// ---------------------------------------------------------------------------
+//  FRC Slot, FRC Bumper, FRC Wheel, FRC Frame and FRC Gearbox are declared
+//  in the FRC Toolkit tab and do their work here.
+// ===========================================================================
+
+export const FRC_TRAVEL_BOUNDS = { (meter) : [0, 0.0254, 1], (centimeter) : 2.54,
+    (millimeter) : 25.4, (inch) : 1, (foot) : 0.08333, (yard) : 0.02778 } as LengthBoundSpec;
+export const FRC_BUMPHEIGHT_BOUNDS = { (meter) : [0.0254, 0.127, 0.5], (centimeter) : 12.7,
+    (millimeter) : 127, (inch) : 5, (foot) : 0.41667, (yard) : 0.13889 } as LengthBoundSpec;
+export const FRC_STANDOFF_BOUNDS = { (meter) : [0, 0.0254, 2], (centimeter) : 2.54,
+    (millimeter) : 25.4, (inch) : 1, (foot) : 0.08333, (yard) : 0.02778 } as LengthBoundSpec;
+export const FRC_PAD_BOUNDS = { (meter) : [0.001, 0.0635, 0.2], (centimeter) : 6.35,
+    (millimeter) : 63.5, (inch) : 2.5, (foot) : 0.20833, (yard) : 0.06944 } as LengthBoundSpec;
+export const FRC_WHEELDIA_BOUNDS = { (meter) : [0.005, 0.1016, 1], (centimeter) : 10.16,
+    (millimeter) : 101.6, (inch) : 4, (foot) : 0.33333, (yard) : 0.11111 } as LengthBoundSpec;
+export const FRC_WHEELWIDTH_BOUNDS = { (meter) : [0.002, 0.03175, 0.3], (centimeter) : 3.175,
+    (millimeter) : 31.75, (inch) : 1.25, (foot) : 0.10417, (yard) : 0.03472 } as LengthBoundSpec;
+export const FRC_TREADWIDTH_BOUNDS = { (meter) : [0.002, 0.0254, 0.3], (centimeter) : 2.54,
+    (millimeter) : 25.4, (inch) : 1, (foot) : 0.08333, (yard) : 0.02778 } as LengthBoundSpec;
+export const FRC_FLANGE_BOUNDS = { (meter) : [0, 0.00127, 0.05], (centimeter) : 0.127,
+    (millimeter) : 1.27, (inch) : 0.05, (foot) : 0.004167, (yard) : 0.001389 } as LengthBoundSpec;
+export const FRC_BOLTCIRCLE_BOUNDS = { (meter) : [0.005, 0.047625, 0.5], (centimeter) : 4.7625,
+    (millimeter) : 47.625, (inch) : 1.875, (foot) : 0.15625, (yard) : 0.052083 } as LengthBoundSpec;
+export const FRC_BOLTCOUNT_BOUNDS = { (unitless) : [2, 6, 60] } as IntegerBoundSpec;
+export const FRC_FRAMEROWS_BOUNDS = { (unitless) : [0, 0, 8] } as IntegerBoundSpec;
+
+// ################################# SLOT #################################
+
+export enum FRCSlotAnchor
+{
+    annotation { "Name" : "Middle of the travel" } CENTERED,
+    annotation { "Name" : "Start of the travel" }  FROM_POINT,
+    annotation { "Name" : "End of the travel" }    TO_POINT
+}
+
+export enum FRCSlotAim
+{
+    annotation { "Name" : "By angle on the face" } ANGLE,
+    annotation { "Name" : "Along a picked edge" }  EDGE
+}
+
+export enum FRCSlotEnds
+{
+    annotation { "Name" : "Rounded" } ROUND,
+    annotation { "Name" : "Square" }  SQUARE
+}
+
+/**
+ * One slot outline: a rectangle of the travel length capped at each end. The
+ * rounded form is what a cutter of the slot's own width actually leaves, so a
+ * bolt slides the full travel and no more.
+ */
+export function frcSlotSegments(center is Vector, u is Vector, travel is ValueWithUnits,
+    width is ValueWithUnits, ends is FRCSlotEnds) returns array
+{
+    const r = width / 2;
+    const v = vector(-u[1], u[0]);
+    const c0 = center - u * (travel / 2);
+    const c1 = center + u * (travel / 2);
+    if (travel < 1e-6 * inch)
+        return frcCircleArcs(width, center, 0 * inch);
+    const pA = c0 + v * r;
+    const pB = c1 + v * r;
+    const pC = c1 - v * r;
+    const pD = c0 - v * r;
+    if (ends == FRCSlotEnds.SQUARE)
+        return [{ "kind" : "line", "start" : pA, "end" : pB },
+                { "kind" : "line", "start" : pB, "end" : pC },
+                { "kind" : "line", "start" : pC, "end" : pD },
+                { "kind" : "line", "start" : pD, "end" : pA }];
+    return [{ "kind" : "line", "start" : pA, "end" : pB },
+            { "kind" : "arc", "start" : pB, "mid" : c1 + u * r, "end" : pC },
+            { "kind" : "line", "start" : pC, "end" : pD },
+            { "kind" : "arc", "start" : pD, "mid" : c0 - u * r, "end" : pA }];
+}
+
+export function frcSlotBuild(context is Context, id is Id, definition is map)
+{
+    const tf = evaluateQuery(context, definition.face);
+    if (size(tf) == 0)
+        throw regenError("Select the flat face the slots are cut into.", ["face"]);
+
+    // Pattern and mirror support. The picked face is what anchors the slots in
+    // space, so it is the reference the pattern transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.face });
+
+    const pl = evPlane(context, { "face" : tf[0] });
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    const bodyQ = qOwnerBody(tf[0]);
+    const thickness = frcMaterialDepth(context, bodyQ, cSys);
+
+    const spots = evaluateQuery(context, definition.locations);
+    if (size(spots) == 0)
+        throw regenError("Pick the points the slots are placed at.", ["locations"]);
+    if (size(spots) > 200)
+        throw regenError("That is more slots than one feature should cut. Split the selection.", ["locations"], definition.locations);
+
+    var u = vector(cos(definition.angle), sin(definition.angle));
+    if (definition.aim == FRCSlotAim.EDGE)
+    {
+        const ref = evaluateQuery(context, definition.reference);
+        if (size(ref) == 0)
+            throw regenError("Select the edge the slots run along.", ["reference"]);
+        var got = false;
+        try silent
+        {
+            const dir = evEdgeTangentLine(context, { "edge" : ref[0], "parameter" : 0.5 }).direction;
+            const flat = vector(dot(dir, cSys.xAxis), dot(dir, yAxis));
+            if (norm(flat) > 1e-6)
+            {
+                u = flat / norm(flat);
+                got = true;
+            }
+        }
+        if (!got)
+            throw regenError("That edge is square to the face, so it gives no direction along it. Pick an edge that lies in the face.", ["reference"], ref[0]);
+        u = vector(cos(definition.angle) * u[0] - sin(definition.angle) * u[1],
+                   sin(definition.angle) * u[0] + cos(definition.angle) * u[1]);
+    }
+
+    const width = definition.customWidth
+        ? definition.slotWidth : frcHoleDiameter(definition.holeSize);
+    if (width < 1e-5 * meter)
+        throw regenError("That slot width is zero. Increase it.", ["slotWidth"]);
+    const travel = definition.travel;
+    const shift = (definition.anchor == FRCSlotAnchor.CENTERED) ? 0 * inch
+        : ((definition.anchor == FRCSlotAnchor.FROM_POINT) ? travel / 2 : -travel / 2);
+
+    var pts = [];
+    for (var v in spots)
+    {
+        try silent
+        {
+            const rel = evVertexPoint(context, { "vertex" : v }) - cSys.origin;
+            pts = append(pts, vector(dot(rel, cSys.xAxis), dot(rel, yAxis)) + u * shift);
+        }
+    }
+    if (size(pts) == 0)
+        throw regenError("Those points could not be read. Pick vertices or sketch points.", ["locations"], definition.locations);
+
+    const lift = 0.02 * inch;
+    const sk = newSketchOnPlane(context, id + "s",
+        { "sketchPlane" : plane(pl.origin + pl.normal * lift, pl.normal, pl.x) });
+    for (var i = 0; i < size(pts); i += 1)
+        frcDrawProfile(sk, "s" ~ i ~ "_",
+            frcSlotSegments(pts[i], u, travel, width, definition.ends));
+    skSolve(sk);
+    const regions = qSketchRegion(id + "s", false);
+    if (size(evaluateQuery(context, regions)) == 0)
+        throw regenError("The slot outlines did not close. Check the width and the travel.", ["travel"]);
+
+    const cutDepth = definition.throughAll ? thickness + 0.1 * inch : definition.depth;
+    opExtrude(context, id + "x", { "entities" : regions, "direction" : -pl.normal,
+                "endBound" : BoundingType.BLIND, "endDepth" : cutDepth + lift });
+
+    // The move goes on before the subtraction, not after it. A subtraction
+    // consumes the cutters, so a transform at the end of the feature would
+    // find none of this feature's own bodies left to move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    try
+    {
+        opBoolean(context, id + "sub", { "tools" : qCreatedBy(id + "x", EntityType.BODY),
+                    "targets" : bodyQ, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    catch
+    {
+        throw regenError("The slots did not land on the part. Check that the points sit on the face you picked.", ["locations"], definition.locations);
+    }
+
+    // A square slot ends on the travel points themselves, so it is the travel
+    // long end to end and a bolt of the slot's own width slides one width less
+    // than that. A rounded slot adds a half width of cap at each end and its
+    // bolt does slide the full travel. Under the segment builder's own floor
+    // the outline is a plain circle whichever ends were asked for, so it reads
+    // as the rounded case and both figures come out right.
+    const squareCut = definition.ends == FRCSlotEnds.SQUARE && travel > 1e-6 * inch;
+    const overall = squareCut ? travel : travel + width;
+    const boltMove = squareCut ? max(travel - width, 0 * inch) : travel;
+    var lines = "" ~ size(pts) ~ (size(pts) == 1 ? " slot, " : " slots, ")
+        ~ frcInches(overall) ~ " end to end, bolt moves " ~ frcInches(boltMove) ~ ". ";
+    if (definition.ends == FRCSlotEnds.SQUARE)
+        lines ~= "Square ends need a waterjet or laser, and a router needs dogbone corners. ";
+    lines ~= "Use a washer wider than the " ~ frcInches(width) ~ " slot.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################ BUMPER ################################
+
+export enum FRCBumperOutput
+{
+    annotation { "Name" : "Backing only" }                  BACKING,
+    annotation { "Name" : "Backing and padding" }           BACK_PAD,
+    annotation { "Name" : "Backing, padding, cover" } ALL,
+    annotation { "Name" : "Envelope, one solid band" } ENVELOPE
+}
+
+/**
+ * Bumper rule figures, 2026 FRC Game Manual, section 8.4. Every number here is
+ * quoted from the manual rather than inferred, and the manual is written in
+ * inches with centimeters in brackets.
+ *
+ * FRC_ROBOT_PERIM_MAX is the default this feature holds the bare frame outline
+ * to. It is not the figure R104 sets: R104 is measured over the bumpers, and
+ * FRC Inspection in the Hardware tab checks that footprint from typed frame
+ * sizes. Two measurements of one rule, so two numbers, and each label says
+ * which one it is. FRC_ROBOT_PERIM_OVER is the second one, and the report
+ * grows the bare outline it measured by the stand-out and checks that too,
+ * because a bare outline inside a 110 in default can still be a robot 16 in
+ * past R104. The grown figure is exact only while the outline is convex, so
+ * the report drops it when the outline turns through more than a full
+ * circle, and it leaves the cover fabric out because not every output
+ * grows one.
+ *
+ * R404 hard parts, R401 gaps and R406 corner fill are not held here. This
+ * feature models no fasteners and no bumper seams, so it has nothing to
+ * measure them against; their figures are printed in the report instead of
+ * sitting in this block looking like checks that run.
+ */
+export const FRC_BUMPER_ZONE_LO = 2.5 * inch;      // R405
+export const FRC_BUMPER_ZONE_HI = 5.75 * inch;     // R405
+export const FRC_BUMPER_MAX_OUT = 4.0 * inch;      // R403
+export const FRC_BUMPER_PAD_MIN = 2.25 * inch;     // R402-A depth
+export const FRC_BUMPER_TALL_MIN = 4.5 * inch;     // R402-A and R402-B
+export const FRC_ROBOT_PERIM_MAX = 110.0 * inch;   // R104, bare frame default
+export const FRC_ROBOT_PERIM_OVER = 120.0 * inch;  // R104, over the bumpers
+
+/**
+ * Cover fabric density. This is a rule of thumb carried over from the first
+ * version of this feature, not vendor data: Cordura is sold by weight per
+ * square yard, so a density only exists once a cover thickness is assumed. It
+ * stays in this file rather than in the Core density table because that table
+ * holds materials that are weighed as solids. Weigh a real cover and replace
+ * it.
+ */
+export const FRC_BUMPER_COVER_DENSITY = 600 * kilogram / meter ^ 3;
+
+/**
+ * The band of material between the picked footprint and the same footprint
+ * grown outward. Growing the outer wall with an offset rather than rebuilding
+ * the outline keeps every corner and arc of the real frame, and lets a notch
+ * narrower than the offset close over on its own, which is what a bumper
+ * actually does.
+ */
+export function frcGrownBand(context is Context, id is Id, face is Query, pl is Plane,
+    cSys is CoordSystem, top is ValueWithUnits, bottom is ValueWithUnits,
+    grow is ValueWithUnits) returns Query
+{
+    opExtrude(context, id + "x", { "entities" : face, "direction" : -pl.normal,
+                "endBound" : BoundingType.BLIND, "endDepth" : bottom,
+                "startBound" : BoundingType.BLIND, "startDepth" : -top });
+    const q = qCreatedBy(id + "x", EntityType.BODY);
+    if (grow > 0 * inch)
+    {
+        const cls = frcClassifyBoundaries(context, frcSideWallGroups(context, q, pl.normal), cSys);
+        try
+        {
+            opOffsetFace(context, id + "o", { "moveFaces" : qUnion(cls.outer),
+                        "offsetDistance" : grow });
+        }
+        catch
+        {
+            throw regenError("The frame outline could not be grown by " ~ frcInches(grow)
+                ~ ". A slot or notch narrower than that in the outline is the usual cause. Widen it, or pick a face without it.", ["perimeter"], face);
+        }
+    }
+    return q;
+}
+
+export function frcBumperBuild(context is Context, id is Id, definition is map)
+{
+    const tf = evaluateQuery(context, definition.perimeter);
+    if (size(tf) == 0)
+        throw regenError("Select the flat face whose outline is the frame perimeter. The top face of the frame is the usual pick.", ["perimeter"]);
+
+    // Pattern and mirror support. The picked perimeter face anchors the bumper
+    // in space, so it is the reference the pattern transform is measured
+    // against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.perimeter });
+
+    const pl = evPlane(context, { "face" : tf[0] });
+    const cSys = frcFaceCSys(pl);
+
+    const faceUp = definition.faceHeight;      // this face, above the floor
+    const bottom = definition.bumperBottom;    // bumper bottom, above the floor
+    const tall = definition.bumperHeight;
+    const backing = definition.backingThickness;
+    const pad = definition.padDepth;
+    const cover = definition.coverThickness;
+    const out = backing + pad;                 // how far the bumper stands out
+
+    // A season limit is a field, not a constant, so a rule change costs a team
+    // a number typed in the dialog rather than an edit to this file. The
+    // fallback keeps the feature working against a Toolkit tab that has not
+    // declared the field yet.
+    const perimLimit = (definition.perimeterLimit is ValueWithUnits)
+        ? definition.perimeterLimit : FRC_ROBOT_PERIM_MAX;
+
+    // Depths below the picked face. Negative means above it, which is legal.
+    const dTop = faceUp - (bottom + tall);
+    const dBot = faceUp - bottom;
+    if (tall < 1e-4 * inch)
+        throw regenError("The bumper has no height. Increase it.", ["bumperHeight"]);
+
+    const wantCover = definition.output == FRCBumperOutput.ALL;
+    const wantPad = definition.output != FRCBumperOutput.BACKING;
+    const single = definition.output == FRCBumperOutput.ENVELOPE;
+
+    // The bumper is the one assembly on this robot whose real color is the
+    // team's, so it is worth being exact about which body takes it. On a real
+    // bumper only the cover does. The fabric is sewn in team colors and
+    // carries the numerals; the backing is bare plywood, and a team that
+    // painted it would only be adding weight to a part nobody sees; the
+    // padding is whatever color noodle the store had that week, and it is
+    // buried under the cover as well. Coloring those two would say the team
+    // color reaches further into the robot than it does, and it would cost
+    // the one thing the current colors buy, which is telling the three
+    // layers apart on sight while the bumper is exploded. So the backing and
+    // the padding keep their literals whatever the team picked.
+    //
+    // The envelope follows the team, because it is not a layer: it is the
+    // whole bumper drawn as one solid, and what you see of a whole bumper is
+    // its cover. It keeps its alpha, which is what frcTeamColorA is for: an
+    // envelope you cannot see the frame through is no use as an envelope.
+    const envColor = frcTeamColorA(context, FRCPartClass.BUMPER,
+        color(0.75, 0.25, 0.25, 0.5), 0.5);
+    const coverColor = frcTeamColorA(context, FRCPartClass.BUMPER,
+        color(0.80, 0.15, 0.15, 1), 1);
+
+    var made = [];
+    if (single)
+    {
+        const outer = frcGrownBand(context, id + "e1", tf[0], pl, cSys, dTop, dBot,
+                backing + pad + cover);
+        const inner = frcGrownBand(context, id + "e0", tf[0], pl, cSys, dTop, dBot, 0 * inch);
+        opBoolean(context, id + "eb", { "tools" : inner, "targets" : outer,
+                    "operationType" : BooleanOperationType.SUBTRACTION });
+        // The envelope is the whole bumper as one solid, so it has to weigh
+        // what the layers inside it weigh. Solid pool noodle foam, which is
+        // what it carried, is the wrong number that looks right: at the
+        // shipped 0.75 in of plywood behind 2.5 in of noodle it reads about a
+        // sixth of the mass, under a material name a student has no reason to
+        // doubt. Carrying no material at all, the way the Inspection and Belt
+        // envelopes do, is worse here rather than better, because a body with
+        // no material is weighed at whatever the reading dialog says instead,
+        // and on a robot full of tube that is aluminum.
+        //
+        // So it carries the layers it stands for, blended by thickness. That
+        // is exact along a straight run and a little heavy at a corner, where
+        // the outer layers grow more volume per inch of thickness than the
+        // inner ones and the outer layers are the light ones. Heavy is the
+        // right way to be wrong in a weight budget.
+        // The cover is always part of the envelope. It is the outermost layer,
+        // and this body exists to say where the outside of the bumper is.
+        const envCover = cover;
+        const envOut = out + envCover;
+        const envMat = material("Bumper, all layers",
+            (backing * frcDensity(definition.backingMaterial)
+                + pad * frcDensity(FRCMaterial.FOAM_NOODLE)
+                + envCover * FRC_BUMPER_COVER_DENSITY) / envOut);
+        made = append(made, ["Bumper Envelope", outer, envColor, envMat]);
+    }
+    else
+    {
+        const b0 = frcGrownBand(context, id + "b0", tf[0], pl, cSys, dTop, dBot, 0 * inch);
+        const b1 = frcGrownBand(context, id + "b1", tf[0], pl, cSys, dTop, dBot, backing);
+        opBoolean(context, id + "bb", { "tools" : b0, "targets" : b1,
+                    "operationType" : BooleanOperationType.SUBTRACTION });
+        made = append(made, ["Bumper Backing", b1, color(0.72, 0.58, 0.36, 1),
+                material(frcMaterialName(definition.backingMaterial),
+                    frcDensity(definition.backingMaterial))]);
+
+        if (wantPad)
+        {
+            const p0 = frcGrownBand(context, id + "p0", tf[0], pl, cSys, dTop, dBot, backing);
+            const p1 = frcGrownBand(context, id + "p1", tf[0], pl, cSys, dTop, dBot, backing + pad);
+            opBoolean(context, id + "pb", { "tools" : p0, "targets" : p1,
+                        "operationType" : BooleanOperationType.SUBTRACTION });
+            // Foam density comes from the Core table, so a bumper weighs the
+            // same here as anywhere else in the library. Inspection weighs the
+            // robot with its bumpers on against the R408 limit, so a density
+            // invented in this file turns into a wrong pass or fail there.
+            made = append(made, ["Bumper Padding", p1, color(0.20, 0.35, 0.80, 0.6),
+                    material(frcMaterialName(FRCMaterial.FOAM_NOODLE),
+                        frcDensity(FRCMaterial.FOAM_NOODLE))]);
+        }
+        if (wantCover)
+        {
+            const c0 = frcGrownBand(context, id + "c0", tf[0], pl, cSys, dTop, dBot, backing + pad);
+            const c1 = frcGrownBand(context, id + "c1", tf[0], pl, cSys, dTop, dBot,
+                    backing + pad + cover);
+            opBoolean(context, id + "cb", { "tools" : c0, "targets" : c1,
+                        "operationType" : BooleanOperationType.SUBTRACTION });
+            made = append(made, ["Bumper Cover", c1, coverColor,
+                    material("Cordura fabric", FRC_BUMPER_COVER_DENSITY)]);
+        }
+    }
+
+    var backMass = 0 * kilogram;
+    for (var m in made)
+    {
+        // Name, color and material travel with the body that carries them, so
+        // the loop no longer works out what a body is made of by matching its
+        // name. That match is what let the envelope fall through to the foam
+        // default and weigh a whole bumper as solid noodle.
+        try silent
+        {
+            setProperty(context, { "entities" : m[1], "propertyType" : PropertyType.NAME,
+                        "value" : m[0] });
+            setProperty(context, { "entities" : m[1], "propertyType" : PropertyType.APPEARANCE,
+                        "value" : m[2] });
+            setProperty(context, { "entities" : m[1], "propertyType" : PropertyType.MATERIAL,
+                        "value" : m[3] });
+        }
+        if (m[0] == "Bumper Backing")
+            backMass = evVolume(context, { "entities" : m[1] })
+                * frcDensity(definition.backingMaterial);
+    }
+
+    // The bare frame outline, for the R104 check: the outer side walls of the
+    // frame body itself, summed before any bumper band is grown onto separate
+    // bodies, so it is a smaller number than the footprint an inspector
+    // measures over the bumpers. A sketch region has no owner body, so this is
+    // skipped rather than failed when the pick is a sketch.
+    var perim = 0 * inch;
+    var outerWalls = [];
+    try silent
+    {
+        const cls = frcClassifyBoundaries(context,
+            frcSideWallGroups(context, qOwnerBody(tf[0]), pl.normal), cSys);
+        outerWalls = cls.outer;
+        for (var f in cls.outer)
+        {
+            for (var e in evaluateQuery(context, qLoopEdges(f)))
+            {
+                try silent
+                {
+                    const ln = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5,
+                                "arcLengthParameterization" : true });
+                    if (abs(dot(ln.origin - cSys.origin, cSys.zAxis)) < 1e-4 * meter)
+                        perim = perim + evLength(context, { "entities" : e });
+                }
+            }
+        }
+    }
+
+    // The same outline as an inspector measures it, over the bumpers. Growing
+    // a flat wall outward leaves its length alone and moves it out, so all the
+    // extra length turns up at the corners, where two walls that turn through
+    // an angle meet out * tan(angle / 2) further along each of them. Summing
+    // that over every ordered pair of adjacent outer walls counts each corner
+    // from both of its sides, which is the two halves it grows by. That is
+    // exact for a convex outline and only for a convex outline, so the total
+    // turn is checked: a closed convex outline turns through one full circle,
+    // counted once per corner and so twice over the ordered pairs. More than
+    // that is a notch, where the outline shrinks instead of growing and an
+    // offset wider than the notch closes it over, and then no figure is
+    // printed. A round corner is not planar, evPlane throws on it, and the
+    // same silence applies.
+    var overPerim = 0 * inch;
+    try silent
+    {
+        var turned = 0 * degree;
+        var extra = 0 * inch;
+        for (var f in outerWalls)
+        {
+            const nf = evPlane(context, { "face" : f }).normal;
+            for (var g in evaluateQuery(context, qIntersection([
+                            qAdjacent(f, AdjacencyType.EDGE, EntityType.FACE),
+                            qUnion(outerWalls)])))
+            {
+                const ng = evPlane(context, { "face" : g }).normal;
+                const turn = acos(max(min(dot(nf, ng), 1), -1));
+                turned = turned + turn;
+                extra = extra + out * tan(turn / 2);
+            }
+        }
+        if (perim > 0 * inch && abs(turned - 720 * degree) < 1 * degree)
+            overPerim = perim + extra;
+    }
+
+    // Every measurement above is a length, a volume or a property, so it reads
+    // the same either side of the move. The bumper bodies are moved once, here,
+    // at the end of the geometry work.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    var lines = "Band " ~ frcInches(bottom) ~ " to " ~ frcInches(bottom + tall)
+        ~ " above the floor, standing " ~ frcInches(out) ~ " out past the bare frame. ";
+    if (backMass > 0 * kilogram)
+        lines ~= "Backing " ~ roundToPrecision(backMass / (0.45359237 * kilogram), 3)
+            ~ " lb for the set, with the foam sampled and the cover density a guess. ";
+    const okZone = bottom <= FRC_BUMPER_ZONE_LO + 1e-6 * inch
+        && bottom + tall >= FRC_BUMPER_ZONE_HI - 1e-6 * inch;
+    lines ~= "Against the 2026 manual: R405 zone " ~ frcInches(FRC_BUMPER_ZONE_LO) ~ " to "
+        ~ frcInches(FRC_BUMPER_ZONE_HI) ~ " filled, " ~ (okZone ? "yes" : "NO") ~ "; ";
+    lines ~= "R403 out at most " ~ frcInches(FRC_BUMPER_MAX_OUT) ~ ", "
+        ~ ((out <= FRC_BUMPER_MAX_OUT + 1e-6 * inch) ? "yes" : "NO") ~ "; ";
+    lines ~= "R402-A padding " ~ frcInches(pad) ~ " deep against "
+        ~ frcInches(FRC_BUMPER_PAD_MIN) ~ ", "
+        ~ ((pad >= FRC_BUMPER_PAD_MIN - 1e-6 * inch) ? "yes" : "NO") ~ "; ";
+    lines ~= "R402 " ~ frcInches(tall) ~ " tall against " ~ frcInches(FRC_BUMPER_TALL_MIN)
+        ~ ", " ~ ((tall >= FRC_BUMPER_TALL_MIN - 1e-6 * inch) ? "yes" : "NO") ~ ". ";
+    if (perim > 0 * inch)
+    {
+        lines ~= "R104 bare frame outline " ~ frcInches(perim) ~ " against "
+            ~ frcInches(perimLimit) ~ ", "
+            ~ ((perim <= perimLimit + 1e-6 * inch) ? "yes" : "NO") ~ ". ";
+        if (overPerim > 0 * inch)
+            lines ~= "Over the bumpers " ~ frcInches(overPerim) ~ " against "
+                ~ frcInches(FRC_ROBOT_PERIM_OVER) ~ ", "
+                ~ ((overPerim <= FRC_ROBOT_PERIM_OVER + 1e-6 * inch) ? "yes" : "NO") ~ ". ";
+        else
+            lines ~= "R104 measures over the bumpers, which needs a straight convex "
+                ~ "outline, so FRC Inspection checks that one. ";
+    }
+    if (!okZone)
+        lines ~= "Move the band to span " ~ frcInches(FRC_BUMPER_ZONE_LO) ~ " to "
+            ~ frcInches(FRC_BUMPER_ZONE_HI) ~ ". ";
+    lines ~= "Not checked: R404 hard parts and R401 gaps 1.25 in, R406 corner fill "
+        ~ "2.25 in, R412 numerals, R408 weight 135 lb with bumpers. ";
+    lines ~= "Solid foam padding only, on 2026 figures; check the manual.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################# WHEEL ################################
+
+export enum FRCWheelStyle
+{
+    annotation { "Name" : "Traction with tread seat" } TRACTION,
+    annotation { "Name" : "Plain, no tread seat" }     PLAIN,
+    annotation { "Name" : "Hub only" }                 HUB
+}
+
+export enum FRCWheelPattern
+{
+    annotation { "Name" : "1.875 in, 6 holes" }  BC_1875_6,
+    annotation { "Name" : "1.875 in, 12 holes" } BC_1875_12,
+    annotation { "Name" : "1.40 in, 6 holes" }   BC_1400_6,
+    annotation { "Name" : "Custom bolt circle" } CUSTOM,
+    annotation { "Name" : "No bolt circle" }     NONE
+}
+
+export enum FRCTread
+{
+    annotation { "Name" : "Blue nitrile roughtop" } ROUGHTOP,
+    annotation { "Name" : "Tan wedgetop" }          WEDGETOP,
+    annotation { "Name" : "3 ply neoprene" }        NEOPRENE,
+    annotation { "Name" : "Custom thickness" }                CUSTOM,
+    annotation { "Name" : "No tread" }                        NONE
+}
+
+/**
+ * Tread thickness from the vendor drawings. AndyMark dimensions its tread as a
+ * range and these are the midpoints: blue nitrile roughtop am-3309 and am-4206
+ * are 0.293 to 0.333, tan wedgetop am-0522 is 0.345 to 0.385. The Thrifty Bot
+ * publishes 0.30 nominal for its 3 ply neoprene. WCP does not publish a
+ * thickness for its roughtop, so it is not offered as a preset.
+ */
+export function frcTreadThickness(t is FRCTread) returns ValueWithUnits
+{
+    return {
+            FRCTread.ROUGHTOP : 0.313 * inch, FRCTread.WEDGETOP : 0.365 * inch,
+            FRCTread.NEOPRENE : 0.300 * inch, FRCTread.CUSTOM : 0.313 * inch,
+            FRCTread.NONE : 0 * inch
+        }[t];
+}
+
+/**
+ * Wheel bolt patterns that vendors publish as dimensions.
+ *
+ *   1.875 in bolt circle, 6 holes at 60 deg is the one real cross-vendor
+ *   standard. AndyMark taps it 10-32 and drills clearance at 0.157 to 0.159;
+ *   VEX calls for 8-32 and drills 0.169; WCP taps 10-32. The circle is the
+ *   same, the fastener is not, so the hole size is left as a choice.
+ *   1.875 in with 12 holes is the WCP Colson dead hub, WCP-0808.
+ *   1.40 in with 6 holes at 0.20 is REV MAXSwerve, REV-21-3093, and shares
+ *   nothing with the 1.875 in pattern.
+ */
+export function frcWheelPatternData(p is FRCWheelPattern) returns map
+{
+    return {
+            FRCWheelPattern.BC_1875_6 : { "circle" : 1.875 * inch, "count" : 6,
+                "source" : "AndyMark am-2256 and am-3608, VEX VersaHub, WCP-0809" },
+            FRCWheelPattern.BC_1875_12 : { "circle" : 1.875 * inch, "count" : 12,
+                "source" : "WCP-0808 Colson dead hub" },
+            FRCWheelPattern.BC_1400_6 : { "circle" : 1.400 * inch, "count" : 6,
+                "source" : "REV-21-3093 MAXSwerve wheel hub" },
+            FRCWheelPattern.CUSTOM : { "circle" : 1.875 * inch, "count" : 6,
+                "source" : "as entered" },
+            FRCWheelPattern.NONE : { "circle" : 0 * inch, "count" : 0, "source" : "none" }
+        }[p];
+}
+
+export function frcWheelBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face, a hole, a vertex or a mate connector to build the wheel on.", ["location"]);
+
+    // Pattern and mirror support. The picked face, hole, vertex or mate
+    // connector is what places the wheel, so it is the reference the pattern
+    // transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+    const center = vector(0, 0) * inch;
+
+    const treadThk = (definition.tread == FRCTread.CUSTOM)
+        ? definition.treadThickness : frcTreadThickness(definition.tread);
+    const isTraction = definition.style == FRCWheelStyle.TRACTION;
+    const isHub = definition.style == FRCWheelStyle.HUB;
+
+    // The seat is what gets cut; the diameter over the tread is what rolls.
+    var seat = definition.diameter;
+    if (isTraction && definition.sizeOverTread)
+        seat = definition.diameter - 2 * treadThk;
+    if (seat < 0.1 * inch)
+        throw regenError("The tread is thicker than the wheel, so no seat is left. Increase the diameter, or size the wheel from its seat instead.", ["diameter"]);
+
+    const flange = isTraction ? seat + 2 * definition.flangeStand : seat;
+    const width = definition.width;
+    const channel = isTraction ? definition.treadWidth : width;
+    if (isTraction && channel >= width - 1e-6 * inch)
+        throw regenError("The tread channel is as wide as the wheel, so there is no flange left to hold the tread on. Reduce the tread width.", ["treadWidth"]);
+
+    const boreReach = frcProfileReach(frcBoreSpec(definition));
+    const outerR = isHub ? definition.hubDiameter / 2 : flange / 2;
+    if (outerR <= boreReach + 0.02 * inch)
+        throw regenError((isHub
+                    ? "The bore is as large as the hub. Increase the hub diameter, or choose a smaller bore."
+                    : "The bore is as large as the wheel. Increase the diameter, or choose a smaller bore."),
+            (isHub ? ["hubDiameter"] : ["diameter"]));
+
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : pl });
+    skCircle(sk, "o", { "center" : center, "radius" : outerR });
+    frcAddBore(sk, "bore", center, definition);
+    skSolve(sk);
+    opExtrude(context, id + "ex", { "entities" : qSketchRegion(id + "s", true),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : width });
+    const body = qCreatedBy(id + "ex", EntityType.BODY);
+
+    // Set once the groove is actually subtracted, so the report never names a
+    // channel that a zero flange stand or a failed subtraction left uncut.
+    var channelCut = false;
+    if (isTraction && definition.flangeStand > 0 * inch)
+    {
+        // The tread channel, cut as a revolved groove between the two flanges.
+        const gp = plane(pl.origin, cross(pl.normal, pl.x), pl.x);
+        const skg = newSketchOnPlane(context, id + "g", { "sketchPlane" : gp });
+        skRectangle(skg, "g", {
+                    "firstCorner" : vector(seat / 2, -(width - channel) / 2),
+                    "secondCorner" : vector(flange / 2 + 0.05 * inch,
+                        -(width + channel) / 2) });
+        skSolve(skg);
+        opRevolve(context, id + "gx", { "entities" : qSketchRegion(id + "g", false),
+                    "axis" : line(pl.origin, pl.normal), "angleForward" : 360 * degree });
+        try silent
+        {
+            opBoolean(context, id + "gsub", { "tools" : qCreatedBy(id + "gx", EntityType.BODY),
+                        "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+            channelCut = true;
+        }
+        // A groove that does not cut leaves the revolved ring standing as a
+        // loose body with no name and no material, and Weight Budget's
+        // fallback group weighs every such body at whatever density its own
+        // dialog was left at. The panel already prints "none, the seat is
+        // the full width" off this same flag, so a channel that misses is a
+        // case the feature reports rather than fails on, and the ring goes
+        // rather than the wheel stopping. The delete is guarded, because a
+        // cleanup that throws is worse than the body it was clearing.
+        if (!channelCut)
+        {
+            try silent
+            {
+                opDeleteBodies(context, id + "gdel",
+                    { "entities" : qCreatedBy(id + "gx", EntityType.BODY) });
+            }
+        }
+    }
+
+    const pd = frcWheelPatternData(definition.pattern);
+    const bcDia = (definition.pattern == FRCWheelPattern.CUSTOM)
+        ? definition.boltCircle : pd.circle;
+    const bcCount = (definition.pattern == FRCWheelPattern.CUSTOM)
+        ? definition.boltCount : pd.count;
+    const boltDia = frcHoleDiameter(definition.boltSize);
+    var boltsCut = 0;
+    if (bcCount > 0 && bcDia > 0 * inch)
+    {
+        if (bcDia / 2 - boltDia / 2 <= boreReach)
+            throw regenError("The bolt circle falls inside the bore. Use a larger bolt circle, or a smaller bore.", ["pattern"]);
+        if (bcDia / 2 + boltDia / 2 >= outerR)
+            throw regenError("The bolt circle falls outside the wheel. Use a smaller bolt circle, or a larger diameter.", ["pattern"]);
+        const skb = newSketchOnPlane(context, id + "b",
+            { "sketchPlane" : plane(pl.origin - pl.normal * (0.1 * inch), pl.normal, pl.x) });
+        for (var i = 0; i < bcCount; i += 1)
+        {
+            const th = definition.boltStart + (360 * degree) * i / bcCount;
+            skCircle(skb, "h" ~ i, { "center" : center + frcPolar(bcDia / 2, th),
+                        "radius" : boltDia / 2 });
+        }
+        skSolve(skb);
+        opExtrude(context, id + "bx", { "entities" : qSketchRegion(id + "b", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : width + 0.3 * inch });
+        try
+        {
+            opBoolean(context, id + "bsub", { "tools" : qCreatedBy(id + "bx", EntityType.BODY),
+                        "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+            boltsCut = bcCount;
+        }
+        catch
+        {
+            throw regenError("The bolt circle did not land on the wheel. Check the bolt circle diameter against the wheel diameter.", ["pattern"]);
+        }
+    }
+
+    // Lightening draws the pockets, not the spokes. Each pocket is one closed
+    // loop between a spoke and the next: out along the side of one spoke,
+    // round the outer circle, back in along the side of the next and round the
+    // inner circle to close. Drawing pockets is what makes the count right,
+    // because n pockets leave exactly the n spokes the dialog asked for, and
+    // it is what makes the region query safe, because the loops are disjoint
+    // and none of them sits inside another, so the extrude gets the same n
+    // regions whether or not the query filters inner loops. It also keeps the
+    // cut inside the rim-to-hub band by construction, so the hub web and its
+    // bolt circle are never in the removed material.
+    var spokesCut = 0;
+    if (definition.lighten && !isHub)
+    {
+        const rOuter = seat / 2 - definition.rimWidth;
+        const rInner = max(boreReach, bcDia / 2 + boltDia / 2) + definition.rimWidth;
+        const nSpokes = definition.spokes;
+        const step = (360 * degree) / nSpokes;
+        const halfW = definition.spokeWidth / 2;
+        // A spoke of one width covers more of the inner circle than of the
+        // outer one, so the inner circle is where neighbours run out of room.
+        // Half a spoke width reaches rInner * sin(step / 2) round it, and past
+        // that there is no pocket left to cut.
+        const roomy = halfW + 0.01 * inch < rInner * sin(step / 2);
+        if (rOuter > rInner + 0.1 * inch && roomy)
+        {
+            const skl = newSketchOnPlane(context, id + "l",
+                { "sketchPlane" : plane(pl.origin - pl.normal * (0.1 * inch), pl.normal, pl.x) });
+            // Where a spoke side, half a width off the centre line, crosses
+            // each circle.
+            const tIn = sqrt(rInner * rInner - halfW * halfW);
+            const tOut = sqrt(rOuter * rOuter - halfW * halfW);
+            for (var i = 0; i < nSpokes; i += 1)
+            {
+                const th = definition.boltStart + step * i;
+                const thNext = th + step;
+                const thMid = th + step / 2;
+                const u0 = vector(cos(th), sin(th));
+                const v0 = vector(-sin(th), cos(th));
+                const u1 = vector(cos(thNext), sin(thNext));
+                const v1 = vector(-sin(thNext), cos(thNext));
+                const pIn0 = center + v0 * halfW + u0 * tIn;
+                const pOut0 = center + v0 * halfW + u0 * tOut;
+                const pOut1 = center - v1 * halfW + u1 * tOut;
+                const pIn1 = center - v1 * halfW + u1 * tIn;
+                frcDrawProfile(skl, "s" ~ i ~ "_", [
+                            { "kind" : "line", "start" : pIn0, "end" : pOut0 },
+                            { "kind" : "arc", "start" : pOut0,
+                              "mid" : center + frcPolar(rOuter, thMid), "end" : pOut1 },
+                            { "kind" : "line", "start" : pOut1, "end" : pIn1 },
+                            { "kind" : "arc", "start" : pIn1,
+                              "mid" : center + frcPolar(rInner, thMid), "end" : pIn0 }]);
+            }
+            skSolve(skl);
+            opExtrude(context, id + "lx", { "entities" : qSketchRegion(id + "l", false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : width + 0.3 * inch });
+            try silent
+            {
+                opBoolean(context, id + "lsub", { "tools" : qCreatedBy(id + "lx", EntityType.BODY),
+                            "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+                spokesCut = nSpokes;
+            }
+            // Pockets that do not cut leave one loose prism per spoke, three
+            // at least and twelve at most, each unnamed and with no material
+            // for Weight Budget to weigh it by. The report reads the same
+            // count and says the wheel was not lightened, so this is a miss
+            // to clear up after rather than an error: a wheel with a solid
+            // web is still a wheel. The flag can only be zero here when the
+            // subtraction did not take, since the spoke count is bounded at
+            // three.
+            if (spokesCut == 0)
+            {
+                try silent
+                {
+                    opDeleteBodies(context, id + "ldel",
+                        { "entities" : qCreatedBy(id + "lx", EntityType.BODY) });
+                }
+            }
+        }
+    }
+
+    frcBreakEdges(context, id + "brk",
+        qGeometry(qOwnedByBody(body, EntityType.EDGE), GeometryType.CIRCLE), 0.02 * inch);
+    try silent
+    {
+        setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                    "value" : isHub ? "Wheel Hub" : "Wheel" });
+    }
+    frcApplyPart(context, body, definition.material, FRCPartClass.WHEEL);
+
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : body });
+    var lines = "";
+    if (isHub)
+        lines ~= "Hub " ~ frcInches(definition.hubDiameter) ~ " dia, "
+            ~ frcInches(width) ~ " wide. ";
+    else if (isTraction && treadThk > 0 * inch)
+        lines ~= "Over the tread " ~ frcInches(seat + 2 * treadThk) ~ " on a "
+            ~ frcInches(seat) ~ " seat, " ~ frcInches(width) ~ " wide. Cut the tread "
+            ~ frcInches(PI * seat) ~ " long, a touch short so it pulls up tight. ";
+    else
+        lines ~= "Diameter " ~ frcInches(seat) ~ ", " ~ frcInches(width) ~ " wide. ";
+    if (channelCut)
+        lines ~= "Flanges " ~ frcInches(flange) ~ " dia over a " ~ frcInches(channel)
+            ~ " channel. ";
+    if (boltsCut > 0)
+    {
+        lines ~= "" ~ boltsCut ~ " bolt holes at " ~ frcInches(boltDia) ~ " on a "
+            ~ frcInches(bcDia) ~ " circle, " ~ pd.source ~ ". ";
+        const rimLeft = outerR - (bcDia / 2 + boltDia / 2);
+        if (rimLeft < 0.090 * inch)
+            lines ~= "NOTE Only " ~ frcInches(rimLeft) ~ " of rim outside each bolt "
+                ~ "hole, under the 0.090 in this library treats as a minimum wall. "
+                ~ "Use a smaller circle or a larger diameter. ";
+    }
+    if (spokesCut > 0)
+        lines ~= "" ~ spokesCut ~ " spokes at " ~ frcInches(definition.spokeWidth) ~ ". ";
+    else if (definition.lighten && !isHub)
+        lines ~= "NOTE No room for spokes between the rim and the hub. ";
+    lines ~= "Mass " ~ roundToPrecision(vol * frcDensity(definition.material)
+            / (0.45359237 * kilogram), 3) ~ " lb. ";
+    if (definition.pattern == FRCWheelPattern.BC_1875_6
+        || definition.pattern == FRCWheelPattern.BC_1875_12)
+        lines ~= "AndyMark and WCP tap the 1.875 in circle 10-32, VEX 8-32.";
+    else
+        lines ~= "Preset circles are vendor data; Custom is what you type.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################# FRAME ################################
+
+export const FRC_SECTION_BOUNDS = { (meter) : [0.003, 0.0254, 0.3], (centimeter) : 2.54,
+    (millimeter) : 25.4, (inch) : 1, (foot) : 0.08333, (yard) : 0.02778 } as LengthBoundSpec;
+export const FRC_FRAMEWALL_BOUNDS = { (meter) : [0, 0.0015875, 0.02], (centimeter) : 0.15875,
+    (millimeter) : 1.5875, (inch) : 0.0625, (foot) : 0.005208, (yard) : 0.001736 } as LengthBoundSpec;
+
+export enum FRCFrameJoint
+{
+    annotation { "Name" : "Miter two-member corners" } MITER,
+    annotation { "Name" : "Butt to the longest" }      BUTT,
+    annotation { "Name" : "Leave members square" }     SQUARE
+}
+
+export enum FRCFrameUp
+{
+    annotation { "Name" : "Square to the line plane" } AUTO,
+    annotation { "Name" : "From a face or connector" } PICKED
+}
+
+export enum FRCFramePunch
+{
+    annotation { "Name" : "No holes" }                     NONE,
+    annotation { "Name" : "Through top and bottom" }      UPRIGHT,
+    annotation { "Name" : "Through the sides" }            SIDEWAYS,
+    annotation { "Name" : "Both ways" }                    BOTH
+}
+
+/**
+ * Where a point sits on a member: -1 off it, 0 at one of its ends, 1 somewhere
+ * along its length. The interior case is what makes a T-joint work without the
+ * lines having to share an endpoint.
+ */
+export function frcOnMember(a is Vector, b is Vector, p is Vector,
+    tol is ValueWithUnits) returns number
+{
+    const d = b - a;
+    const L = norm(d);
+    if (L < tol)
+        return -1;
+    const u = d / L;
+    const t = dot(p - a, u);
+    if (t < -tol || t > L + tol)
+        return -1;
+    if (norm(p - (a + u * t)) > tol)
+        return -1;
+    if (t < tol || t > L - tol)
+        return 0;
+    return 1;
+}
+
+/**
+ * A tube frame built along selected lines.
+ *
+ * Every member is extruded overlong, then the joints are cut: a two-member
+ * corner is mitered on the bisector of the two members, and everything else is
+ * butted, with the branch trimmed back to the outside face of the member it
+ * lands on. A branch that lands partway along another member needs no shared
+ * endpoint, so a cross brace can be drawn straight across a rail.
+ *
+ * The miter overhang is the exact amount the corner of the section reaches past
+ * the node, half the section diagonal over the tangent of half the joint angle,
+ * so a shallow joint still cuts clean.
+ */
+export function frcFrameBuild(context is Context, id is Id, definition is map)
+{
+    const edges = evaluateQuery(context, definition.lines);
+    if (size(edges) == 0)
+        throw regenError("Select the lines the frame is built along.", ["lines"]);
+    if (size(edges) > 60)
+        throw regenError("That is more members than one frame feature should build. Split the selection.", ["lines"], definition.lines);
+
+    // Pattern and mirror support. The picked lines are what put the frame in
+    // space, so they are the reference the pattern transform is measured
+    // against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.lines });
+
+    const TOL = 0.002 * inch;
+    var A = [];
+    var B = [];
+    for (var e in edges)
+    {
+        var p0 = vector(0, 0, 0) * inch;
+        var p1 = vector(0, 0, 0) * inch;
+        var pm = vector(0, 0, 0) * inch;
+        var got = false;
+        try silent
+        {
+            p0 = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0,
+                        "arcLengthParameterization" : true }).origin;
+            p1 = evEdgeTangentLine(context, { "edge" : e, "parameter" : 1,
+                        "arcLengthParameterization" : true }).origin;
+            pm = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5,
+                        "arcLengthParameterization" : true }).origin;
+            got = true;
+        }
+        if (!got)
+            continue;
+        if (norm(p1 - p0) < 0.05 * inch)
+            continue;
+        if (norm(pm - (p0 + p1) / 2) > TOL)
+            throw regenError("One of those edges is curved. FRC Frame builds straight tube, so every line has to be straight.", ["lines"], e);
+        A = append(A, p0);
+        B = append(B, p1);
+    }
+    const n = size(A);
+    if (n == 0)
+        throw regenError("None of those edges could be read as straight lines. Pick sketch lines or straight model edges.", ["lines"], definition.lines);
+
+    // Published back to the dialog so the feature can name itself by how many
+    // members it built. Set here, where the count is settled, so the tree name
+    // is right even if a later step reports an error.
+    setFeatureComputedParameter(context, id, { "name" : "members", "value" : n });
+
+    const w = definition.sectionWidth;
+    const h = definition.sectionHeight;
+    const wall = definition.wallThickness;
+    if (wall > 0 * inch && 2 * wall >= min(w, h))
+        throw regenError("A " ~ frcInches(wall) ~ " wall does not fit in a "
+            ~ frcInches(min(w, h)) ~ " section. Use a thinner wall.", ["wallThickness"]);
+    const halfDiag = sqrt(w * w + h * h) / 2;
+
+    // The up direction sets which way the section stands. Automatic takes the
+    // normal of the plane the lines lie in, which is what a flat chassis wants.
+    var up = vector(0, 0, 1);
+    if (definition.upMode == FRCFrameUp.PICKED)
+    {
+        const ref = evaluateQuery(context, definition.upFace);
+        if (size(ref) == 0)
+            throw regenError("Select the face or mate connector that says which way is up.", ["upFace"]);
+        up = frcPickFrame(context, definition.upFace, XY_PLANE).normal;
+    }
+    else
+    {
+        const u0 = (B[0] - A[0]) / norm(B[0] - A[0]);
+        var got = false;
+        for (var k = 1; k < n && !got; k += 1)
+        {
+            const uk = (B[k] - A[k]) / norm(B[k] - A[k]);
+            const c = cross(u0, uk);
+            if (norm(c) > 0.05)
+            {
+                up = c / norm(c);
+                got = true;
+            }
+        }
+        if (!got)
+            up = perpendicularVector(u0);
+    }
+
+    const dirOf = function(m is number) returns Vector
+        {
+            return (B[m] - A[m]) / norm(B[m] - A[m]);
+        };
+    const inward = function(m is number, e is number) returns Vector
+        {
+            return (e == 0) ? dirOf(m) : -dirOf(m);
+        };
+
+    var ovh = [];
+    for (var m = 0; m < n; m += 1)
+        ovh = append(ovh, [0 * inch, 0 * inch]);
+    var miters = [];
+    var butts = [];
+    for (var m = 0; m < n; m += 1)
+    {
+        for (var e = 0; e < 2; e += 1)
+        {
+            const p = (e == 0) ? A[m] : B[m];
+            var ends = [];
+            var thru = [];
+            for (var k = 0; k < n; k += 1)
+            {
+                if (k == m)
+                    continue;
+                const c = frcOnMember(A[k], B[k], p, TOL);
+                if (c == 0)
+                    ends = append(ends, k);
+                else if (c == 1)
+                    thru = append(thru, k);
+            }
+            if (definition.joint == FRCFrameJoint.SQUARE)
+                continue;
+            if (definition.joint == FRCFrameJoint.MITER
+                && size(thru) == 0 && size(ends) == 1)
+            {
+                const k = ends[0];
+                const ek = (norm(p - A[k]) < TOL) ? 0 : 1;
+                if (m < k)
+                    miters = append(miters, [m, e, k, ek]);
+                var th = acos(max(min(dot(inward(m, e), inward(k, ek)), 1), -1));
+                if (th < 10 * degree)
+                    th = 10 * degree;
+                const need = halfDiag / tan(th / 2) + 0.01 * inch;
+                ovh[m] = (e == 0) ? [need, ovh[m][1]] : [ovh[m][0], need];
+                continue;
+            }
+            var through = thru;
+            if (size(through) == 0 && size(ends) > 0)
+            {
+                // Lengths within the tolerance count as equal, so which member
+                // is picked here does not turn on a rounding difference.
+                var best = ends[0];
+                for (var k in ends)
+                {
+                    if (norm(B[k] - A[k]) > norm(B[best] - A[best]) + TOL)
+                        best = k;
+                }
+                // Rails of equal length used to leave a corner uncut, because
+                // each of the two read itself as at least as long as the other
+                // and so ran through, and two members running through one
+                // corner share the block of material there and weigh it twice.
+                // A square frame is four such corners. The tie goes to the
+                // lower member index, which is the same answer on every
+                // regeneration and leaves each corner exactly one member that
+                // runs through and one that butts to it.
+                const mLen = norm(B[m] - A[m]);
+                const bestLen = norm(B[best] - A[best]);
+                const runsThrough = (mLen > bestLen + TOL)
+                    || (mLen > bestLen - TOL && m < best);
+                through = runsThrough ? [] : [best];
+            }
+            for (var k in through)
+                butts = append(butts, [m, k]);
+        }
+    }
+
+    var bodies = [];
+    for (var m = 0; m < n; m += 1)
+    {
+        const L = norm(B[m] - A[m]);
+        const u = dirOf(m);
+        var right = cross(u, up);
+        if (norm(right) < 1e-6)
+            right = perpendicularVector(u);
+        right = right / norm(right);
+        const sk = newSketchOnPlane(context, id + ("ms" ~ m),
+            { "sketchPlane" : plane(A[m] - u * ovh[m][0], u, right) });
+        skRectangle(sk, "r", { "firstCorner" : vector(-w / 2, -h / 2),
+                    "secondCorner" : vector(w / 2, h / 2) });
+        skSolve(sk);
+        opExtrude(context, id + ("mx" ~ m), { "entities" : qSketchRegion(id + ("ms" ~ m), false),
+                    "direction" : u, "endBound" : BoundingType.BLIND,
+                    "endDepth" : L + ovh[m][0] + ovh[m][1] });
+        bodies = append(bodies, qCreatedBy(id + ("mx" ~ m), EntityType.BODY));
+    }
+
+    // A butt joint is one subtraction: the branch reaches the other member's
+    // center line, and taking that member away leaves it stopped at the face.
+    for (var i = 0; i < size(butts); i += 1)
+    {
+        opPattern(context, id + ("bt" ~ i), { "entities" : bodies[butts[i][1]],
+                    "transforms" : [identityTransform()], "instanceNames" : ["c"] });
+        var buttCut = false;
+        try silent
+        {
+            opBoolean(context, id + ("btb" ~ i),
+                { "tools" : qCreatedBy(id + ("bt" ~ i), EntityType.BODY),
+                  "targets" : bodies[butts[i][0]],
+                  "operationType" : BooleanOperationType.SUBTRACTION });
+            buttCut = true;
+        }
+        // The tool here is a full size duplicate of the member being butted
+        // to, so a swallowed failure strands a whole second frame member in
+        // the studio. It is not in the `bodies` list, so the cut list, the
+        // naming loop and frcApplyPart all pass it by, and it reaches Weight
+        // Budget unnamed and with no material, where the fallback group
+        // weighs it at the reading dialog's density and the frame is counted
+        // heavy by a member. Two members that do not meet is the ordinary
+        // way for this to fail and a frame with one corner uncut is still a
+        // frame, so the copy is deleted rather than the feature stopped. The
+        // delete id carries the loop index, as every other id here does.
+        if (!buttCut)
+        {
+            try silent
+            {
+                opDeleteBodies(context, id + ("btd" ~ i),
+                    { "entities" : qCreatedBy(id + ("bt" ~ i), EntityType.BODY) });
+            }
+        }
+    }
+
+    var span = 1 * inch;
+    for (var m = 0; m < n; m += 1)
+        span = max(span, norm(B[m] - A[m]));
+    const big = 4 * span + 10 * inch;
+    for (var i = 0; i < size(miters); i += 1)
+    {
+        const m = miters[i][0];
+        const e = miters[i][1];
+        const k = miters[i][2];
+        const p = (e == 0) ? A[m] : B[m];
+        const dv = inward(m, e) - inward(k, miters[i][3]);
+        if (norm(dv) < 1e-9)
+            continue;
+        const nv = dv / norm(dv);
+        for (var q = 0; q < 2; q += 1)
+        {
+            const nrm = nv * ((q == 0) ? -1 : 1);
+            const cs = id + ("cs" ~ i ~ "_" ~ q);
+            const cx = id + ("cx" ~ i ~ "_" ~ q);
+            const sk = newSketchOnPlane(context, cs,
+                { "sketchPlane" : plane(p, nrm, perpendicularVector(nrm)) });
+            skRectangle(sk, "r", { "firstCorner" : vector(-big, -big),
+                        "secondCorner" : vector(big, big) });
+            skSolve(sk);
+            opExtrude(context, cx, { "entities" : qSketchRegion(cs, false), "direction" : nrm,
+                        "endBound" : BoundingType.BLIND, "endDepth" : big });
+            var miterCut = false;
+            try silent
+            {
+                opBoolean(context, id + ("cb" ~ i ~ "_" ~ q),
+                    { "tools" : qCreatedBy(cx, EntityType.BODY),
+                      "targets" : bodies[(q == 0) ? m : k],
+                      "operationType" : BooleanOperationType.SUBTRACTION });
+                miterCut = true;
+            }
+            // The cutter is a cube of side `big`, four times the longest
+            // member and ten inches over, so a swallowed failure leaves the
+            // largest body in the studio sitting across the whole frame with
+            // no name and no material. Weight Budget's fallback group weighs
+            // it at the reading dialog's density, and a solid block that size
+            // swamps every real figure in the report. The half space missing
+            // the member is the ordinary failure and it leaves the end square,
+            // which is a member a team can still saw to fit, so the cube goes
+            // rather than the feature stopping. Both loop indices are in the
+            // delete id, as they are in the sketch and extrude ids above.
+            if (!miterCut)
+            {
+                try silent
+                {
+                    opDeleteBodies(context, id + ("cdl" ~ i ~ "_" ~ q),
+                        { "entities" : qCreatedBy(cx, EntityType.BODY) });
+                }
+            }
+        }
+    }
+
+    // Stock length is the longest edge of the finished member, which is what
+    // the saw is set to; the design length is node to node.
+    var stock = [];
+    for (var m = 0; m < n; m += 1)
+    {
+        const u = dirOf(m);
+        var lo = 1e9 * inch;
+        var hi = -1e9 * inch;
+        for (var v in evaluateQuery(context, qOwnedByBody(bodies[m], EntityType.VERTEX)))
+        {
+            const t = dot(evVertexPoint(context, { "vertex" : v }) - A[m], u);
+            lo = min(lo, t);
+            hi = max(hi, t);
+        }
+        stock = append(stock, (hi > lo) ? hi - lo : norm(B[m] - A[m]));
+    }
+
+    // Hollow after the ends are cut so the walls follow the miter, and BEFORE
+    // the holes are punched. opShell offsets every face it is not given
+    // inward, and a hole's cylindrical wall is one of those faces, so
+    // shelling last kept the cavity a wall thickness clear of every hole and
+    // left a solid collar bridging the two walls at each one. That is not a
+    // drilled tube, and it made the cut list heavier than the part.
+    var hollowed = 0;
+    if (wall > 0 * inch)
+    {
+        for (var m = 0; m < n; m += 1)
+        {
+            const u = dirOf(m);
+            var ends = [];
+            for (var f in evaluateQuery(context, qOwnedByBody(bodies[m], EntityType.FACE)))
+            {
+                try silent
+                {
+                    if (abs(dot(evPlane(context, { "face" : f }).normal, u)) > 0.01)
+                        ends = append(ends, f);
+                }
+            }
+            if (size(ends) == 0)
+                continue;
+            var ok = false;
+            try silent
+            {
+                opShell(context, id + ("sh" ~ m), { "entities" : qUnion(ends),
+                            "thickness" : -wall });
+                ok = true;
+            }
+            if (ok)
+                hollowed += 1;
+        }
+    }
+
+    var holes = 0;
+    if (definition.punch != FRCFramePunch.NONE)
+    {
+        const holeD = frcHoleDiameter(definition.holeSize);
+        const pitchL = definition.lengthPitch;
+        const pitchR = definition.rowPitch;
+        const startL = definition.holeStart;
+        var dirs = [];
+        if (definition.punch != FRCFramePunch.SIDEWAYS)
+            dirs = append(dirs, 0);
+        if (definition.punch != FRCFramePunch.UPRIGHT)
+            dirs = append(dirs, 1);
+
+        for (var m = 0; m < n; m += 1)
+        {
+            const L = norm(B[m] - A[m]);
+            const u = dirOf(m);
+            var right = cross(u, up);
+            if (norm(right) < 1e-6)
+                right = perpendicularVector(u);
+            right = right / norm(right);
+            const trueUp = cross(right, u) / norm(cross(right, u));
+            for (var di = 0; di < size(dirs); di += 1)
+            {
+                const alongUp = dirs[di] == 0;
+                const d = alongUp ? trueUp : right;
+                const across = alongUp ? w : h;
+                const thick = alongUp ? h : w;
+                // Vendor tubes carry one fewer row than the face holds half
+                // inches: 2 in is three rows at 0.5, 1.5 in is two, 1 in is one.
+                var rows = max(1, round(across / pitchR) - 1);
+                if (definition.rowCount > 0)
+                    rows = definition.rowCount;
+                while (rows > 1 && (rows - 1) * pitchR + holeD + 0.06 * inch > across)
+                    rows -= 1;
+                const nLen = max(0, floor((L - 2 * startL) / pitchL) + 1);
+                if (nLen < 1)
+                    continue;
+                if (rows * nLen > 400)
+                    throw regenError("That spacing makes too many holes in one member. Increase the spacing.", ["lengthPitch"]);
+                const skId = id + ("hs" ~ m ~ "_" ~ di);
+                const sk = newSketchOnPlane(context, skId,
+                    { "sketchPlane" : plane(A[m] - d * (thick / 2 + 0.1 * inch), d, u) });
+                const y0 = -(rows - 1) * pitchR / 2;
+                for (var r = 0; r < rows; r += 1)
+                {
+                    for (var q = 0; q < nLen; q += 1)
+                        skCircle(sk, "h" ~ r ~ "_" ~ q,
+                            { "center" : vector(startL + q * pitchL, y0 + r * pitchR),
+                              "radius" : holeD / 2 });
+                }
+                skSolve(sk);
+                opExtrude(context, id + ("hx" ~ m ~ "_" ~ di),
+                    { "entities" : qSketchRegion(skId, false), "direction" : d,
+                      "endBound" : BoundingType.BLIND, "endDepth" : thick + 0.2 * inch });
+                var cut = false;
+                try silent
+                {
+                    opBoolean(context, id + ("hb" ~ m ~ "_" ~ di),
+                        { "tools" : qCreatedBy(id + ("hx" ~ m ~ "_" ~ di), EntityType.BODY),
+                          "targets" : bodies[m],
+                          "operationType" : BooleanOperationType.SUBTRACTION });
+                    cut = true;
+                }
+                // A punch face that misses its member leaves rows * nLen
+                // cylinders standing, up to the four hundred the guard above
+                // allows, each one unnamed and with no material for Weight
+                // Budget's fallback group to weigh it by. The count already
+                // follows the flag, so the report says the holes were not
+                // cut; this makes the studio say it too. A member the rows
+                // missed is not a broken member, so the cutters are cleaned
+                // up rather than the feature raising. Both loop indices are
+                // in the delete id.
+                if (cut)
+                    holes += rows * nLen;
+                else
+                {
+                    try silent
+                    {
+                        opDeleteBodies(context, id + ("hdl" ~ m ~ "_" ~ di),
+                            { "entities" : qCreatedBy(id + ("hx" ~ m ~ "_" ~ di),
+                                    EntityType.BODY) });
+                    }
+                }
+            }
+        }
+    }
+
+
+    // The parts list is the cut list a team orders and saws from, so a member
+    // is named for the stock it comes out of and the length it is cut to, not
+    // for where it sat in the selection. The stock leads, so one stock groups
+    // together; the larger section dimension is first, the way stock is
+    // listed; and the cut length is padded to two digits, so a group runs
+    // short to long in an alphabetical parts list. Material is left out
+    // because it is already a column of its own.
+    const secMajor = roundToPrecision(max(w, h) / inch, 4);
+    const secMinor = roundToPrecision(min(w, h) / inch, 4);
+    const stockName = (wall > 0 * inch)
+        ? ("Tube " ~ secMajor ~ "x" ~ secMinor ~ "x" ~ roundToPrecision(wall / inch, 4))
+        : ("Bar " ~ secMajor ~ "x" ~ secMinor);
+
+    const rho = frcDensity(definition.material);
+    var total = 0 * kilogram;
+    var rows = "";
+    for (var m = 0; m < n; m += 1)
+    {
+        const mass = evVolume(context, { "entities" : bodies[m] }) * rho;
+        total = total + mass;
+        const cutLen = roundToPrecision(stock[m] / inch, 4);
+        try silent
+        {
+            setProperty(context, { "entities" : bodies[m],
+                        "propertyType" : PropertyType.NAME,
+                        "value" : stockName ~ " - "
+                        ~ ((cutLen < 10) ? "00" : ((cutLen < 100) ? "0" : ""))
+                        ~ cutLen ~ " in" });
+        }
+        if (m < 40)
+            rows = rows ~ "" ~ (m + 1) ~ ") " ~ frcInches(norm(B[m] - A[m])) ~ ", "
+                ~ frcInches(stock[m]) ~ ", "
+                ~ roundToPrecision(mass / (0.45359237 * kilogram), 3) ~ " lb. ";
+    }
+
+    frcApplyPart(context, qUnion(bodies), definition.material, FRCPartClass.STRUCTURE);
+
+    // After the cut lengths are measured, because each of those is read along
+    // that member's own axis from its own original start point.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    var lines = "" ~ n ~ (n == 1 ? " member, " : " members, ")
+        ~ roundToPrecision(total / (0.45359237 * kilogram), 3) ~ " lb in total. ";
+    lines ~= "" ~ size(miters) ~ " mitered and " ~ size(butts) ~ " butted joints. ";
+    if (holes > 0)
+        lines ~= "" ~ holes ~ " holes at "
+            ~ frcInches(frcHoleDiameter(definition.holeSize)) ~ ". ";
+    if (wall > 0 * inch && hollowed < n)
+        lines ~= "NOTE " ~ (n - hollowed) ~ " member"
+            ~ (n - hollowed == 1 ? " was" : "s were") ~ " left solid; use a thinner wall. ";
+    lines ~= "Cut list, node to node then cut then mass: " ~ rows;
+    if (n > 40)
+        lines ~= "and " ~ (n - 40) ~ " more, not listed. ";
+    lines ~= "Cut length is the longest finished edge, and a mitered corner adds about "
+        ~ "half the section width past the node.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################ GEARBOX ###############################
+
+export const FRC_DP_BOUNDS = { (unitless) : [4, 20, 200] } as RealBoundSpec;
+export const FRC_STAGES_BOUNDS = { (unitless) : [1, 2, 2] } as IntegerBoundSpec;
+export const FRC_GBTEETH_BOUNDS = { (unitless) : [6, 20, 200] } as IntegerBoundSpec;
+export const FRC_RATIO_TARGET_BOUNDS = { (unitless) : [0.05, 6.75, 200] } as RealBoundSpec;
+export const FRC_BACKLASH_BOUNDS = { (meter) : [0, 5.08e-5, 0.002], (centimeter) : 0.00508,
+    (millimeter) : 0.0508, (inch) : 0.002, (foot) : 0.000167,
+    (yard) : 0.0000556 } as LengthBoundSpec;
+
+export enum FRCGearboxMode
+{
+    annotation { "Name" : "Plan a ratio" }       PLAN,
+    annotation { "Name" : "Lay out the shafts" } LAYOUT
+}
+
+export enum FRCGearboxBores
+{
+    annotation { "Name" : "No bores" }                    NONE,
+    annotation { "Name" : "After the first shaft" }  DOWNSTREAM,
+    annotation { "Name" : "Every shaft" }                 ALL
+}
+
+/**
+ * Which center distance a small 20 DP pinion is cut to run at.
+ *
+ * Pinions below about 17 teeth are addendum modified, so their center distance
+ * is set by the tooth count they are cut to act as, not by their real count.
+ * WCP publishes the mapping: 8 and 9 act as 10, 10 through 12 act as 12, 12
+ * through 14 act as 14, and 14 through 16 act as 16. They also sell 14 tooth
+ * on 16 tooth centers and 16 tooth on 18 tooth centers, which is why some
+ * counts appear twice. The first entry is the usual one.
+ *
+ * The check that this is right: every ratio of the WCP Single Stage gearbox
+ * (36:36, 24:48, 18:54, 12:60, 11:60, 10:60, 9:62, 8:62) has to fit one plate,
+ * and with this table all eight land on exactly 1.800 in centers.
+ */
+export function frcPinionCenters(n is number) returns array
+{
+    if (n <= 9)
+        return [10];
+    if (n <= 11)
+        return [12];
+    if (n == 12)
+        return [12, 14];
+    if (n == 13)
+        return [14];
+    if (n == 14)
+        return [14, 16];
+    if (n == 15)
+        return [16];
+    if (n == 16)
+        return [16, 18];
+    return [n];
+}
+
+/** Center distance for one mesh: (t1 + t2) / (2 x DP), plus the allowance. */
+export function frcMeshCenter(driving is number, driven is number,
+    dp is ValueWithUnits, allowance is ValueWithUnits) returns ValueWithUnits
+{
+    return (frcPinionCenters(driving)[0] + frcPinionCenters(driven)[0]) / (2 * dp) + allowance;
+}
+
+/**
+ * The tooth pairs that come closest to a target reduction, out of the counts a
+ * team can actually buy. Ties are broken toward the larger pinion, because a
+ * larger pinion carries the load on more teeth, and then toward fewer teeth
+ * overall, because that is the smaller and lighter gearbox.
+ */
+export function frcRatioSearch(target is number, stages is number, pMin is number,
+    pMax is number, gMin is number, gMax is number, evenOnly is boolean,
+    want is number) returns array
+{
+    const step = evenOnly ? 2 : 1;
+    var out = [];
+    if (stages == 1)
+    {
+        for (var p = pMin; p <= pMax; p += 1)
+        {
+            for (var g = gMin; g <= gMax; g += step)
+            {
+                const r = g / p;
+                out = append(out, { "r" : r, "p1" : p, "g1" : g, "p2" : 0, "g2" : 0,
+                            "err" : abs(r - target) / target });
+            }
+        }
+    }
+    else
+    {
+        // The second stage is driven by a plain gear, not a motor pinion, so
+        // both of its wheels come out of the gear range.
+        var s2 = [];
+        for (var p = max(gMin, 12); p <= gMax; p += step)
+        {
+            for (var g = gMin; g <= gMax; g += step)
+                s2 = append(s2, [g / p, p, g]);
+        }
+        s2 = sort(s2, function(a, b)
+            {
+                return a[0] - b[0];
+            });
+        const m = size(s2);
+        if (m == 0)
+            return [];
+        for (var p = pMin; p <= pMax; p += 1)
+        {
+            for (var g = gMin; g <= gMax; g += step)
+            {
+                const r1 = g / p;
+                const need = target / r1;
+                var lo = 0;
+                var hi = m - 1;
+                while (lo < hi)
+                {
+                    const mid = floor((lo + hi) / 2);
+                    if (s2[mid][0] < need)
+                        lo = mid + 1;
+                    else
+                        hi = mid;
+                }
+                for (var d = -1; d <= 1; d += 1)
+                {
+                    const k = lo + d;
+                    if (k < 0 || k >= m)
+                        continue;
+                    const r = r1 * s2[k][0];
+                    out = append(out, { "r" : r, "p1" : p, "g1" : g, "p2" : s2[k][1],
+                                "g2" : s2[k][2], "err" : abs(r - target) / target });
+                }
+            }
+        }
+    }
+    out = sort(out, function(a, b)
+        {
+            if (abs(a.err - b.err) > 1e-9)
+                return a.err - b.err;
+            if (a.p1 != b.p1)
+                return b.p1 - a.p1;
+            return (a.p1 + a.g1 + a.p2 + a.g2) - (b.p1 + b.g1 + b.p2 + b.g2);
+        });
+    var best = [];
+    for (var i = 0; i < min(want, size(out)); i += 1)
+        best = append(best, out[i]);
+    return best;
+}
+
+export function frcGearboxBuild(context is Context, id is Id, definition is map)
+{
+    const dp = definition.pitch / inch;
+    const allow = definition.allowance;
+
+    if (definition.mode == FRCGearboxMode.PLAN)
+    {
+        if (definition.gearMin > definition.gearMax)
+            throw regenError("The smallest gear is larger than the largest. Swap them.", ["gearMin"]);
+        if (definition.pinionMin > definition.pinionMax)
+            throw regenError("The smallest pinion is larger than the largest. Swap them.", ["pinionMin"]);
+        const best = frcRatioSearch(definition.target, definition.stages,
+                definition.pinionMin, definition.pinionMax, definition.gearMin,
+                definition.gearMax, definition.evenOnly, 8);
+        if (size(best) == 0)
+            throw regenError("No pair of gears in that range gets near that ratio. Widen the tooth counts.", ["target"]);
+
+        var lines = "Best sets, teeth then ratio, error and centers: ";
+        for (var b in best)
+        {
+            const c1 = frcMeshCenter(b.p1, b.g1, dp, allow);
+            var teeth = "" ~ b.p1 ~ ":" ~ b.g1;
+            var centers = frcInches(c1);
+            if (definition.stages > 1)
+            {
+                teeth = teeth ~ " " ~ b.p2 ~ ":" ~ b.g2;
+                centers = centers ~ " and " ~ frcInches(frcMeshCenter(b.p2, b.g2, dp, allow));
+            }
+            lines ~= teeth ~ ", " ~ roundToPrecision(b.r, 4) ~ " to 1, "
+                ~ ((b.err < 1e-9) ? "exact"
+                    : ("" ~ roundToPrecision(b.err * 100, 3) ~ "% off"))
+                ~ ", centers " ~ centers ~ ". ";
+        }
+        lines ~= "Centers are (t1 + t2) / (2 DP) plus the allowance, where WCP spaces "
+            ~ "0.0015 to 0.003 in. A pinion under 17 teeth runs at the count it is cut "
+            ~ "to act as.";
+        reportFeatureInfo(context, id, lines);
+        return;
+    }
+
+    const tf = evaluateQuery(context, definition.face);
+    if (size(tf) == 0)
+        throw regenError("Select the flat face the gearbox is laid out on.", ["face"]);
+
+    // Pattern and mirror support, for the layout branch only. The plan branch
+    // above returns before any geometry exists, so it has nothing to move.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.face });
+
+    const pl = evPlane(context, { "face" : tf[0] });
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    const bodyQ = qOwnerBody(tf[0]);
+
+    var org = vector(0, 0) * inch;
+    const anchors = evaluateQuery(context, definition.anchor);
+    if (size(anchors) > 0)
+    {
+        try silent
+        {
+            const rel = evVertexPoint(context, { "vertex" : anchors[0] }) - cSys.origin;
+            org = vector(dot(rel, cSys.xAxis), dot(rel, yAxis));
+        }
+    }
+
+    const p1 = definition.drive1;
+    const g1 = definition.driven1;
+    const c1 = frcMeshCenter(p1, g1, dp, allow);
+    const a1 = definition.angle1;
+    const s1 = org + vector(cos(a1), sin(a1)) * c1;
+
+    const twoStage = definition.stages > 1;
+    const p2 = definition.drive2;
+    const g2 = definition.driven2;
+    const c2 = twoStage ? frcMeshCenter(p2, g2, dp, allow) : 0 * inch;
+    const a2 = definition.angle2;
+    const s2 = s1 + vector(cos(a2), sin(a2)) * c2;
+
+    var shafts = [org, s1];
+    if (twoStage)
+        shafts = append(shafts, s2);
+
+    // The layout sketch: a point on every shaft, and the operating pitch
+    // circles. They come out tangent only when the centre allowance is zero;
+    // at the shipped 0.002 in they sit that far apart, which is the backlash
+    // the allowance exists to buy.
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : pl });
+    for (var i = 0; i < size(shafts); i += 1)
+        skPoint(sk, "c" ~ i, { "position" : shafts[i] });
+    if (definition.drawPitch)
+    {
+        skCircle(sk, "p1a", { "center" : org, "radius" : frcPinionCenters(p1)[0] / (2 * dp) });
+        skCircle(sk, "p1b", { "center" : s1, "radius" : frcPinionCenters(g1)[0] / (2 * dp) });
+        if (twoStage)
+        {
+            skCircle(sk, "p2a", { "center" : s1, "radius" : frcPinionCenters(p2)[0] / (2 * dp) });
+            skCircle(sk, "p2b", { "center" : s2, "radius" : frcPinionCenters(g2)[0] / (2 * dp) });
+        }
+    }
+    skSolve(sk);
+
+    var bores = 0;
+    var boreDia = 0 * inch;
+    var moved = false;
+    if (definition.bores != FRCGearboxBores.NONE)
+    {
+        // frcBoreAllowance is RADIAL and this is a diameter, so it takes twice.
+        boreDia = frcBearingOD(definition.bearingOD)
+            + 2 * frcBoreAllowance(FRCDriveBore.BEARING, definition.fit);
+        const first = (definition.bores == FRCGearboxBores.ALL) ? 0 : 1;
+        const thickness = frcMaterialDepth(context, bodyQ, cSys);
+        const skb = newSketchOnPlane(context, id + "b",
+            { "sketchPlane" : plane(pl.origin + pl.normal * (0.02 * inch), pl.normal, pl.x) });
+        for (var i = first; i < size(shafts); i += 1)
+        {
+            skCircle(skb, "b" ~ i, { "center" : shafts[i], "radius" : boreDia / 2 });
+            bores += 1;
+        }
+        skSolve(skb);
+        if (bores > 0)
+        {
+            opExtrude(context, id + "bx", { "entities" : qSketchRegion(id + "b", false),
+                        "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : thickness + 0.12 * inch });
+
+            // Before the subtraction, so the layout sketch and the cutters move
+            // together; the subtraction then consumes the cutters.
+            transformResultIfNecessary(context, id, remainderTransform);
+            moved = true;
+
+            try
+            {
+                opBoolean(context, id + "bsub", { "tools" : qCreatedBy(id + "bx", EntityType.BODY),
+                            "targets" : bodyQ,
+                            "operationType" : BooleanOperationType.SUBTRACTION });
+            }
+            catch
+            {
+                throw regenError("The bores did not land on the part. Check the anchor point and the layout angles.", ["anchor"]);
+            }
+        }
+    }
+
+    // The layout sketch still has to move when no bores were cut.
+    if (!moved)
+        transformResultIfNecessary(context, id, remainderTransform);
+
+    const overall = twoStage ? (g1 / p1) * (g2 / p2) : (g1 / p1);
+    var lines = "" ~ roundToPrecision(overall, 4) ~ " to 1 overall. ";
+    lines ~= "Stage 1 " ~ p1 ~ ":" ~ g1 ~ ", centers " ~ frcInches(c1) ~ ". ";
+    if (twoStage)
+        lines ~= "Stage 2 " ~ p2 ~ ":" ~ g2 ~ ", centers " ~ frcInches(c2) ~ ". ";
+    lines ~= "Shafts spread " ~ frcInches(norm(shafts[size(shafts) - 1] - org))
+        ~ " first to last. ";
+    if (bores > 0)
+        lines ~= "" ~ bores ~ " bores cut at " ~ frcInches(boreDia) ~ ". ";
+    if (p1 < 17 || (twoStage && p2 < 17))
+        lines ~= "NOTE Under 17 teeth a pinion runs on WCP acts-as counts. ";
+    lines ~= "Points sit on every shaft for FRC Electronics, FRC COTS Pattern or FRC Hole.";
+    reportFeatureInfo(context, id, lines);
+}

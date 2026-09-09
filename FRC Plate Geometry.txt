@@ -1,0 +1,3802 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+import(path : "onshape/std/modifyFillet.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+
+// ===========================================================================
+//  FRC PLATE GEOMETRY: the builders behind the plate and tube features
+// ---------------------------------------------------------------------------
+//  FRC Lighten, FRC Hole, FRC Tube and FRC Gusset are declared in the FRC
+//  Toolkit tab and do their work here. Standards and profiles come from FRC
+//  Core, which this tab imports and passes along.
+// ===========================================================================
+
+// ############################### LIGHTEN ################################
+
+/** Truss ribs are routed between the bolt holes. Pockets on the perimeter
+ *  reach a wall; the interior cells of the triangulation do not, and on a
+ *  plate with several holes most of them are landlocked. */
+export enum FRCLightenPattern
+{
+    annotation { "Name" : "Truss (between holes)" }    TRUSS,
+    annotation { "Name" : "Isogrid (triangular)" }     ISOGRID,
+    annotation { "Name" : "Square grid" }              GRID,
+    annotation { "Name" : "Diagonal" }                 DIAGONAL,
+    annotation { "Name" : "Honeycomb (hex cells)" }    HONEYCOMB,
+    annotation { "Name" : "Circles (drillable)" }      CIRCLES,
+    annotation { "Name" : "Single pocket (no ribs)" }  NONE
+}
+
+export enum FRCLightenDepth
+{
+    annotation { "Name" : "Automatic (from loading)" } AUTO,
+    annotation { "Name" : "Through (all the way)" }    THROUGH,
+    annotation { "Name" : "Leave a floor" }            FLOOR,
+    annotation { "Name" : "Specific depth" }           BLIND,
+    annotation { "Name" : "Up to a face" }             UP_TO_FACE,
+    annotation { "Name" : "Up to a vertex" }           UP_TO_VERTEX
+}
+
+/**
+ * Mass in pounds, which is what an FRC team weighs in. The shared
+ * frcFormatMass prints kilograms beside it, and the panel wants one number
+ * where a reader can only hold one.
+ */
+function frcPounds(m is ValueWithUnits) returns string
+{
+    return "" ~ roundToPrecision(m / (0.45359237 * kilogram), 2) ~ " lb";
+}
+
+export function frcHasRibs(p is FRCLightenPattern) returns boolean
+{
+    return p == FRCLightenPattern.ISOGRID || p == FRCLightenPattern.GRID
+        || p == FRCLightenPattern.DIAGONAL;
+}
+
+export function frcRibAngles(pattern is FRCLightenPattern, baseAngle is ValueWithUnits) returns array
+{
+    if (pattern == FRCLightenPattern.GRID)
+        return [baseAngle, baseAngle + 90 * degree];
+    else if (pattern == FRCLightenPattern.DIAGONAL)
+        return [baseAngle + 45 * degree, baseAngle + 135 * degree];
+    else if (pattern == FRCLightenPattern.ISOGRID)
+        return [baseAngle, baseAngle + 60 * degree, baseAngle + 120 * degree];
+    return [];
+}
+
+export function frcAutoSizing(thickness is ValueWithUnits, proc is FRCProcess,
+    aggression is FRCAggression, toolDiameter is ValueWithUnits,
+    material is FRCMaterial, loading is FRCLoading) returns map
+{
+    // The buckle numbers are the fraction of the buckling SPAN each preset is
+    // willing to use. They are a margin on a length, so they multiply that
+    // length and not the pocket the length implies; the conversion between the
+    // two is set out below.
+    //
+    // They are not round because they no longer have a doubled bound to hold
+    // back. That bound now takes the SMALLER of rib and plate thickness rather
+    // than the rib width, the K behind the published limits has been tightened
+    // from 0.65 to 0.8, and frcSlendernessLimit already carries a 0.85 margin
+    // of its own. Stacking another 0.8 on top of all three put BALANCED at
+    // 0.85 x 0.80 = 0.68 of the limit, which is not a middle setting but a
+    // timid one.
+    //
+    // CONSERVATIVE at 0.60 was not timid but incoherent: it landed BELOW what
+    // the across-face beam rule allows on the same plate, and edge on is the
+    // load case with MORE span available, not less. On the reference plate,
+    // 0.125 in 6061 with a 0.25 in rib and a buckling span of 2.04 in, 0.75,
+    // 0.90 and 1.00 give pockets of 1.07, 1.34 and 1.51 in, so the ladder
+    // spans a real range instead of bunching. BALANCED then sits at
+    // 0.85 x 0.90 = 0.765 of the Euler-at-yield span computed at K = 0.8, a 23
+    // per cent margin on an already conservative effective length and a bound
+    // taken about the weak axis. AGGRESSIVE keeps only the 0.85, which is what
+    // that preset is for.
+    const k = {
+                FRCAggression.CONSERVATIVE : { "wall" : 1.5, "hole" : 0.50, "rib" : 1.25,
+                    "span" : 8, "buckle" : 0.75 },
+                FRCAggression.BALANCED : { "wall" : 1.0, "hole" : 0.35, "rib" : 0.90,
+                    "span" : 12, "buckle" : 0.90 },
+                FRCAggression.AGGRESSIVE : { "wall" : 0.75, "hole" : 0.25, "rib" : 0.70,
+                    "span" : 18, "buckle" : 1.00 }
+            }[aggression];
+    const floorMin = frcMinWall(proc, toolDiameter);
+    const rib = min(max(k.rib * thickness, floorMin), 0.5 * inch);
+    // The pocket is bounded by whichever way the plate is actually loaded,
+    // and the two load cases do not bound it by the same thing.
+    //
+    // Across the face, the rib works as a beam whose depth is the plate
+    // thickness, so what matters is its span and a span to depth rule is
+    // the right one. Edge on, the plate is a web and the rib is a strut
+    // carrying load along its own length, and what limits it is slenderness
+    // against the material it is cut from. That is what frcSlendernessLimit
+    // is for, and it is why plastic gets smaller pockets than aluminium at
+    // the same thickness.
+    //
+    // The strut is loaded in the plane of the plate, but it does not buckle
+    // in that plane. Its section is the rib width by the plate thickness, and
+    // a bar goes the weak way, which on any plate whose ribs are wider than it
+    // is thick is out of the face. So the ratio multiplies the SMALLER of rib
+    // and thickness, which is what frcBuckleSpan is for. Multiplying by the
+    // rib width alone was optimistic by exactly the ratio of the two: on a
+    // 0.125 in 6061 plate with a 0.25 in rib the section supports 2.04 in of
+    // span where the width alone allowed twice that. Edge on no longer always
+    // gets the larger pocket either: once that span is converted to a pocket
+    // below it gives 1.07, 1.34 and 1.51 in against the across-face answer's
+    // 1.00, 1.50 and 1.51, so the two now interleave rather than one leading
+    // throughout.
+    // The lever for a bigger pocket is therefore a thicker plate, a smaller
+    // end mill, or a more aggressive weight saving. It is not a wider rib: a
+    // wider rib carries more load, which is a different failure mode, and it
+    // does not let the rib span further while the thickness is the smaller
+    // side. The panel says so when this bound is the one holding the pocket.
+    //
+    // The beam rule used to be applied to every plate whatever the dialog
+    // said it was carrying, with the buckling number kept only as a ceiling
+    // it could never reach, so the commonest plate in the library was sized
+    // by the rule for the load case it was not in.
+    //
+    // WHAT THE LIMIT IS A LIMIT ON. frcSlendernessLimit and frcBuckleSpan give
+    // the longest UNBRACED LENGTH a rib may run: the distance between the two
+    // junctions that hold its ends. That is not the pocket size, and this
+    // function used to hand the bound to the pocket size as though it were.
+    //
+    // The unbraced length is the triangle side. The mesh the truss cuts, and
+    // the isogrid with it, sizes its triangles by
+    //
+    //     side = 2 * (pocket + rib) / sqrt(3)
+    //
+    // which is the sizing the lighten branch uses verbatim, and the side of a
+    // triangle IS the node to node run of the rib lying along it. Checked
+    // against Onshape rather than assumed: at a 1.83 in pocket with a 0.25 in
+    // rib the feature reported an edge of 2.41 in, and 2 * 2.08 / sqrt(3) is
+    // 2.402. So a pocket held to a 2.04 in bound was really asking its ribs to
+    // run 2.64 in, understating the span by about a third. This is not the 12
+    // per cent an earlier reading of it gave: that used pocket plus rib, the
+    // relation for a SQUARE grid, and a triangular lattice is 2 / sqrt(3)
+    // larger again.
+    //
+    // Inverting the relation puts the bound on the quantity it belongs to:
+    //
+    //     2 * (pocket + rib) / sqrt(3) <= span
+    //     pocket <= (sqrt(3) / 2) * span - rib
+    //
+    // and the preset's fraction goes on the span rather than on the pocket,
+    // because it is a margin on a buckling length. On 0.125 in 6061 that takes
+    // AGGRESSIVE from 2.04 to 1.51 in, BALANCED from 1.84 to 1.34 and
+    // CONSERVATIVE from 1.53 to 1.07. On 0.250 in stock AGGRESSIVE still gives
+    // about 3.28 in, so thicker plate still gets large pockets, which is the
+    // point of the whole rule.
+    //
+    // The subtraction can reach zero or go past it on a weak material: a pool
+    // noodle has a slenderness limit of 1, so its span is a fraction of an inch
+    // against a quarter inch rib. It is clamped just above zero rather than
+    // left negative, and the truss then refuses with "no triangle large enough
+    // to pocket fits on this face", which is the honest answer.
+    //
+    // KNOWN CONSERVATISM, stated rather than fixed. The triangular relation is
+    // right for the truss and for the isogrid. A square GRID has its ribs
+    // crossing every pocket plus rib, so its unbraced length is sqrt(3) / 2 of
+    // what this assumes and the bound is about 15 per cent tighter than that
+    // pattern needs. This function is not told which pattern is being cut and
+    // is not being given another parameter today.
+    const buckleSpan = frcBuckleSpan(material, rib, thickness);
+    // The largest pocket whose triangle side still fits inside the unbraced
+    // length, with no preset margin on it. This is the ceiling every load case
+    // is held under, and it is what may take the answer below the 0.4 in floor
+    // the clamp below would otherwise impose.
+    const bucklePocket = max(0.05 * inch, (sqrt(3) / 2) * buckleSpan - rib);
+    const beamPocket = k.span * thickness;
+    var want = beamPocket;
+    if (loading == FRCLoading.EDGE_ON)
+        want = max(0.05 * inch, (sqrt(3) / 2) * (k.buckle * buckleSpan) - rib);
+    else if (loading == FRCLoading.NON_STRUCTURAL)
+        want = max(beamPocket, bucklePocket);
+    const wantPocket = min(max(want, 0.4 * inch), 4 * inch);
+    // Which of the two rules the user is actually up against, which is the
+    // only part of this a dialog can act on. Edge on, the pocket is a fixed
+    // fraction of the buckling span by construction, so that rule leads
+    // whenever the clamps have not taken the answer off it; in the other two
+    // cases the beam rule leads unless the buckling span comes in under it.
+    const buckleBinds = bucklePocket < wantPocket
+        || (loading == FRCLoading.EDGE_ON && want >= 0.4 * inch && want <= 4 * inch);
+    return {
+        "wall" : min(max(k.wall * thickness, floorMin), 0.5 * inch),
+        "rib" : rib, "pocket" : min(wantPocket, bucklePocket),
+        "buckleCapped" : buckleBinds, "holeFactor" : k.hole,
+        "floor" : max(0.25 * thickness, frcMinFloor(proc))
+    };
+}
+
+export function frcIslandCenters(center is Vector, reach is ValueWithUnits,
+    pitch is ValueWithUnits, baseAngle is ValueWithUnits, phase is Vector) returns array
+{
+    const rowStep = pitch * sqrt(3) / 2;
+    const nRow = ceil(reach / rowStep) + 1;
+    const nCol = ceil(reach / pitch) + 1;
+    const u = vector(cos(baseAngle), sin(baseAngle));
+    const v = vector(-sin(baseAngle), cos(baseAngle));
+    var out = [];
+    for (var r = -nRow; r <= nRow; r += 1)
+    {
+        const offset = (r % 2 == 0) ? 0 * inch : pitch / 2;
+        for (var c = -nCol; c <= nCol; c += 1)
+            out = append(out, center + u * ((c + phase[0]) * pitch + offset)
+                + v * ((r + phase[1]) * rowStep));
+    }
+    return out;
+}
+
+/**
+ * Stations spaced along the top edge of every outer wall, each carrying the
+ * direction the wall runs there.
+ *
+ * A rib that lands on a station has to know how the wall runs at that point:
+ * how far it must travel past the station to bury its end in the wall depends
+ * on the angle between the two, and a chord joining two stations on the same
+ * straight run is not a rib at all.
+ */
+export function frcPerimeterStations(context is Context, outerFaces is array,
+    cSys is CoordSystem, maxEdge is ValueWithUnits) returns array
+{
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    const tol = 1e-4 * meter;
+
+    // Pass one. Every top edge of the outline, with both of its ends projected
+    // into the sketch plane. Onshape does not promise these come back in
+    // outline order, and what used to stand here recovered an order at the
+    // call site by sorting the stations on their bearing from the middle of
+    // the face. That is the boundary order only when the outline is star
+    // shaped about that point, so an L, a notch, or any other re-entrant
+    // plate was meshed against a ring that is not its outline: the centre of
+    // an L is not inside the L. Walking the loop edge to edge is the order
+    // itself rather than a guess at it.
+    var segs = [];
+    for (var f in outerFaces)
+    {
+        for (var e in evaluateQuery(context, qLoopEdges(f)))
+        {
+            var isTop = false;
+            var L = 0 * inch;
+            var mPt = vector(0, 0) * inch;
+            try silent
+            {
+                const ln0 = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5,
+                            "arcLengthParameterization" : true });
+                if (abs(dot(ln0.origin - cSys.origin, cSys.zAxis)) < 1e-4 * meter)
+                {
+                    isTop = true;
+                    L = evLength(context, { "entities" : e });
+                    const rM = ln0.origin - cSys.origin;
+                    mPt = vector(dot(rM, cSys.xAxis), dot(rM, yAxis));
+                }
+            }
+            if (!isTop || L < 1e-6 * meter)
+                continue;
+            var got = false;
+            var aPt = vector(0, 0) * inch;
+            var bPt = vector(0, 0) * inch;
+            try silent
+            {
+                const lnA = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0,
+                            "arcLengthParameterization" : true });
+                const lnB = evEdgeTangentLine(context, { "edge" : e, "parameter" : 1,
+                            "arcLengthParameterization" : true });
+                const rA = lnA.origin - cSys.origin;
+                const rB = lnB.origin - cSys.origin;
+                aPt = vector(dot(rA, cSys.xAxis), dot(rA, yAxis));
+                bPt = vector(dot(rB, cSys.xAxis), dot(rB, yAxis));
+                got = true;
+            }
+            if (!got)
+                continue;
+            // Two faces meeting along the same top edge hand it back twice.
+            // The middle of the edge is part of the test, because the two ends
+            // alone do not tell two edges apart. The flat side and the round
+            // side of a D shaped plate share both of their ends, and on ends
+            // alone one of them reads as a copy of the other and is dropped,
+            // which leaves half that outline unwalked.
+            var dupEdge = false;
+            for (var sg in segs)
+            {
+                if (norm(sg.m - mPt) >= tol)
+                    continue;
+                if ((norm(sg.a - aPt) < tol && norm(sg.b - bPt) < tol)
+                    || (norm(sg.a - bPt) < tol && norm(sg.b - aPt) < tol))
+                {
+                    dupEdge = true;
+                    break;
+                }
+            }
+            if (dupEdge)
+                continue;
+            segs = append(segs, { "edge" : e, "len" : L, "a" : aPt, "b" : bPt, "m" : mPt });
+        }
+    }
+    if (size(segs) == 0)
+        return [];
+
+    // Pass two. Chain the edges end to end. An outline that will not close
+    // into one loop is handed back empty, so the caller reports an outline it
+    // could not follow rather than meshing against a ring it invented.
+    var taken = [];
+    for (var i = 0; i < size(segs); i += 1)
+        taken = append(taken, false);
+    taken[0] = true;
+    var chain = [{ "i" : 0, "flip" : false }];
+    var endPt = segs[0].b;
+    for (var step = 1; step < size(segs); step += 1)
+    {
+        var found = -1;
+        var flipped = false;
+        for (var k = 0; k < size(segs); k += 1)
+        {
+            if (taken[k])
+                continue;
+            if (norm(segs[k].a - endPt) < tol)
+            {
+                found = k;
+                break;
+            }
+            if (norm(segs[k].b - endPt) < tol)
+            {
+                found = k;
+                flipped = true;
+                break;
+            }
+        }
+        if (found < 0)
+            return [];
+        taken[found] = true;
+        chain = append(chain, { "i" : found, "flip" : flipped });
+        if (flipped)
+            endPt = segs[found].a;
+        else
+            endPt = segs[found].b;
+    }
+
+    // Pass three. Station each edge in the order and the direction the walk
+    // arrived at it. Each edge carries its own start and stops short of its
+    // end, so the vertex shared with the next edge is stationed once.
+    var out = [];
+    for (var c in chain)
+    {
+        const sg = segs[c.i];
+        // The epsilon keeps a run that divides exactly, four steps of
+        // 2.8125 in over 11.25 in for instance, from landing a hair under
+        // the whole number and dropping a station off that wall. Lengths
+        // are held in meters, where neither number is exact.
+        const nsub = max(floor(sg.len / maxEdge + 1e-9), 1);
+        for (var i = 0; i < nsub; i += 1)
+        {
+            var par = i / nsub;
+            if (c.flip)
+                par = 1 - i / nsub;
+            var got = false;
+            var p3 = vector(0, 0, 0) * inch;
+            var d3 = vector(0, 0, 0);
+            try silent
+            {
+                const ln = evEdgeTangentLine(context, { "edge" : sg.edge, "parameter" : par,
+                            "arcLengthParameterization" : true });
+                p3 = ln.origin;
+                d3 = ln.direction;
+                got = true;
+            }
+            if (!got)
+                continue;
+            const rel = p3 - cSys.origin;
+            const p2 = vector(dot(rel, cSys.xAxis), dot(rel, yAxis));
+            var dir = vector(dot(d3, cSys.xAxis), dot(d3, yAxis));
+            const dLen = norm(dir);
+            // An edge that climbs out of the plane projects to nothing
+            // usable. A zero direction fails every arrival test, which is
+            // the safe answer, rather than pointing somewhere invented.
+            dir = (dLen > 1e-6) ? dir / dLen : vector(0, 0);
+            if (c.flip)
+                dir = -dir;
+            var dup = false;
+            for (var q in out)
+            {
+                if (norm(q.point - p2) < 0.02 * inch)
+                {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup)
+                out = append(out, { "point" : p2, "direction" : dir });
+        }
+    }
+    return out;
+}
+
+/** The station points alone, for callers that do not care how the wall runs. */
+export function frcPerimeterAnchors(context is Context, outerFaces is array,
+    cSys is CoordSystem, maxEdge is ValueWithUnits) returns array
+{
+    var pts = [];
+    for (var st in frcPerimeterStations(context, outerFaces, cSys, maxEdge))
+        pts = append(pts, st.point);
+    return pts;
+}
+
+/**
+ * How far a rib has to run past a wall station for its end to finish inside
+ * the wall.
+ *
+ * The extension used to be a flat wall plus rib measured along the rib, so a
+ * rib arriving at an angle only penetrated the wall by that distance times the
+ * sine of the angle. With a 0.25 in wall, a 0.25 in rib and a 0.125 in cutter
+ * a rib had to arrive at about 49 degrees before it crossed the wall at all,
+ * and anything shallower stopped inside the pocket and read as a rib ending in
+ * open space. Dividing by the sine gives the same penetration at any angle.
+ *
+ * The multiplier is capped because a rib arriving at a few degrees would need
+ * an enormous run, and would then travel a long way along the inside of the
+ * wall thickening it. A rib that cannot be anchored within the cap is reported
+ * as unanchored so the caller can drop it rather than leave it dangling.
+ */
+export function frcWallExtension(grow is ValueWithUnits, ribDir is Vector,
+    wallDir is Vector, capMultiple is number) returns map
+{
+    // A rib parallel to the wall never reaches it however far it runs. This is
+    // its own statement rather than the first half of an or, so the divide
+    // below is never reached with a zero, whatever the evaluation order.
+    const sinArrival = abs(ribDir[0] * wallDir[1] - ribDir[1] * wallDir[0]);
+    if (sinArrival < 1e-6)
+        return { "anchored" : false, "extension" : 0 * inch };
+    if (1 / sinArrival > capMultiple)
+        return { "anchored" : false, "extension" : 0 * inch };
+    return { "anchored" : true, "extension" : grow / sinArrival };
+}
+
+export function frcDropSlivers(context is Context, id is Id, toolQ is Query,
+    normal is Vector, minWidth is ValueWithUnits, minArea is ValueWithUnits) returns number
+{
+    var doomed = [];
+    for (var b in evaluateQuery(context, toolQ))
+    {
+        var area = 0 * meter ^ 2;
+        var perim = 0 * meter;
+        for (var f in evaluateQuery(context, qOwnedByBody(b, EntityType.FACE)))
+        {
+            try silent
+            {
+                const p = evPlane(context, { "face" : f });
+                if (dot(p.normal, normal) > 0.999)
+                {
+                    area = evArea(context, { "entities" : f });
+                    for (var e in evaluateQuery(context, qLoopEdges(f)))
+                        perim = perim + evLength(context, { "entities" : e });
+                }
+            }
+        }
+        if (perim <= 0 * meter)
+            continue;
+        if (2 * area / perim < minWidth || area < minArea)
+            doomed = append(doomed, b);
+    }
+    if (size(doomed) > 0)
+    {
+        try silent
+        {
+            opDeleteBodies(context, id, { "entities" : qUnion(doomed) });
+        }
+    }
+    return size(doomed);
+}
+
+/**
+ * Clear spans of every rib in a lattice, measured between its junctions with
+ * the other rib families (including the width each crossing rib eats). Nub
+ * placement uses these directly, so a nub's distance from its junctions is a
+ * property of the rib itself rather than any preset spacing.
+ */
+export function frcRibSpans(pattern is FRCLightenPattern, baseAngle is ValueWithUnits,
+    c2 is Vector, pitch is ValueWithUnits, ribW is ValueWithUnits,
+    reach is ValueWithUnits) returns array
+{
+    const angles = frcRibAngles(pattern, baseAngle);
+    const nEach = ceil(reach / pitch) + 1;
+    var spans = [];
+    for (var ai = 0; ai < size(angles); ai += 1)
+    {
+        const a = angles[ai];
+        const u = vector(cos(a), sin(a));
+        const v = vector(-sin(a), cos(a));
+        for (var k = -nEach; k <= nEach; k += 1)
+        {
+            const base = c2 + v * (k * pitch);
+            var cutsT = [[-reach, 0 * inch]];
+            for (var bi = 0; bi < size(angles); bi += 1)
+            {
+                if (bi == ai)
+                    continue;
+                const b = angles[bi];
+                const ub = vector(cos(b), sin(b));
+                const vb = vector(-sin(b), cos(b));
+                const den = dot(u, vb);
+                if (abs(den) < 1e-9)
+                    continue;
+                const sinab = max(abs(u[0] * ub[1] - u[1] * ub[0]), 1e-6);
+                const clear = (ribW / 2) / sinab;
+                const off = dot(base - c2, vb);
+                for (var j = -nEach - 1; j <= nEach + 1; j += 1)
+                {
+                    const t = (j * pitch - off) / den;
+                    if (t >= -reach && t <= reach)
+                        cutsT = append(cutsT, [t, clear]);
+                }
+            }
+            cutsT = append(cutsT, [reach, 0 * inch]);
+            cutsT = frcSortByFirst(cutsT);
+            for (var m = 0; m < size(cutsT) - 1; m += 1)
+            {
+                const t0 = cutsT[m][0] + cutsT[m][1];
+                const t1 = cutsT[m + 1][0] - cutsT[m + 1][1];
+                if (t1 > t0)
+                    spans = append(spans, [base + u * t0, u, t1 - t0]);
+            }
+        }
+    }
+    return spans;
+}
+
+/**
+ * Grow a tool body outward by `r`, rounding every sharp convex edge to
+ * exactly `r` on the way.
+ *
+ * Filleting the corners of a finished pocket fails wherever a corner is
+ * tighter than the end mill, which leaves an acute rib junction sharp while
+ * its neighbors round. Offsetting the faces cannot fail that way: a tiny
+ * seed fillet, an offset, and then a radius change leave precisely the
+ * radius an end mill can hold. The method is the one the Onshape Lighten
+ * feature by Ilya Baran and Morgan Bartlett uses.
+ */
+function frcExpandWithFillet(context is Context, id is Id, tool is Query, caps is Query,
+    r is ValueWithUnits)
+{
+    var sharp = [];
+    const skip = qAdjacent(caps, AdjacencyType.EDGE, EntityType.EDGE);
+    for (var e in evaluateQuery(context, qSubtraction(qOwnedByBody(tool, EntityType.EDGE), skip)))
+    {
+        try silent
+        {
+            if (evEdgeConvexity(context, { "edge" : e }) != EdgeConvexityType.SMOOTH)
+                sharp = append(sharp, e);
+        }
+    }
+    if (size(sharp) > 0)
+    {
+        try silent
+        {
+            opFillet(context, id + "seed", { "entities" : qUnion(sharp),
+                        "radius" : TOLERANCE.booleanDefaultTolerance * meter });
+        }
+    }
+    const seeded = startTracking(context, qCreatedBy(id + "seed", EntityType.FACE));
+    try
+    {
+        opOffsetFace(context, id + "grow", {
+                    "moveFaces" : qSubtraction(qOwnedByBody(tool, EntityType.FACE), caps),
+                    "offsetDistance" : r });
+    }
+    catch
+    {
+        throw regenError("The pocket could not be opened back out to the end mill radius. Try a smaller end mill, or a larger pocket size.", ["toolDiameter"]);
+    }
+    if (size(evaluateQuery(context, seeded)) > 0)
+    {
+        try silent
+        {
+            opModifyFillet(context, id + "grad", { "faces" : seeded,
+                        "modifyFilletType" : ModifyFilletType.CHANGE_RADIUS, "radius" : r });
+        }
+    }
+}
+
+export function frcLightenOneFace(context is Context, id is Id, face0 is Query, definition is map) returns map
+{
+    // Pattern and mirror support. The picked faces are what anchor the pockets
+    // in space, so they are the reference the pattern transform is measured
+    // against. This is read here rather than in frcLightenBuild because this is
+    // where the cut happens, and reading it once per face gives the same answer.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.faces });
+
+    const pl = evPlane(context, { "face" : face0 });
+    const cSys = frcFaceCSys(pl);
+    const bodyQ = qOwnerBody(face0);
+    // Transient ids survive later operations, but this tracking query stops
+    // resolving once the pocket cut replaces the picked face, which is why
+    // the outside fillet used to find no edges and quietly do nothing.
+    const bodyStable = qUnion(evaluateQuery(context, bodyQ));
+    // The extra bodies are pinned to transient ids here for the same reason:
+    // once the pocket cut lands, a query that was never evaluated resolves to
+    // nothing and the subtraction quietly misses them.
+    var others = [];
+    if (definition.multipleBodies == true && definition.otherBodies is Query)
+        others = evaluateQuery(context, definition.otherBodies);
+    const cutTarget = (size(others) > 0) ? qUnion([bodyStable, qUnion(others)]) : bodyStable;
+    const thickness = frcMaterialDepth(context, bodyQ, cSys);
+    if (thickness < 1e-5 * meter)
+        throw regenError("Could not measure the material behind that face. Pick the flat outside face of a plate.", ["faces"], face0);
+
+    const face = face0;
+
+    const auto = frcAutoSizing(thickness, definition.process, definition.aggression,
+            definition.toolDiameter, definition.material, definition.loading);
+    const s = definition.autoSize ? auto :
+        { "wall" : definition.wallThickness, "rib" : definition.ribThickness,
+            "pocket" : definition.pocketSize, "buckleCapped" : false,
+            "holeFactor" : 0.5, "floor" : definition.floorThickness };
+    // Pocket size is on the dialog only when automatic sizing is off and the
+    // pattern is not the truss, so an error naming it points at a control the
+    // user cannot reach in every other path. With automatic sizing on, the
+    // control that sets the pocket is the weight saving; with it off on a
+    // truss, the rib thickness. Only the id strings are read, never the
+    // values, so a hidden field is harmless.
+    const sizeParam = (definition.autoSize) ? ["aggression"]
+        : ((definition.pattern == FRCLightenPattern.TRUSS) ? ["ribThickness"]
+            : ["pocketSize"]);
+
+    var mode = definition.depthMode;
+    if (mode == FRCLightenDepth.AUTO)
+        mode = (definition.loading == FRCLoading.ACROSS_FACE && frcCanPocketBlind(definition.process))
+            ? FRCLightenDepth.FLOOR : FRCLightenDepth.THROUGH;
+    if ((mode == FRCLightenDepth.FLOOR || mode == FRCLightenDepth.BLIND)
+        && !frcCanPocketBlind(definition.process))
+        throw regenError("A waterjet, laser, or hand tool cannot make a pocket that stops partway. Set Depth to Through, or change the process.", ["depthMode"]);
+
+    const floorThk = definition.autoSize ? auto.floor : definition.floorThickness;
+
+    // Both "up to" conditions measure from the face being lightened to the
+    // target with both sides extended, so a target that does not sit over the
+    // face still reports the distance between the two rather than failing.
+    var reached = 0 * inch;
+    if (mode == FRCLightenDepth.UP_TO_FACE)
+    {
+        if (definition.upToFace == undefined || isQueryEmpty(context, definition.upToFace))
+            throw regenError("Pick the face to cut up to.", ["upToFace"]);
+        // An "up to" depth is a single number, so a target at an angle would
+        // be right in one place and wrong everywhere else.
+        if (isQueryEmpty(context, qParallelPlanes(definition.upToFace, pl)))
+            throw regenError("The face to cut up to has to be parallel to the face being lightened. Pick a parallel face, or use Up to a vertex.", ["upToFace"], definition.upToFace);
+        reached = evDistance(context, { "side0" : face0, "extendSide0" : true,
+                    "side1" : definition.upToFace, "extendSide1" : true }).distance;
+    }
+    else if (mode == FRCLightenDepth.UP_TO_VERTEX)
+    {
+        if (definition.upToVertex == undefined || isQueryEmpty(context, definition.upToVertex))
+            throw regenError("Pick the vertex to cut up to.", ["upToVertex"]);
+        reached = evDistance(context, { "side0" : face0, "extendSide0" : true,
+                    "side1" : definition.upToVertex, "extendSide1" : true }).distance;
+    }
+    // Caught here so the message names the pick that is wrong, rather than the
+    // floor thickness that the shared depth check below would blame.
+    if ((mode == FRCLightenDepth.UP_TO_FACE || mode == FRCLightenDepth.UP_TO_VERTEX)
+        && reached < 1e-5 * meter)
+        throw regenError("The target lies on the face being lightened, so there is no depth to cut. Pick a target off that face.",
+            [(mode == FRCLightenDepth.UP_TO_FACE) ? "upToFace" : "upToVertex"],
+            (mode == FRCLightenDepth.UP_TO_FACE) ? definition.upToFace : definition.upToVertex);
+
+    // The conditional operator is left associative in FeatureScript, so a chain
+    // of them has to be parenthesized or the second one is handed the first
+    // one's result as its condition.
+    const depth = (mode == FRCLightenDepth.THROUGH) ? thickness + 0.05 * inch
+        : ((mode == FRCLightenDepth.FLOOR) ? thickness - floorThk
+            : ((mode == FRCLightenDepth.UP_TO_FACE || mode == FRCLightenDepth.UP_TO_VERTEX)
+                ? reached : definition.pocketDepth));
+    if (depth < 1e-5 * meter)
+        throw regenError("The floor is as thick as the part, so nothing is left to remove. Reduce the floor thickness.", ["floorThickness"]);
+
+    // Everything below is cut oversize by the end mill radius and opened back
+    // out at the end, which is what makes every inside corner machinable.
+    const toolRad = definition.roundCorners
+        ? frcMinCornerRadius(definition.process, definition.toolDiameter) : 0 * inch;
+
+    // The end mill diameter is only in the dialog when the process is CNC.
+    // For every other process the field is hidden and keeps whatever a CNC
+    // part last left in it, so nothing may size itself from the raw value.
+    // For those processes the kerf the rest of the library already uses is
+    // twice the corner radius, which ignores the hidden field entirely.
+    const effTool = (definition.process == FRCProcess.CNC)
+        ? definition.toolDiameter
+        : 2 * frcMinCornerRadius(definition.process, definition.toolDiameter);
+
+    opExtrude(context, id + "tool", { "entities" : face, "direction" : -pl.normal,
+                "endBound" : BoundingType.BLIND, "endDepth" : depth });
+    const tool = qCreatedBy(id + "tool", EntityType.BODY);
+
+    // Areas to keep solid come out of the tool before the wall offset runs, so
+    // the excluded region keeps full material instead of collecting a wall of
+    // its own around a pocket that should never have been there.
+    if (definition.excludeAreas == true && definition.excludeRegions is Query
+        && !isQueryEmpty(context, definition.excludeRegions))
+    {
+        opExtrude(context, id + "exc", { "entities" : definition.excludeRegions,
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : depth });
+        // An exclude region placed off to one side never meets this face, and
+        // a boolean with nothing to remove must not fail the whole feature.
+        try silent
+        {
+            opBoolean(context, id + "excsub", {
+                        "tools" : qCreatedBy(id + "exc", EntityType.BODY),
+                        "targets" : tool,
+                        "operationType" : BooleanOperationType.SUBTRACTION });
+        }
+    }
+
+    const groups = frcSideWallGroups(context, tool, pl.normal);
+    const cls = frcClassifyBoundaries(context, groups, cSys);
+    var lateral = [];
+    for (var g in groups)
+    {
+        for (var f2 in g)
+            lateral = append(lateral, f2);
+    }
+    if (size(lateral) > 0)
+    {
+        try
+        {
+            opOffsetFace(context, id + "wall", { "moveFaces" : qUnion(lateral),
+                        "offsetDistance" : -(s.wall + toolRad) });
+        }
+        catch
+        {
+            // opOffsetFace moves EVERY lateral face of the tool by the same
+            // amount, which pulls the outline IN and pushes each hole OUT. Two
+            // faces that start further apart than twice the offset stay apart;
+            // a pair closer than that runs together, and the offset then fails
+            // on the whole body rather than on the pair.
+            //
+            // On a plate carrying several holes that is the commonest way this
+            // throws, and the hardest to see, because the wall itself fits
+            // perfectly well: a hole 0.694 in clear of the edge has room for a
+            // 0.375 in wall twice over, and still fails, because the offset
+            // needs the gap to hold a wall on BOTH sides of it. The plate that
+            // found this built at the two lighter presets, whose 0.250 in wall
+            // needs 0.750 in of gap, and refused at the heaviest, whose
+            // 0.375 in wall needs 1.000 in.
+            //
+            // So the holes responsible are named, with the gap they have
+            // against the gap they need, rather than left to be found by
+            // moving the slider. Every measurement is inside try silent
+            // because this is already the failure path and a second failure
+            // here must not replace the message with a worse one.
+            const needGap = 2 * (s.wall + toolRad);
+            var nTight = 0;
+            var closest = needGap;
+            for (var hole in cls.inner)
+            {
+                try silent
+                {
+                    const gap = evDistance(context, { "side0" : qUnion(hole.faces),
+                                "side1" : qUnion(cls.outer) }).distance;
+                    if (gap < needGap)
+                    {
+                        nTight += 1;
+                        if (gap < closest)
+                            closest = gap;
+                    }
+                }
+            }
+            if (nTight > 0)
+                throw regenError("A " ~ frcInches(s.wall) ~ " wall does not fit. " ~ nTight ~ " hole" ~ (nTight == 1 ? " sits" : "s sit") ~ " nearer the outside edge than the " ~ frcInches(needGap) ~ " the wall needs on both sides of the gap, the nearest at " ~ frcInches(closest) ~ ". Move that hole in, use a thinner wall, or use a more aggressive weight setting.", ["faces"], face0);
+            throw regenError("A " ~ frcInches(s.wall) ~ " wall does not fit on this face. Use a thinner wall or a more aggressive weight setting.", ["faces"], face0);
+        }
+    }
+
+    const skPlane = plane(pl.origin + pl.normal * (0.02 * inch), pl.normal, pl.x);
+    const overshoot = depth + 0.06 * inch;
+
+    var extra = [];
+    var islands = [];
+    for (var hole in cls.inner)
+    {
+        var protR = hole.diameter / 2 + s.wall;
+        if (hole.isRound)
+        {
+            const need = min(max(s.holeFactor * hole.diameter, s.wall), 0.5 * inch);
+            if (need > s.wall + 1e-6 * meter)
+            {
+                extra = append(extra, { "center" : hole.center, "radius" : hole.diameter / 2 + need });
+                protR = hole.diameter / 2 + need;
+            }
+        }
+        islands = append(islands, { "center" : hole.center, "r" : protR });
+    }
+    if (size(extra) > 0)
+    {
+        const skk = newSketchOnPlane(context, id + "keepsk", { "sketchPlane" : skPlane });
+        for (var i = 0; i < size(extra); i += 1)
+            skCircle(skk, "k" ~ i, { "center" : extra[i].center, "radius" : extra[i].radius + toolRad });
+        skSolve(skk);
+        opExtrude(context, id + "keep", { "entities" : qSketchRegion(id + "keepsk", false),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : overshoot });
+        opBoolean(context, id + "keepsub", { "tools" : qCreatedBy(id + "keep", EntityType.BODY),
+                    "targets" : tool, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    if (size(evaluateQuery(context, tool)) == 0)
+        throw regenError("Nothing is left to remove once the walls are applied. Try a thinner wall.", ["faces"], face0);
+
+    const bb = evBox3d(context, { "topology" : tool, "cSys" : cSys });
+    const c2 = vector((bb.maxCorner[0] + bb.minCorner[0]) / 2, (bb.maxCorner[1] + bb.minCorner[1]) / 2);
+    const spanX = bb.maxCorner[0] - bb.minCorner[0];
+    const spanY = bb.maxCorner[1] - bb.minCorner[1];
+    const sizeCap = max(min(spanX, spanY) / 3, 0.3 * inch);
+    const pocketUsed = min(s.pocket, sizeCap);
+    const reach = sqrt(spanX * spanX + spanY * spanY) / 2 + pocketUsed;
+    const pitch = pocketUsed + s.rib;
+
+    // Whichever bound is actually holding the pocket back, named once. The
+    // part size is checked first because when it is the smaller the other two
+    // rules are not what the user is up against. The buckling line names the
+    // thickness on purpose: the bound is the smaller of rib and thickness, so
+    // a user who reaches for a wider rib to buy a bigger pocket needs to be
+    // told that the number it is measured against is the plate.
+    var note = "";
+    if (sizeCap < s.pocket)
+        note = " NOTE Pocket capped at " ~ frcInches(sizeCap) ~ " by the part size.";
+    else if (s.buckleCapped)
+        note = " NOTE Pocket limited by rib buckling at " ~ frcInches(thickness) ~ " plate.";
+
+    // A boss is the ring of material left around an existing hole. One that
+    // reaches the pocket border merges into the perimeter wall and is held by
+    // it; one further in is held only by whatever bars run to it. Asked in two
+    // places below, so it is written once here.
+    const wallHeld = function(isl is map) returns boolean
+        {
+            const nearEdge = min(min(isl.center[0] - bb.minCorner[0],
+                        bb.maxCorner[0] - isl.center[0]),
+                    min(isl.center[1] - bb.minCorner[1],
+                        bb.maxCorner[1] - isl.center[1]));
+            return nearEdge <= isl.r + 0.02 * inch;
+        };
+
+    // A single pocket draws no lattice, so a boss the wall does not hold has
+    // nothing left to hold it, and a pocket cut all the way through drops it out
+    // of the plate as a loose ring.
+    //
+    // The spoke pass further down used to run for NONE for exactly that reason.
+    // But frcRibAngles returns an empty list for NONE, so its two loops over the
+    // rib angles never ran: no boss ever read as touched, and no spoke length
+    // ever got shortened from its initialiser of twice the reach. Every boss
+    // took three bars two reaches long, which on a 12 by 8 in plate is 24 bars
+    // of 18.5 in each, while ribCount stayed at zero so the panel and the
+    // feature name both said no ribs. That is not the single pocket the mode is
+    // named for. The spoke pass no longer runs for NONE. A boss it would cut
+    // loose is tied back to the wall by the pass immediately below instead,
+    // with two ribs rather than three, sized and aimed for that job.
+    var spokeTools = [];
+    var spokesDrawn = 0;
+    // The ties are real ribs, so they are offered to the tie nub pass the
+    // same way a lattice rib is. The clear run is from the boss ring out to
+    // the wall; the extension past the station is buried in the wall.
+    var tieRibSpans = [];
+    if (definition.pattern == FRCLightenPattern.NONE && depth >= thickness)
+    {
+        var loose = [];
+        for (var isl in islands)
+        {
+            if (!wallHeld(isl))
+                loose = append(loose, isl);
+        }
+        // Refusing the cut left the mode unusable on any plate carrying an
+        // interior bolt hole, which is most of them. Each ring the wall does
+        // not already hold is tied back to the wall instead, which is what the
+        // spoke pass this mode used to run was for. Two ribs rather than one,
+        // and at least fifty degrees apart, because a ring on a single tether
+        // can still twist on it.
+        if (size(loose) > 0)
+        {
+            const clsN = frcClassifyBoundaries(context,
+                frcSideWallGroups(context, tool, pl.normal), cSys);
+            const stN = frcPerimeterStations(context, clsN.outer, cSys,
+                    max(min(spanX, spanY) / 6, 0.5 * inch));
+            if (size(stN) < 2)
+                throw regenError("A single pocket cut all the way through would cut the material around " ~ size(loose) ~ " of the holes loose, and the outline could not be followed to tie them back. Pick a rib pattern, or set Depth to leave a floor.", ["pattern"], face0);
+            for (var li = 0; li < size(loose); li += 1)
+            {
+                const isl = loose[li];
+                var order = [];
+                for (var k = 0; k < size(stN); k += 1)
+                    order = append(order, [norm(stN[k].point - isl.center) / inch, k]);
+                order = sort(order, function(x, y)
+                    {
+                        if (x[0] != y[0])
+                            return x[0] - y[0];
+                        return x[1] - y[1];
+                    });
+                var used = [];
+                for (var e in order)
+                {
+                    if (size(used) >= 2)
+                        break;
+                    const st = stN[e[1]];
+                    const away = st.point - isl.center;
+                    const L = norm(away);
+                    if (L < isl.r + s.rib)
+                        continue;
+                    const u = away / L;
+                    var apart = true;
+                    for (var w in used)
+                    {
+                        if (dot(u, w) > cos(50 * degree))
+                            apart = false;
+                    }
+                    if (!apart)
+                        continue;
+                    // Far enough past the station that the rib finishes inside
+                    // the wall however obliquely it arrives.
+                    const grow = frcWallExtension(s.wall + s.rib + toolRad, u, st.direction, 4);
+                    if (!grow.anchored)
+                        continue;
+                    used = append(used, u);
+                    tieRibSpans = append(tieRibSpans,
+                        [isl.center + u * isl.r, u, L - isl.r]);
+                    // One sketch per rib. Two ribs crossing in the same sketch
+                    // would enclose a region between them, and that region
+                    // would come back as a sketch region of its own and be
+                    // left solid.
+                    const skSp = newSketchOnPlane(context, id + ("sp" ~ spokesDrawn),
+                        { "sketchPlane" : skPlane });
+                    // Drawn a cutter diameter wide of the rib it is meant to
+                    // be, because the pass at the end grows the pocket back out
+                    // by that radius on each side.
+                    const bar = frcBar(isl.center, u, L + grow.extension, s.rib + 2 * toolRad);
+                    skPolyline(skSp, "b", { "points" : append(bar, bar[0]) });
+                    skSolve(skSp);
+                    opExtrude(context, id + ("spx" ~ spokesDrawn), {
+                                "entities" : qSketchRegion(id + ("sp" ~ spokesDrawn), false),
+                                "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                                "endDepth" : overshoot });
+                    spokeTools = append(spokeTools,
+                        qCreatedBy(id + ("spx" ~ spokesDrawn), EntityType.BODY));
+                    spokesDrawn += 1;
+                }
+                if (size(used) == 0)
+                    throw regenError("The material around one of the holes cannot be tied back to the wall, so a single pocket cut all the way through would cut it loose. Pick a rib pattern, or set Depth to leave a floor.", ["pattern"], face0);
+            }
+            if (size(spokeTools) > 0)
+                opBoolean(context, id + "spsub", { "tools" : qUnion(spokeTools),
+                            "targets" : tool,
+                            "operationType" : BooleanOperationType.SUBTRACTION });
+        }
+    }
+
+    var cellPolys = [];
+    var cellCircles = [];
+    var ribSpans = [];
+    var detail = "";
+    // How many holes were too close together to keep a boss each. Counted
+    // inside the truss branch below and read by the panel, which is outside
+    // it: the note chain only ever showed this when nothing else had gone
+    // wrong, and a plate that merges bosses is exactly the plate that leaves
+    // small regions solid as well, so the count was hidden where it was
+    // wanted most.
+    var mergedBosses = 0;
+    // One count of the bars actually drawn on this face, so the feature can
+    // name itself by rib count. Honeycomb and circles draw no lattice bars, so
+    // this stays at zero unless one of their boss rings had to be tied back,
+    // and then it is the ties. A single pocket is the same: it draws only the
+    // ties that hold a boss the wall does not reach, and counts those, so the
+    // panel and the feature name say what is actually on the part.
+    var ribCount = 0;
+    if (definition.pattern == FRCLightenPattern.NONE)
+    {
+        ribCount = spokesDrawn;
+        ribSpans = tieRibSpans;
+        detail = (spokesDrawn > 0) ? ("1 pocket, " ~ spokesDrawn ~ " ties") : "1 pocket";
+    }
+
+    var cutBodies = [];
+    if (definition.pattern == FRCLightenPattern.TRUSS)
+    {
+        // The truss is a triangulation whose nodes are the centre of every
+        // boss and a ring of stations round the outline, so a rib runs from
+        // boss to boss the way one drawn by hand does, and a boss is the
+        // junction the ribs meet at.
+        //
+        // Every triangle of that mesh becomes one pocket: the triangle inset
+        // by half a rib plus the end mill radius, with the corner at a boss
+        // cut back by that boss's keep-out circle. A pocket therefore has
+        // three sides by construction, its corners are either a boss arc or a
+        // cutter radius fillet, and the material between two pockets is one
+        // rib wide everywhere because both were inset from the same edge by
+        // the same distance.
+        //
+        // The bar pattern this replaces chose pairs of nodes, drew a
+        // rectangular bar between each pair, and left the pockets to be
+        // whatever the bars did not cover, so a pocket was a trapezoid as
+        // often as a triangle. The mesh that replaced that treated each boss
+        // as a polygonal hole in the domain, which cost a collar of triangles
+        // too small to pocket around every hole and half the material the
+        // dialog asked for.
+        //
+        // The wall faces are re-found here because the queries taken before
+        // the wall offset no longer resolve.
+        const cls2 = frcClassifyBoundaries(context,
+            frcSideWallGroups(context, tool, pl.normal), cSys);
+
+        // Everything from here to the sketch is in inches with the units
+        // stripped. The mesh arithmetic below is dense enough that carrying
+        // units through it would cost more than it caught.
+        //
+        // Half a rib plus the end mill radius. The whole tool is cut undersize
+        // by the cutter radius and opened back out at the end, so a triangle
+        // inset by this leaves exactly one rib between it and its neighbour.
+        const uInset = (s.rib / 2 + toolRad) / inch;
+        const uSlvW = max(0.02 * inch, effTool - 2 * toolRad) / inch;
+        // The smallest inradius a triangle can have and still hold a pocket.
+        const uMinInr = uInset + max(0.6 * toolRad / inch, uSlvW);
+        const uMinTri = 2 * sqrt(3) * uMinInr;
+        // The size bound is the cell an isogrid would cut from the same pocket
+        // size: three rib families spaced pocket plus rib apart tile the plane
+        // with equilateral triangles of that height, so their side is this.
+        // Truss and lattice then mean the same thing by pocket size.
+        const uWant = 2 * (pocketUsed + s.rib) / (sqrt(3) * inch);
+        const uEdgeMax = max(uWant, 1.3 * uMinTri);
+        // How near a node may be placed to another node, to the wall, and to
+        // a boss. A node closer than this makes a triangle far under the size
+        // bound, and a triangle under the bound is material the dialog did not
+        // ask to keep.
+        const uSpace = 0.66 * uEdgeMax;
+        const uWallClear = 0.45 * uEdgeMax;
+        const uBossClear = 0.50 * uEdgeMax;
+        // Below this a pocket is scrap rather than lightening.
+        const uSlvArea = ((0.6 * s.rib) / inch) * ((0.6 * s.rib) / inch);
+        const uMinRun = max(0.02, uSlvW);
+        const nodeCap = 240;
+
+        // The stations are mesh nodes now, so they want the spacing the mesh
+        // wants. frcPerimeterStations divides each wall run into whole steps,
+        // so asking for the target edge over 1.15 lands the real spacing near
+        // that target on every run. The step used to be capped at a quarter of
+        // the plate, which on a small plate stationed the outline four times
+        // finer than the triangle it was feeding: on a 3 by 2.5 in plate that
+        // was the difference between 13 and 42 per cent removed.
+        const stations = frcPerimeterStations(context, cls2.outer, cSys,
+                uEdgeMax * inch / 1.15);
+        if (size(islands) + size(stations) > 140)
+            throw regenError("That is more holes and wall stations than a truss should mesh. Use a larger pocket size, or a lattice pattern instead.", ["pattern"], face0);
+        if (size(stations) < 3)
+            throw regenError("The outline of this face could not be followed, so there is nothing to mesh. Pick the flat outside face of a plate.", ["faces"], face0);
+
+        // frcPerimeterStations walks the outline edge to edge, so the
+        // stations arrive in boundary order already and there is no order to
+        // recover. ringSgn below absorbs whichever way round the walk went.
+        var base = [];
+        for (var st in stations)
+            base = append(base, vector(st.point[0] / inch, st.point[1] / inch));
+
+        // The ring is pushed outward by the inset distance less a hair, so a
+        // pocket inset from it lands just inside the wall face rather than on
+        // it. That is what leaves the wall exactly as thick as the dialog
+        // says, keeps the boolean off a coincident plane, and lets a rib run
+        // into the wall at full width.
+        const uGap = min(0.01 * inch, s.wall / 20) / inch;
+        const uPush = max(0.0, min(uInset - uGap, (s.wall + toolRad) / inch));
+        var ringArea2 = 0.0;
+        for (var i = 0; i < size(base); i += 1)
+        {
+            const q = base[(i + 1) % size(base)];
+            ringArea2 = ringArea2 + base[i][0] * q[1] - q[0] * base[i][1];
+        }
+        const ringSgn = (ringArea2 > 0) ? 1.0 : -1.0;
+        var outer = [];
+        for (var i = 0; i < size(base); i += 1)
+        {
+            const p0 = base[(i + size(base) - 1) % size(base)];
+            const p1 = base[i];
+            const p2 = base[(i + 1) % size(base)];
+            if (norm(p1 - p0) < 1e-9 || norm(p2 - p1) < 1e-9)
+            {
+                outer = append(outer, p1);
+                continue;
+            }
+            const u0 = (p1 - p0) / norm(p1 - p0);
+            const u1 = (p2 - p1) / norm(p2 - p1);
+            const n0 = vector(u0[1] * ringSgn, -u0[0] * ringSgn);
+            const n1 = vector(u1[1] * ringSgn, -u1[0] * ringSgn);
+            const bis = n0 + n1;
+            if (norm(bis) < 1e-9)
+            {
+                outer = append(outer, p1 + n0 * uPush);
+                continue;
+            }
+            const bh = bis / norm(bis);
+            const cosHalf = dot(bh, n0);
+            // A very sharp corner would throw the mitre a long way out, so it
+            // is clamped and the vertex just moves along the bisector.
+            outer = append(outer, p1 + bh * ((cosHalf > 0.34) ? uPush / cosHalf : uPush * 2.9));
+        }
+
+        // The nodes. The outline ring first, then one node at the centre of
+        // every boss, carrying that boss's keep-out radius drawn undersize by
+        // the cutter radius. A node with a radius is a junction the pockets
+        // round it are cut back from; a node without one is a plain corner.
+        // Two bosses whose keep-out circles overlap cannot both be junctions:
+        // the rib between them is shorter than the two rings that would have
+        // to sit on it, and the pocket to either side would come out as a lens
+        // rather than a triangle. The larger keeps its node and the smaller
+        // gives its up.
+        //
+        // The keeper used to GROW to swallow the one it absorbed: its radius
+        // became the distance between the two plus the absorbed radius, which
+        // is what swallowing means for a circle centred on the keeper, and
+        // which is far larger than either ring. Three bosses of 1.375, 1.294
+        // and 1.081 in keep-out, clustered in the lower left of a 10 by 11 in
+        // plate, chained into one circle of 3.514 in: 1.375 absorbs the second
+        // at 1.980 in centres to give 3.274, which then reaches the third at
+        // 2.433 in centres to give 3.514. That is a third of the plate, and
+        // every test downstream reads that radius. roomFor refuses an interior
+        // node within the radius plus half the target edge, the blocked test
+        // throws away every triangle the circle reaches into, and the
+        // opposite-inset-line test throws away every triangle it is a corner
+        // of, because a ring that reaches the far side of its own triangle
+        // cannot be drawn as a corner arc. Measured on that plate: 29.0 in^2
+        // of triangle dropped out of 110, the whole lower left solid with the
+        // three holes sitting in it ringless and ribless, 41 per cent removed
+        // where the same plate gives 52 with the growth gone.
+        //
+        // Nothing needed the growth. The tool already carries an annulus of
+        // the full protected radius around EVERY hole, from the wall offset
+        // above, and the pockets are cut by intersecting the tool with the
+        // pocket profiles, so no pocket can reach inside any ring whether its
+        // hole is a node or not. And the two circles overlap by the very test
+        // that merged them, so the absorbed ring is fused to the keeper's,
+        // which is a mesh node with ribs running into it. The absorbed hole is
+        // held by that fusion, and its ring is drawn by whichever pockets run
+        // up against it.
+        var bossOrder = [];
+        for (var i = 0; i < size(islands); i += 1)
+            bossOrder = append(bossOrder, [-(islands[i].r / inch), i]);
+        bossOrder = sort(bossOrder, function(x, y)
+            {
+                if (x[0] != y[0])
+                    return x[0] - y[0];
+                return x[1] - y[1];
+            });
+        var bossAt = [];
+        var bossRad = [];
+        var bossIdx = [];
+        var bossMerged = 0;
+        for (var e in bossOrder)
+        {
+            const isl = islands[e[1]];
+            const cq = vector(isl.center[0] / inch, isl.center[1] / inch);
+            const rq = (isl.r + toolRad) / inch;
+            var hit = -1;
+            for (var k = 0; k < size(bossAt); k += 1)
+            {
+                if (norm(cq - bossAt[k]) < rq + bossRad[k])
+                {
+                    hit = k;
+                    break;
+                }
+            }
+            if (hit >= 0)
+            {
+                bossMerged += 1;
+                continue;
+            }
+            bossAt = append(bossAt, cq);
+            bossRad = append(bossRad, rq);
+            bossIdx = append(bossIdx, e[1]);
+        }
+        mergedBosses = bossMerged;
+
+        var nodes = [];
+        var nodeR = [];
+        for (var p in outer)
+        {
+            nodes = append(nodes, p);
+            nodeR = append(nodeR, 0.0);
+        }
+        // The bosses were walked largest first so the larger of an
+        // overlapping pair keeps its node, but frcDelaunay inserts points
+        // in array order, so the mesh would depend on the radii rather
+        // than on the holes. Hand them over in hole order instead.
+        var bossEmit = [];
+        for (var k = 0; k < size(bossAt); k += 1)
+            bossEmit = append(bossEmit, [bossIdx[k], k]);
+        bossEmit = sort(bossEmit, function(x, y)
+            {
+                return x[0] - y[0];
+            });
+        for (var e in bossEmit)
+        {
+            nodes = append(nodes, bossAt[e[1]]);
+            nodeR = append(nodeR, bossRad[e[1]]);
+        }
+
+        // Crossing number rather than a convex test, so an outline with a
+        // notch in it still answers correctly.
+        const inPoly = function(p is Vector, poly is array) returns boolean
+            {
+                var inside = false;
+                for (var i = 0; i < size(poly); i += 1)
+                {
+                    const a = poly[i];
+                    const b = poly[(i + 1) % size(poly)];
+                    if ((a[1] > p[1]) != (b[1] > p[1]))
+                    {
+                        const t = (p[1] - a[1]) / (b[1] - a[1]);
+                        if (p[0] < a[0] + t * (b[0] - a[0]))
+                            inside = !inside;
+                    }
+                }
+                return inside;
+            };
+
+        // Twice the signed area of a triangle. The mesh is unitless, so this
+        // is a plain number and the sign tests below carry no unit.
+        const side2 = function(a is Vector, b is Vector, c is Vector) returns number
+            {
+                return (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+            };
+
+        const crossesSeg = function(p1 is Vector, p2 is Vector,
+                p3 is Vector, p4 is Vector) returns boolean
+            {
+                const d1 = side2(p3, p4, p1);
+                const d2 = side2(p3, p4, p2);
+                const d3 = side2(p1, p2, p3);
+                const d4 = side2(p1, p2, p4);
+                return ((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12))
+                    && ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12));
+            };
+
+        const segDist = function(p is Vector, a is Vector, b is Vector) returns number
+            {
+                const ab = b - a;
+                const L2 = dot(ab, ab);
+                if (L2 < 1e-18)
+                    return norm(p - a);
+                var t = dot(p - a, ab) / L2;
+                t = max(0.0, min(1.0, t));
+                return norm(p - (a + ab * t));
+            };
+
+        const wallDist = function(p is Vector) returns number
+            {
+                var best = 1e9;
+                for (var i = 0; i < size(outer); i += 1)
+                    best = min(best, segDist(p, outer[i], outer[(i + 1) % size(outer)]));
+                return best;
+            };
+
+        // A node may go here when it is inside the outline, clear of the wall,
+        // clear of every node already placed, and clear of every boss ring by
+        // enough that the triangles it makes with that boss can still hold a
+        // pocket.
+        const roomFor = function(q is Vector, nds is array, rds is array) returns boolean
+            {
+                if (!inPoly(q, outer))
+                    return false;
+                if (wallDist(q) < uWallClear)
+                    return false;
+                for (var i = 0; i < size(nds); i += 1)
+                {
+                    var lim = uSpace;
+                    if (rds[i] > 0)
+                        lim = max(uSpace, rds[i] + uBossClear);
+                    if (norm(q - nds[i]) < lim)
+                        return false;
+                }
+                return true;
+            };
+
+        // The same test, but naming WHICH node turned a point away when
+        // exactly one of them did. -1 says the point has room. -2 says the
+        // outline or the wall stopped it, or more than one node did, and
+        // there is nothing to be done about that.
+        const loneBlocker = function(q is Vector, nds is array, rds is array) returns number
+            {
+                if (!inPoly(q, outer))
+                    return -2;
+                if (wallDist(q) < uWallClear)
+                    return -2;
+                var found = -1;
+                for (var i = 0; i < size(nds); i += 1)
+                {
+                    var lim = uSpace;
+                    if (rds[i] > 0)
+                        lim = max(uSpace, rds[i] + uBossClear);
+                    if (norm(q - nds[i]) < lim)
+                    {
+                        if (found >= 0)
+                            return -2;
+                        found = i;
+                    }
+                }
+                return found;
+            };
+
+        // Wherever the node field is mirror symmetric about an axis, the axis
+        // itself has to carry nodes along its whole span, not only across the
+        // middle. If the mirror axis crosses the interior of a triangle, that
+        // triangle must be its own mirror image, and a triangle fixed by a
+        // reflection has a vertex ON the axis, so a stretch of axis with
+        // nodes to both sides and none on it has no mirror symmetric
+        // triangulation at all, whatever the triangulator does. On the 15 by
+        // 20 in four hole test plate the bosses put nodes on x = 7.5 only for
+        // y between 2.89 and 17.11 while the field spans 0.13 to 19.87, and
+        // the two isosceles trapezoids sitting on the bare stretches each got
+        // a coin toss diagonal: four pockets of 138 without a mirror partner.
+        // Stationing the axis end to end takes that to 130 pockets, none
+        // unmatched, with slightly more area removed.
+        //
+        // The axes are detected exactly the way frcDelaunay detects them for
+        // its own cocircular tie break: about the midline of the bounding
+        // box, with every node required to have a mirror partner within 1e-9
+        // of the spread. Matching that test matters, because these nodes are
+        // placed for the benefit of that tie break. The run walks outward
+        // from the middle so it is itself symmetric about the other axis when
+        // both are present, and every candidate passes through roomFor, so
+        // the run stays clear of the wall, the bosses, and its own kind.
+        var nMinX = nodes[0][0];
+        var nMaxX = nMinX;
+        var nMinY = nodes[0][1];
+        var nMaxY = nMinY;
+        for (var nq in nodes)
+        {
+            nMinX = min(nMinX, nq[0]);
+            nMaxX = max(nMaxX, nq[0]);
+            nMinY = min(nMinY, nq[1]);
+            nMaxY = max(nMaxY, nq[1]);
+        }
+        const nExt = max(nMaxX - nMinX, nMaxY - nMinY);
+        const symAx = (nMinX + nMaxX) / 2;
+        const symAy = (nMinY + nMaxY) / 2;
+        var symX = false;
+        var symY = false;
+        if (nExt > 0)
+        {
+            const symTol = 1e-9 * nExt;
+            symX = true;
+            for (var q1 in nodes)
+            {
+                var hit = false;
+                for (var q2 in nodes)
+                {
+                    if (abs(2 * symAx - q1[0] - q2[0]) <= symTol
+                        && abs(q1[1] - q2[1]) <= symTol)
+                    {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (!hit)
+                {
+                    symX = false;
+                    break;
+                }
+            }
+            symY = true;
+            for (var q1 in nodes)
+            {
+                var hit = false;
+                for (var q2 in nodes)
+                {
+                    if (abs(q1[0] - q2[0]) <= symTol
+                        && abs(2 * symAy - q1[1] - q2[1]) <= symTol)
+                    {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (!hit)
+                {
+                    symY = false;
+                    break;
+                }
+            }
+        }
+        // Each run is [vertical, axis coordinate, low, high, middle]: a
+        // vertical run stands on x = axis and spans the y of the field, a
+        // horizontal one the transpose, and the middle it walks out from is
+        // the other axis where there is one.
+        var axisRuns = [];
+        if (symX)
+            axisRuns = append(axisRuns,
+                [true, symAx, nMinY, nMaxY, symY ? symAy : (nMinY + nMaxY) / 2]);
+        if (symY)
+            axisRuns = append(axisRuns,
+                [false, symAy, nMinX, nMaxX, symX ? symAx : (nMinX + nMaxX) / 2]);
+        for (var run in axisRuns)
+        {
+            const stepCount = ceil((run[3] - run[2]) / uEdgeMax) + 2;
+            var offsets = [0.0];
+            for (var k = 1; k <= stepCount; k += 1)
+            {
+                offsets = append(offsets, k * uEdgeMax);
+                offsets = append(offsets, -k * uEdgeMax);
+            }
+            for (var d in offsets)
+            {
+                if (size(nodes) >= nodeCap)
+                    break;
+                const tv = run[4] + d;
+                if (tv < run[2] - 1e-9 || tv > run[3] + 1e-9)
+                    continue;
+                const q = run[0] ? vector(run[1], tv) : vector(tv, run[1]);
+                if (roomFor(q, nodes, nodeR))
+                {
+                    nodes = append(nodes, q);
+                    nodeR = append(nodeR, 0.0);
+                }
+            }
+        }
+
+        // A plate with no holes, or one whose holes are far apart, has nothing
+        // in the middle for the mesh to hang on, so the isogrid's own lattice
+        // is offered at the target spacing and every point of it that has room
+        // is taken. On a plate whose bolt pattern already sets the spacing
+        // none of them fit and none are added, which is what leaves the mesh
+        // reading off the part rather than off a grid stamped over it.
+        //
+        // Taken nearest the middle of the face first and ties broken by
+        // bearing, so a plate symmetric about an axis gets a symmetric set of
+        // them rather than whichever of a mirrored pair the generator happened
+        // to emit first.
+        const cU = vector(c2[0] / inch, c2[1] / inch);
+        var seedOrder = [];
+        for (var cp in frcIslandCenters(c2, reach, uEdgeMax * inch,
+                    definition.patternAngle, vector(0, 0)))
+        {
+            const q = vector(cp[0] / inch, cp[1] / inch);
+            const rel = q - cU;
+            seedOrder = append(seedOrder,
+                [norm(rel), atan2(rel[1], rel[0]) / degree, q]);
+        }
+        seedOrder = sort(seedOrder, function(x, y)
+            {
+                if (x[0] != y[0])
+                    return x[0] - y[0];
+                return x[1] - y[1];
+            });
+        var capped = false;
+        for (var e in seedOrder)
+        {
+            if (size(nodes) >= nodeCap)
+            {
+                capped = true;
+                break;
+            }
+            if (roomFor(e[2], nodes, nodeR))
+            {
+                nodes = append(nodes, e[2]);
+                nodeR = append(nodeR, 0.0);
+            }
+        }
+
+        const keepTri = function(nds is array, t is array) returns boolean
+            {
+                const a = nds[t[0]];
+                const b = nds[t[1]];
+                const c = nds[t[2]];
+                if (!inPoly((a + b + c) / 3, outer))
+                    return false;
+                for (var pr in [[a, b, c], [b, c, a], [c, a, b]])
+                {
+                    const m = (pr[0] + pr[1]) / 2;
+                    // Probed a little way inside the triangle rather than at
+                    // the midpoint itself. An edge lying along the boundary
+                    // has its midpoint on the boundary, where inside and
+                    // outside are not decided, and testing there rejected
+                    // every triangle that touched a wall.
+                    if (!inPoly(m + (pr[2] - m) * 0.15, outer))
+                        return false;
+                    for (var i = 0; i < size(outer); i += 1)
+                    {
+                        if (crossesSeg(pr[0], pr[1], outer[i], outer[(i + 1) % size(outer)]))
+                            return false;
+                    }
+                }
+                return true;
+            };
+
+        const meshOf = function(nds is array) returns array
+            {
+                var out = [];
+                var key = [];
+                for (var t in frcDelaunay(nds))
+                {
+                    const lo = min(min(t[0], t[1]), t[2]);
+                    const hi = max(max(t[0], t[1]), t[2]);
+                    const mid = t[0] + t[1] + t[2] - lo - hi;
+                    if (lo == mid || mid == hi)
+                        continue;
+                    var dup = false;
+                    for (var kk in key)
+                    {
+                        if (kk[0] == lo && kk[1] == mid && kk[2] == hi)
+                        {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (dup)
+                        continue;
+                    key = append(key, [lo, mid, hi]);
+                    if (keepTri(nds, t))
+                        out = append(out, t);
+                }
+                return out;
+            };
+
+        var tris = meshOf(nodes);
+
+        // Anything still over the size bound after the lattice gets a node at
+        // its middle, worst first. This is the only thing that subdivides, and
+        // it stops as soon as nothing over the bound has room, so it can never
+        // drive the mesh below the size the dialog asked for.
+        for (var pass = 0; pass < 4; pass += 1)
+        {
+            var want = [];
+            for (var t in tris)
+            {
+                const a = nodes[t[0]];
+                const b = nodes[t[1]];
+                const c = nodes[t[2]];
+                const longest = max(max(norm(b - a), norm(c - b)), norm(a - c));
+                if (longest <= uEdgeMax)
+                    continue;
+                var q = (a + b + c) / 3;
+                // A triangle whose circumcircle passes through a fourth node
+                // is half of a cyclic quadrilateral, and which of the two
+                // diagonals splits that quad is a coin toss: both answers are
+                // equally Delaunay, so the toss falls to whatever order the
+                // points went in. On a plate symmetric about an axis it lands
+                // the same way either side of that axis, and the centroid of
+                // the triangle it produced is then off the axis. That is what
+                // put two nodes 0.79 in right of centre on the 15 by 20 in
+                // four hole test plate, and ten of its 38 pockets with them.
+                //
+                // Every triangle either split can make shares the one
+                // circumcircle, so refining at its centre puts the new node in
+                // the same place whichever way the toss went, and on the axis
+                // when the quad straddles it. Squared distances throughout, to
+                // keep a square root out of a loop this long.
+                const den = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1])
+                        + c[0] * (a[1] - b[1]));
+                if (abs(den) > 1e-12)
+                {
+                    const ua = dot(a, a);
+                    const ub = dot(b, b);
+                    const uc = dot(c, c);
+                    const cc = vector((ua * (b[1] - c[1]) + ub * (c[1] - a[1])
+                                + uc * (a[1] - b[1])) / den,
+                            (ua * (c[0] - b[0]) + ub * (a[0] - c[0])
+                                + uc * (b[0] - a[0])) / den);
+                    const rad2 = dot(a - cc, a - cc);
+                    const tol2 = 1e-6 * max(1.0, rad2);
+                    for (var i = 0; i < size(nodes); i += 1)
+                    {
+                        if (i == t[0] || i == t[1] || i == t[2])
+                            continue;
+                        if (abs(dot(nodes[i] - cc, nodes[i] - cc) - rad2) < tol2)
+                        {
+                            q = cc;
+                            break;
+                        }
+                    }
+                }
+                want = append(want, [-longest, q]);
+            }
+            if (size(want) == 0)
+                break;
+            want = sort(want, function(x, y)
+                {
+                    return x[0] - y[0];
+                });
+            var added = 0;
+            // Where this pass began, so a node it placed can be told from one
+            // that was already there, and beside it the score each was placed
+            // for.
+            const passStart = size(nodes);
+            var passScore = [];
+            for (var e in want)
+            {
+                if (size(nodes) >= nodeCap)
+                {
+                    capped = true;
+                    break;
+                }
+                if (roomFor(e[1], nodes, nodeR))
+                {
+                    nodes = append(nodes, e[1]);
+                    nodeR = append(nodeR, 0.0);
+                    passScore = append(passScore, e[0]);
+                    added += 1;
+                    continue;
+                }
+                // Two triangles of exactly the same size want a node closer
+                // together than uSpace, so the face has room for one of the
+                // two and not both. Keeping whichever the scan reached first
+                // is what leaves a mirrored pair with the left one here and
+                // the right one over there. Move the node already placed to
+                // the middle of the two instead, which is on the axis when
+                // the pair is a mirrored one, and only where it can stand.
+                const bi = loneBlocker(e[1], nodes, nodeR);
+                if (bi < passStart || abs(passScore[bi - passStart] - e[0]) > 1e-9)
+                    continue;
+                const mid = (e[1] + nodes[bi]) / 2;
+                if (!inPoly(mid, outer) || wallDist(mid) < uWallClear)
+                    continue;
+                var standsUp = true;
+                for (var i = 0; i < size(nodes); i += 1)
+                {
+                    if (i == bi)
+                        continue;
+                    var lim = uSpace;
+                    if (nodeR[i] > 0)
+                        lim = max(uSpace, nodeR[i] + uBossClear);
+                    if (norm(mid - nodes[i]) < lim)
+                    {
+                        standsUp = false;
+                        break;
+                    }
+                }
+                if (standsUp)
+                    nodes[bi] = mid;
+            }
+            if (added == 0)
+                break;
+            tris = meshOf(nodes);
+        }
+
+        // One pocket per triangle. The three sides are the triangle's own
+        // sides brought in by the inset; the corners standing on a boss are
+        // replaced by an arc of that boss's keep-out circle, which is what
+        // makes the ring round the hole a true circle and not a facetted
+        // approximation of one.
+        var cellLoops = [];
+        var cellTri = [];
+        var solidLeft = 0;
+        for (var t in tris)
+        {
+            var p = [nodes[t[0]], nodes[t[1]], nodes[t[2]]];
+            var rr = [nodeR[t[0]], nodeR[t[1]], nodeR[t[2]]];
+            if (side2(p[0], p[1], p[2]) < 0)
+            {
+                p = [p[0], p[2], p[1]];
+                rr = [rr[0], rr[2], rr[1]];
+            }
+            const ar2 = abs(side2(p[0], p[1], p[2]));
+            const per = norm(p[1] - p[0]) + norm(p[2] - p[1]) + norm(p[0] - p[2]);
+            if (per < 1e-9 || ar2 / per <= uInset)
+            {
+                solidLeft += 1;
+                continue;
+            }
+            // A boss that is not a corner of this triangle must not reach
+            // into the POCKET cut from it, or the pocket would come out as
+            // something the ring had taken a bite from rather than as a
+            // triangle.
+            //
+            // The distance below is measured to the triangle's own side, but
+            // the pocket stands uInset inside that side and is then reopened
+            // by the cutter radius, so the ring reaches the finished pocket
+            // only once it is within nodeR - uInset of the side. Tested
+            // against nodeR itself this threw away every cell a neighbouring
+            // ring poked a quarter of an inch into and never touched.
+            var blocked = false;
+            for (var i = 0; i < size(nodes); i += 1)
+            {
+                if (nodeR[i] <= 0 || i == t[0] || i == t[1] || i == t[2])
+                    continue;
+                const cq = nodes[i];
+                var near = min(min(segDist(cq, p[0], p[1]), segDist(cq, p[1], p[2])),
+                        segDist(cq, p[2], p[0]));
+                if (side2(p[0], p[1], cq) > 0 && side2(p[1], p[2], cq) > 0
+                    && side2(p[2], p[0], cq) > 0)
+                    near = 0.0;
+                if (near < nodeR[i] - uInset)
+                {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (blocked)
+            {
+                solidLeft += 1;
+                continue;
+            }
+
+            var us = [];
+            var lineN = [];
+            var lineK = [];
+            for (var i = 0; i < 3; i += 1)
+            {
+                const u = (p[(i + 1) % 3] - p[i]) / norm(p[(i + 1) % 3] - p[i]);
+                const nv = vector(-u[1], u[0]);
+                us = append(us, u);
+                lineN = append(lineN, nv);
+                lineK = append(lineK, dot(p[i], nv) + uInset);
+            }
+            // The inset triangle corner at p[i] is where the two sides meeting
+            // there cross once both have been brought in.
+            var corner = [];
+            var ok = true;
+            for (var i = 0; i < 3; i += 1)
+            {
+                const n0 = lineN[(i + 2) % 3];
+                const k0 = lineK[(i + 2) % 3];
+                const n1 = lineN[i];
+                const k1 = lineK[i];
+                const det = n0[0] * n1[1] - n0[1] * n1[0];
+                if (abs(det) < 1e-12)
+                {
+                    ok = false;
+                    break;
+                }
+                corner = append(corner, vector((k0 * n1[1] - n0[1] * k1) / det,
+                            (n0[0] * k1 - k0 * n1[0]) / det));
+            }
+            if (!ok)
+            {
+                solidLeft += 1;
+                continue;
+            }
+
+            // How much of each side the pocket actually runs along, once the
+            // boss arcs at its two ends have taken their bite.
+            var tStart = [0.0, 0.0, 0.0];
+            var tStop = [0.0, 0.0, 0.0];
+            for (var i = 0; i < 3; i += 1)
+                tStop[i] = dot(corner[(i + 1) % 3] - corner[i], us[i]);
+            var arcA = [undefined, undefined, undefined];
+            var arcB = [undefined, undefined, undefined];
+            for (var i = 0; i < 3; i += 1)
+            {
+                // The corner is the nearest the pocket ever gets to the boss
+                // centre, because the perpendicular from that centre to each
+                // of the two sides meeting there falls outside the run the
+                // pocket actually uses. A boss that only just reaches its
+                // corner would therefore give an arc too short to draw, and
+                // passing it over costs at most this margin of a ring that is
+                // a quarter of an inch of material at its thinnest.
+                if (rr[i] <= 0 || norm(corner[i] - p[i]) >= rr[i] - 0.02)
+                    continue;
+                // The arc is a circle of radius rr[i] about p[i]. If that
+                // circle reaches the inset line of the side opposite p[i],
+                // the arc bulges across the pocket's own third side: the
+                // profile self-intersects and the rib beyond it is cut
+                // thinner than the rib asked for. Nothing below catches
+                // that, because only the two sides meeting at p[i] have
+                // their runs cut back by this boss.
+                const jj = (i + 1) % 3;
+                if (rr[i] >= dot(lineN[jj], p[i]) - lineK[jj])
+                {
+                    ok = false;
+                    break;
+                }
+                const prev = (i + 2) % 3;
+                // Leaving the corner along side i, take the far crossing;
+                // arriving along side i - 1, take the near one.
+                const w1 = corner[i] - p[i];
+                const b1 = 2 * dot(w1, us[i]);
+                const c1 = dot(w1, w1) - rr[i] * rr[i];
+                const d1 = b1 * b1 - 4 * c1;
+                const w0 = corner[prev] - p[i];
+                const b0 = 2 * dot(w0, us[prev]);
+                const c0 = dot(w0, w0) - rr[i] * rr[i];
+                const d0 = b0 * b0 - 4 * c0;
+                if (d1 <= 0 || d0 <= 0)
+                {
+                    ok = false;
+                    break;
+                }
+                tStart[i] = (-b1 + sqrt(d1)) / 2;
+                tStop[prev] = (-b0 - sqrt(d0)) / 2;
+                arcA[i] = corner[prev] + us[prev] * tStop[prev];
+                arcB[i] = corner[i] + us[i] * tStart[i];
+            }
+            if (!ok)
+            {
+                solidLeft += 1;
+                continue;
+            }
+            for (var i = 0; i < 3; i += 1)
+            {
+                if (tStop[i] - tStart[i] < uMinRun)
+                    ok = false;
+            }
+            if (!ok)
+            {
+                solidLeft += 1;
+                continue;
+            }
+
+            // The loop, walked counter-clockwise: the arc or plain corner at
+            // p[i], then the straight run along side i. Each corner point is
+            // computed once and used by both entities that meet there, so the
+            // profile closes exactly.
+            var loop = [];
+            var area2 = 0.0;
+            var arcCut = 0.0;
+            for (var i = 0; i < 3; i += 1)
+            {
+                const sPt = corner[i] + us[i] * tStart[i];
+                const ePt = corner[i] + us[i] * tStop[i];
+                if (arcA[i] != undefined)
+                {
+                    // Both ends sit on the circle, so the middle of the minor
+                    // arc is the circle point along the bisector between them.
+                    const bis = (arcA[i] - p[i]) + (arcB[i] - p[i]);
+                    if (norm(bis) < 1e-9)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    // The chord polygon below counts the lens between this
+                    // arc and its chord as pocket. It is not: the arc bulges
+                    // into the pocket, away from the boss centre at p[i].
+                    // The two radii to the arc ends span the triangle's own
+                    // interior angle at p[i], so the arc is always minor and
+                    // 2 asin(c / 2r) is its sweep.
+                    const th = 2 * asin(min(1.0, norm(arcB[i] - arcA[i])
+                                / (2 * rr[i]))) / radian;
+                    arcCut = arcCut + (rr[i] * rr[i] / 2) * (th - sin(th * radian));
+                    loop = append(loop, { "kind" : "arc", "start" : arcA[i],
+                                "mid" : p[i] + (bis / norm(bis)) * rr[i], "end" : arcB[i] });
+                }
+                loop = append(loop, { "kind" : "line", "start" : sPt, "end" : ePt });
+            }
+            if (!ok)
+            {
+                solidLeft += 1;
+                continue;
+            }
+            // The polygon through the corner points is a CEILING on the
+            // pocket's area, because every boss arc bulges into it and is
+            // counted here as its chord. arcCut is the correction back to
+            // the true area.
+            var poly = [];
+            for (var sg in loop)
+                poly = append(poly, sg.start);
+            for (var i = 0; i < size(poly); i += 1)
+            {
+                const q = poly[(i + 1) % size(poly)];
+                area2 = area2 + poly[i][0] * q[1] - q[0] * poly[i][1];
+            }
+            if (abs(area2) / 2 - arcCut < uSlvArea)
+            {
+                solidLeft += 1;
+                continue;
+            }
+            cellLoops = append(cellLoops, loop);
+            cellTri = append(cellTri, t);
+        }
+        if (size(cellLoops) == 0)
+            throw regenError("No triangle large enough to pocket fits on this face. Use a lattice pattern, a thinner rib, or a smaller end mill.", ["pattern"], face0);
+        // A Delaunay mesh on N nodes with B on the hull has 2N - 2 - B
+        // triangles, so a mesh the node budget permits can pass 300 and be
+        // refused for a size the dialog never asked it to exceed. This is
+        // the runaway guard it was meant to be, above that ceiling.
+        if (size(cellLoops) > 2 * nodeCap)
+            throw regenError("This truss needs more pockets than one feature should cut. Use a more aggressive weight saving, or turn automatic sizing off and use a thicker rib.", sizeParam, face0);
+
+        // A rib is a mesh edge with a pocket on each side. An edge on the
+        // outline carries the wall rather than a rib, and an edge beside a
+        // region left solid is wider than one, so neither is counted or
+        // offered to the tie nub pass. The span handed on is the clear run
+        // between the two boss rings, which is the part a cable tie can reach.
+        var eLo = [];
+        var eHi = [];
+        var eCount = [];
+        for (var t in cellTri)
+        {
+            for (var pr in [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]])
+            {
+                const lo = min(pr[0], pr[1]);
+                const hi = max(pr[0], pr[1]);
+                var at = -1;
+                for (var k = 0; k < size(eLo); k += 1)
+                {
+                    if (eLo[k] == lo && eHi[k] == hi)
+                        at = k;
+                }
+                if (at < 0)
+                {
+                    eLo = append(eLo, lo);
+                    eHi = append(eHi, hi);
+                    eCount = append(eCount, 1);
+                }
+                else
+                    eCount[at] = eCount[at] + 1;
+            }
+        }
+        var drawn = 0;
+        for (var k = 0; k < size(eLo); k += 1)
+        {
+            if (eCount[k] != 2)
+                continue;
+            const a = nodes[eLo[k]] * inch;
+            const b = nodes[eHi[k]] * inch;
+            const L = norm(b - a);
+            if (L < 1e-6 * inch)
+                continue;
+            const u = (b - a) / L;
+            const cutA = nodeR[eLo[k]] * inch;
+            const cutB = nodeR[eHi[k]] * inch;
+            const run = L - cutA - cutB;
+            drawn += 1;
+            if (run > 1e-6 * inch)
+                ribSpans = append(ribSpans, [a + u * cutA, u, run]);
+        }
+
+        // Every pocket in one sketch. They are disjoint by at least a rib, so
+        // no region is enclosed between them and each comes back as its own
+        // sketch region. The bar pattern needed a sketch and an extrude per
+        // bar, because bars that crossed enclosed a region that would then
+        // stay solid; this needs one of each for the whole face.
+        const skt = newSketchOnPlane(context, id + "trsk", { "sketchPlane" : skPlane });
+        for (var i = 0; i < size(cellLoops); i += 1)
+        {
+            for (var j = 0; j < size(cellLoops[i]); j += 1)
+            {
+                const sg = cellLoops[i][j];
+                if (sg.kind == "arc")
+                    skArc(skt, "a" ~ i ~ "_" ~ j, { "start" : sg.start * inch,
+                                "mid" : sg.mid * inch, "end" : sg.end * inch });
+                else
+                    skLineSegment(skt, "l" ~ i ~ "_" ~ j, { "start" : sg.start * inch,
+                                "end" : sg.end * inch });
+            }
+        }
+        skSolve(skt);
+        opExtrude(context, id + "trx", { "entities" : qSketchRegion(id + "trsk", false),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : overshoot });
+        // The pockets are what is left of the tool, so the tool has to lose
+        // everything else. A slab with the pockets taken out of it is that
+        // complement, and subtracting it below clips the tool to the pockets
+        // with the wall band and the boss rings intact. This is the same trick
+        // the honeycomb branch uses to clip its cells.
+        const skSlab = newSketchOnPlane(context, id + "trslabsk", { "sketchPlane" : skPlane });
+        skRectangle(skSlab, "s", {
+                    "firstCorner" : vector(bb.minCorner[0] - reach, bb.minCorner[1] - reach),
+                    "secondCorner" : vector(bb.maxCorner[0] + reach, bb.maxCorner[1] + reach) });
+        skSolve(skSlab);
+        opExtrude(context, id + "trslab", { "entities" : qSketchRegion(id + "trslabsk", false),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : overshoot });
+        opBoolean(context, id + "trweb", { "tools" : qCreatedBy(id + "trx", EntityType.BODY),
+                    "targets" : qCreatedBy(id + "trslab", EntityType.BODY),
+                    "operationType" : BooleanOperationType.SUBTRACTION });
+        cutBodies = append(cutBodies, qCreatedBy(id + "trslab", EntityType.BODY));
+
+        // One note at most, because the panel has room for ten lines and
+        // the mass figures and the per face line already take five.
+        if (capped)
+            note = note ~ " NOTE Truss mesh hit its node budget.";
+        else if (uWant < 1.3 * uMinTri)
+            note = note ~ " NOTE Pocket size raised to clear the end mill.";
+        else if (solidLeft > 0)
+            note = note ~ " NOTE " ~ solidLeft ~ " small regions left solid.";
+        else if (bossMerged > 0)
+            note = note ~ " NOTE Holes too close to separate share a boss.";
+        // The count means the ribs between pockets now, not bars drawn, so the
+        // panel names the pockets alongside it and the two agree with what is
+        // on the part.
+        ribCount = drawn;
+        detail = "" ~ drawn ~ " ribs, " ~ size(cellLoops) ~ " pockets";
+    }
+    else if (definition.pattern == FRCLightenPattern.HONEYCOMB
+        || definition.pattern == FRCLightenPattern.CIRCLES)
+    {
+        const isHex = definition.pattern == FRCLightenPattern.HONEYCOMB;
+        // Take the cutter radius off in the same measure the grow-back puts it
+        // on. A circle grows on its radius, so subtracting there is right. A
+        // hexagon grows on its INRADIUS, and cellR is a CIRCUMradius, so
+        // subtracting the radius here shrank the inradius by only
+        // toolRad sqrt(3) / 2 while the grow-back added a whole toolRad. The
+        // cell finished (2 - sqrt(3)) toolRad oversize across the flats, a
+        // third of a tenth on a 1/4 in end mill, and the web between two cells
+        // came out that much under the rib the dialog asked for.
+        const cellR = isHex ? (pocketUsed - 2 * toolRad) / sqrt(3)
+            : pocketUsed / 2 - toolRad;
+        // The lattice is laid over a square that circumscribes the pocket box,
+        // so its outer rings miss the part altogether. A cell reaches the part
+        // when its own circle overlaps that box, which is the same test the rib
+        // branch makes below with vHalf.
+        const onPart = function(c is Vector) returns boolean
+            {
+                return abs(c[0] - c2[0]) <= spanX / 2 + cellR
+                    && abs(c[1] - c2[1]) <= spanY / 2 + cellR;
+            };
+        var bestCenters = [];
+        var bestOn = -1;
+        for (var ph in [vector(0, 0), vector(0.5, 0), vector(0.25, 0.5), vector(0.5, 0.5)])
+        {
+            const cand = frcIslandCenters(c2, reach, pitch, definition.patternAngle, ph);
+            // A phase shifts the lattice without changing how many points it
+            // generates, so every phase returned the same size and comparing
+            // sizes picked the first phase every time. What actually differs is
+            // how many cells land on the part, which is what this search was
+            // written to maximise.
+            var on = 0;
+            for (var c in cand)
+            {
+                if (onPart(c))
+                    on += 1;
+            }
+            if (on > bestOn)
+            {
+                bestOn = on;
+                bestCenters = cand;
+            }
+        }
+        if (size(bestCenters) > 900)
+            throw regenError("That pocket size makes too many cells. Increase the pocket size.", ["pocketSize"], face0);
+        // The cells actually drawn, which is what the ring hold test below
+        // has to walk. Building it here rather than re-filtering bestCenters
+        // keeps the two lists from drifting apart.
+        var cellAt = [];
+        for (var c in bestCenters)
+        {
+            // A cell that misses the part is clipped away to nothing by the
+            // subtraction below, so drawing it costs sketch entities for no
+            // geometry, and counting it makes the panel claim cells the plate
+            // does not have: 121 where 13 land, on a 12 by 8 in plate.
+            if (!onPart(c))
+                continue;
+            // A cell a boss ring all but covers is not a pocket. The tool
+            // carries an annulus at every hole, so the ring takes its bite out
+            // of the cell whatever the cell does, and what is left is a
+            // crescent following the rim of the cell. The deepest that
+            // crescent gets is measured out along the line from the ring
+            // centre through the cell centre: the far edge of the cell less
+            // the ring. Everything is drawn undersize and grown back by the
+            // cutter radius on each side, so the finished crescent is that
+            // plus a cutter diameter, and under one rib wide it is a curved
+            // splinter rather than a pocket. Note this cannot fire at all when
+            // the cutter radius is half the rib or more, which is the CNC
+            // default: there the grow-back makes every remnant at least a rib
+            // wide by itself, and the only cells dropped are the ones a ring
+            // covers outright.
+            var grazed = false;
+            for (var isl in islands)
+            {
+                if (norm(c - isl.center) + cellR - (isl.r + toolRad)
+                    < s.rib - 2 * toolRad)
+                {
+                    grazed = true;
+                    break;
+                }
+            }
+            if (grazed)
+                continue;
+            cellAt = append(cellAt, c);
+            if (isHex)
+                cellPolys = append(cellPolys, frcPolygonPoints(c, cellR, 6, definition.patternAngle + 30 * degree));
+            else
+                cellCircles = append(cellCircles, [c, cellR]);
+        }
+        // This is the lattice as LAID, counted against the pocket box. The
+        // finished part can carry fewer pockets than this: a cell whose box
+        // overlaps but which falls outside the outline is cut away entirely by
+        // the tool intersection, and a cell can also be consumed by a boss
+        // ring or dropped as a sliver, both of which happen after this point.
+        // On an irregular outline the two numbers can differ by half. Counting
+        // the survivors would mean testing each centre against the outline,
+        // which needs a point-in-polygon test this file does not have, so the
+        // word says what the number is rather than overstating it.
+        detail = "" ~ (size(cellPolys) + size(cellCircles)) ~ " cells laid";
+
+        // A cell pattern draws no bars at all, so the only thing holding a
+        // boss ring is whatever lattice material survives around it. The tool
+        // carries an annulus at every hole from the wall offset above and the
+        // cells are cut by intersecting the tool with them, so the ring itself
+        // always survives the cut. That is exactly the danger: a ring that
+        // falls wholly inside one cell has the cell taken away all round it
+        // and comes out of the plate as a free annulus. On a 0.125 in plate at
+        // the balanced preset, loaded edge on, the hex cell is 0.628 in from
+        // its centre to a corner and the ring on a 10-32 hole is 0.348 in, so
+        // any such hole within 0.280 in of a cell centre is cut loose, and the
+        // cells are 1.588 in apart. Across the face the same plate gives 0.722,
+        // 0.374 and 1.750. This is the same failure the single pocket mode
+        // solves with ties, and it is solved here the same way.
+        //
+        // The loading is named because it changes every number here: the
+        // pocket bound is a slenderness rule edge on and a span to depth rule
+        // across the face. An earlier version of this note quoted 0.92, 0.57
+        // and 2.09, which were the figures before the buckling span was
+        // converted into a pocket size, and named no load case at all.
+        //
+        // The condition tested is a ring the surviving lattice does not reach,
+        // not merely a hole that lands inside a cell: a ring large enough to
+        // poke out of its cell into the web is held by the web, and one the
+        // perimeter wall already reaches is held by the wall.
+        const cullR = cellR + 2 * toolRad;
+        // The finished cell is the drawn one grown by the cutter radius: a
+        // circle of cellR + toolRad, or a hexagon whose inradius is the drawn
+        // inradius plus the same. frcPolygonPoints puts the hexagon's vertices
+        // at the pattern angle plus thirty, so its edge normals lie on the
+        // pattern angle itself and every sixty degrees from there.
+        const finR = cellR + toolRad;
+        const finIn = cellR * sqrt(3) / 2 + toolRad;
+        const hexN = [vector(cos(definition.patternAngle), sin(definition.patternAngle)),
+            vector(cos(definition.patternAngle + 60 * degree),
+                sin(definition.patternAngle + 60 * degree)),
+            vector(cos(definition.patternAngle + 120 * degree),
+                sin(definition.patternAngle + 120 * degree))];
+        // The cell list is handed in rather than closed over, so a ring can be
+        // tested against the handful of cells near it instead of all of them.
+        const covered = function(q is Vector, cs is array) returns boolean
+            {
+                for (var c in cs)
+                {
+                    if (abs(q[0] - c[0]) > cullR || abs(q[1] - c[1]) > cullR)
+                        continue;
+                    if (isHex)
+                    {
+                        var inHex = true;
+                        for (var nv in hexN)
+                        {
+                            if (abs(dot(q - c, nv)) > finIn)
+                                inHex = false;
+                        }
+                        if (inHex)
+                            return true;
+                    }
+                    else if (norm(q - c) <= finR)
+                        return true;
+                }
+                return false;
+            };
+        // How wide the ligament at the ring has to be for the ring to count as
+        // held, and how deep a tie has to bury itself in the lattice at its far
+        // end to count as holding. Both are below the width of the narrowest
+        // web there is, which is one rib between two neighbouring cells, so a
+        // ring that genuinely reaches the web reads as held and a tie that
+        // genuinely reaches it reads as anchored.
+        const holdW = max(0.6 * s.rib, 0.08 * inch);
+        const linkW = max(0.4 * s.rib, 0.05 * inch);
+        const nDir = 36;
+        // A ray leaving the ring crosses at most its own cell and one more
+        // before it must meet web, because the cells are disjoint by a rib.
+        const scanCap = 2 * pitch + 2 * cellR;
+        const scanStep = 0.05 * inch;
+        const nStep = min(ceil(scanCap / scanStep), 300);
+        var ties = 0;
+        var tieTools = [];
+        for (var isl in islands)
+        {
+            if (wallHeld(isl))
+                continue;
+            var nearAt = [];
+            for (var c in cellAt)
+            {
+                if (norm(c - isl.center) <= isl.r + scanCap + cullR)
+                    nearAt = append(nearAt, c);
+            }
+            var free = [];
+            for (var j = 0; j < nDir; j += 1)
+            {
+                const a = (360 * degree) * j / nDir;
+                free = append(free, !covered(isl.center
+                            + vector(cos(a), sin(a)) * (isl.r + 0.01 * inch), nearAt));
+            }
+            // The longest unbroken run of ring boundary the lattice reaches is
+            // the width of the ligament holding the ring. Walked twice round,
+            // so a run that straddles the seam is counted once and whole.
+            var best = 0;
+            var run = 0;
+            for (var j = 0; j < 2 * nDir; j += 1)
+            {
+                if (free[j % nDir])
+                {
+                    run += 1;
+                    if (run > best)
+                        best = run;
+                }
+                else
+                    run = 0;
+            }
+            if (best > nDir)
+                best = nDir;
+            if (isl.r * ((360 * degree) * best / nDir) / radian >= holdW)
+                continue;
+
+            // Loose. Out along each ray to the first stretch of lattice the
+            // tie could bury its end in, nearest first.
+            var order = [];
+            for (var j = 0; j < nDir; j += 1)
+            {
+                const a = (360 * degree) * j / nDir;
+                const u = vector(cos(a), sin(a));
+                var seen = -1 * inch;
+                var hit = -1 * inch;
+                for (var kk = 0; kk <= nStep; kk += 1)
+                {
+                    const dd = isl.r + kk * scanStep;
+                    if (covered(isl.center + u * dd, nearAt))
+                        seen = -1 * inch;
+                    else
+                    {
+                        if (seen < 0 * inch)
+                            seen = dd;
+                        if (dd - seen >= linkW)
+                        {
+                            hit = dd;
+                            break;
+                        }
+                    }
+                }
+                if (hit > 0 * inch)
+                    order = append(order, [hit / inch, j]);
+            }
+            order = sort(order, function(x, y)
+                {
+                    if (x[0] != y[0])
+                        return x[0] - y[0];
+                    return x[1] - y[1];
+                });
+            // Two ties rather than one and at least fifty degrees apart,
+            // because a ring on a single tether can still twist on it.
+            var used = [];
+            for (var e in order)
+            {
+                if (size(used) >= 2)
+                    break;
+                const a = (360 * degree) * e[1] / nDir;
+                const u = vector(cos(a), sin(a));
+                var apart = true;
+                for (var w in used)
+                {
+                    if (dot(u, w) > cos(50 * degree))
+                        apart = false;
+                }
+                if (!apart)
+                    continue;
+                used = append(used, u);
+                const tieLen = e[0] * inch;
+                // The ties are real ribs, so they are offered to the tie nub
+                // pass the same way a lattice rib is. The clear run is from
+                // the ring out to the lattice it lands in.
+                ribSpans = append(ribSpans, [isl.center + u * isl.r, u, tieLen - isl.r]);
+                // One sketch per tie. Two ties crossing in the same sketch
+                // would enclose a region between them, and that region would
+                // come back as a sketch region of its own and be left solid.
+                const skT = newSketchOnPlane(context, id + ("ct" ~ ties),
+                    { "sketchPlane" : skPlane });
+                // Drawn a cutter diameter wide of the rib asked for, because
+                // the pass at the end grows the pocket back out by that radius
+                // on each side.
+                const bar = frcBar(isl.center, u, tieLen, s.rib + 2 * toolRad);
+                skPolyline(skT, "b", { "points" : append(bar, bar[0]) });
+                skSolve(skT);
+                opExtrude(context, id + ("ctx" ~ ties), {
+                            "entities" : qSketchRegion(id + ("ct" ~ ties), false),
+                            "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                            "endDepth" : overshoot });
+                tieTools = append(tieTools, qCreatedBy(id + ("ctx" ~ ties), EntityType.BODY));
+                ties += 1;
+            }
+            if (size(used) == 0)
+                throw regenError("This cell pattern cuts the material around one of the holes loose, and there is no lattice near enough to tie it back to. Use a smaller pocket size, or the truss pattern.", sizeParam, face0);
+        }
+        // Subtracted from the tool now, before the cells are. The cell pass
+        // only ever takes more away from the tool, so anything already taken
+        // out of it here stays on the part.
+        if (size(tieTools) > 0)
+        {
+            opBoolean(context, id + "ctsub", { "tools" : qUnion(tieTools),
+                        "targets" : tool,
+                        "operationType" : BooleanOperationType.SUBTRACTION });
+            detail = detail ~ ", " ~ ties ~ " ties";
+            ribCount = ties;
+        }
+    }
+
+    // Where the rib lattice sits.
+    //
+    // The bars used to be laid out from the middle of the pocket box with no
+    // reference to the bolt holes at all, so wherever a boss ring landed on
+    // the EDGE of a bar the pocket beside it came out as a lens, a stub or a
+    // part cell rather than as a cell. A ring is clean in two positions and
+    // nowhere else: centred on a bar, where the ring and the bar merge into
+    // one piece of material, or clear of it, where the two do not touch. It is
+    // a mess exactly when an edge of the bar crosses the ring, which is what
+    // the count below measures.
+    //
+    // Sliding the whole lattice is two free numbers whatever the pattern, so
+    // the search is over one offset of the lattice origin rather than a phase
+    // per direction, and the offset is then the only thing three call sites
+    // below have to agree on. For the square grid and the diagonal, whose two
+    // families are perpendicular, an offset reaches every phase pair there is.
+    // For the isogrid the third family follows from the other two, which is a
+    // property of a triangular lattice rather than a limit of the search. A
+    // tie goes to the smaller offset, so a plate with no holes, or one no
+    // offset improves, keeps exactly the lattice it has today.
+    var cLat = c2;
+    if (frcHasRibs(definition.pattern) && size(islands) > 0)
+    {
+        const angs = frcRibAngles(definition.pattern, definition.patternAngle);
+        const e0 = vector(-sin(angs[0]), cos(angs[0]));
+        const e1 = vector(-sin(angs[1]), cos(angs[1]));
+        // Half the bar as drawn, which is what has to clear or cover the ring.
+        const hw = s.rib / 2 + toolRad;
+        var bestBad = -1;
+        var bestOff = 0 * inch;
+        for (var ia = 0; ia < 12; ia += 1)
+        {
+            for (var ib = 0; ib < 12; ib += 1)
+            {
+                const cand = c2 + e0 * (ia * pitch / 12) + e1 * (ib * pitch / 12);
+                // The lattice repeats on its own basis, so an offset further
+                // out than this is some nearer offset over again. Holding the
+                // search inside it is also what keeps the bars, which are laid
+                // out about c2, long enough to still cross the whole part.
+                if (norm(cand - c2) > 0.75 * pitch)
+                    continue;
+                var bad = 0;
+                for (var a in angs)
+                {
+                    const v = vector(-sin(a), cos(a));
+                    for (var isl in islands)
+                    {
+                        const so = dot(isl.center - cand, v);
+                        const eOff = abs(so - round(so / pitch) * pitch);
+                        if (abs(eOff - isl.r) < hw)
+                            bad += 1;
+                    }
+                }
+                const off = norm(cand - c2);
+                if (bestBad < 0 || bad < bestBad || (bad == bestBad && off < bestOff))
+                {
+                    bestBad = bad;
+                    bestOff = off;
+                    cLat = cand;
+                }
+            }
+        }
+    }
+
+    if (frcHasRibs(definition.pattern))
+    {
+        const angles = frcRibAngles(definition.pattern, definition.patternAngle);
+        const nEach = ceil(reach / pitch) + 1;
+        if (size(angles) * (2 * nEach + 1) > 400)
+            throw regenError("That pocket size needs too many ribs. Increase the pocket size.", ["pocketSize"], face0);
+        // The bars are laid out over a square that circumscribes the pocket, so
+        // the outer indices in each direction miss the part altogether, and they
+        // were being counted as ribs anyway. Only the bars whose band crosses
+        // the pocket box are counted, which is the number a user can match
+        // against the ribs they can see on the plate.
+        var bars = 0;
+        for (var d = 0; d < size(angles); d += 1)
+        {
+            const a = angles[d];
+            const u = vector(cos(a), sin(a));
+            const v = vector(-sin(a), cos(a));
+            // Half the pocket box measured along v from its own center, which is
+            // where index zero sits. A bar reaches the box when its offset is no
+            // more than that plus half a rib.
+            const vHalf = abs(v[0]) * spanX / 2 + abs(v[1]) * spanY / 2;
+            // The lattice origin may be offset from the middle of the box by up
+            // to a pitch, so a bar's offset from the box centre is its index
+            // plus that, and the count has to read the same number.
+            const vShift = dot(cLat - c2, v);
+            // One sketch per direction: parallel bars never overlap, so every
+            // region is exactly one rib. All directions in one sketch would also
+            // return the pockets between them and remove everything.
+            const skr = newSketchOnPlane(context, id + ("ribsk" ~ d), { "sketchPlane" : skPlane });
+            for (var k = -nEach; k <= nEach; k += 1)
+            {
+                // A pitch longer than the box needs, at both ends, because the
+                // lattice origin can sit up to three quarters of a pitch off
+                // the middle of the box and a bar still has to run past the
+                // far wall.
+                const quad = frcBar(cLat + v * (k * pitch) - u * (reach + pitch), u,
+                        2 * (reach + pitch), s.rib + 2 * toolRad);
+                skPolyline(skr, "r" ~ k, { "points" : append(quad, quad[0]) });
+                if (abs(vShift + k * pitch) <= vHalf + s.rib / 2)
+                    bars += 1;
+            }
+            skSolve(skr);
+            opExtrude(context, id + ("rib" ~ d), { "entities" : qSketchRegion(id + ("ribsk" ~ d), false),
+                        "direction" : -pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : overshoot });
+            cutBodies = append(cutBodies, qCreatedBy(id + ("rib" ~ d), EntityType.BODY));
+        }
+        // The bar count is what the panel and the feature name both use, so the
+        // two agree. The spans below are a different quantity: the clear runs
+        // between rib junctions, which is what a tie nub is centered on.
+        ribCount = bars;
+        ribSpans = frcRibSpans(definition.pattern, definition.patternAngle, cLat, pitch, s.rib, reach);
+        detail = "" ~ bars ~ " ribs";
+    }
+
+    // Cells are clipped to the pocket region by subtracting their complement.
+    // That is what lets every pattern run right up to the wall: a cell that
+    // straddles the border survives as a partial pocket.
+    if (size(cellPolys) > 0 || size(cellCircles) > 0)
+    {
+        const ski = newSketchOnPlane(context, id + "cells", { "sketchPlane" : skPlane });
+        for (var i = 0; i < size(cellPolys); i += 1)
+            skPolyline(ski, "p" ~ i, { "points" : append(cellPolys[i], cellPolys[i][0]) });
+        for (var i = 0; i < size(cellCircles); i += 1)
+            skCircle(ski, "c" ~ i, { "center" : cellCircles[i][0], "radius" : cellCircles[i][1] });
+        skSolve(ski);
+        opExtrude(context, id + "cellx", { "entities" : qSketchRegion(id + "cells", false),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : overshoot });
+        const skSlab = newSketchOnPlane(context, id + "slabsk", { "sketchPlane" : skPlane });
+        skRectangle(skSlab, "s", {
+                    "firstCorner" : vector(bb.minCorner[0] - reach, bb.minCorner[1] - reach),
+                    "secondCorner" : vector(bb.maxCorner[0] + reach, bb.maxCorner[1] + reach) });
+        skSolve(skSlab);
+        opExtrude(context, id + "slab", { "entities" : qSketchRegion(id + "slabsk", false),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : overshoot });
+        opBoolean(context, id + "web", { "tools" : qCreatedBy(id + "cellx", EntityType.BODY),
+                    "targets" : qCreatedBy(id + "slab", EntityType.BODY),
+                    "operationType" : BooleanOperationType.SUBTRACTION });
+        cutBodies = append(cutBodies, qCreatedBy(id + "slab", EntityType.BODY));
+    }
+
+    if (size(cutBodies) > 0)
+    {
+        try
+        {
+            opBoolean(context, id + "patsub", { "tools" : qUnion(cutBodies), "targets" : tool,
+                        "operationType" : BooleanOperationType.SUBTRACTION });
+        }
+        catch
+        {
+            throw regenError("The pattern removed everything. Try bigger pockets or a thinner rib.", sizeParam, face0);
+        }
+    }
+    if (size(evaluateQuery(context, tool)) == 0)
+        throw regenError("No pocket fits on this face with these settings. Try smaller pockets or a thinner wall.", sizeParam, face0);
+
+    // Only a rib pattern reaches here. A single pocket has no rib angles to work
+    // from, so this pass had nothing to measure against and drew three full
+    // length bars off every boss. NONE is handled before this point instead,
+    // by the tie pass near the top of the builder, and reaches here only in
+    // the sense that it never does.
+    if (frcHasRibs(definition.pattern))
+    {
+        const angles = frcRibAngles(definition.pattern, definition.patternAngle);
+        var needy = [];
+        for (var isl in islands)
+        {
+            var touched = false;
+            for (var a in angles)
+            {
+                const v = vector(-sin(a), cos(a));
+                const sOff = dot(isl.center - cLat, v);
+                if (abs(sOff - round(sOff / pitch) * pitch) - s.rib / 2 - isl.r <= 0 * inch)
+                {
+                    touched = true;
+                    break;
+                }
+            }
+            // A boss that reaches the pocket border is already held by the wall,
+            // so it needs no ribs of its own.
+            if (!touched && !wallHeld(isl))
+                needy = append(needy, isl);
+        }
+        if (size(needy) > 0)
+        {
+            var spokeBodies = [];
+            for (var d = 0; d < 3; d += 1)
+            {
+                const a = [10 * degree, 130 * degree, 250 * degree][d] + definition.patternAngle;
+                const u = vector(cos(a), sin(a));
+                const sks = newSketchOnPlane(context, id + ("spksk" ~ d), { "sketchPlane" : skPlane });
+                const kSpan = min(ceil(2 * reach / pitch) + 2, 60);
+                for (var i = 0; i < size(needy); i += 1)
+                {
+                    var L = 2 * reach;
+                    for (var ra in angles)
+                    {
+                        const v = vector(-sin(ra), cos(ra));
+                        const uv = dot(u, v);
+                        if (abs(uv) < 1e-6)
+                            continue;
+                        const s0 = dot(needy[i].center - cLat, v);
+                        for (var kk = -kSpan; kk <= kSpan; kk += 1)
+                        {
+                            const dd = (kk * pitch - s0) / uv;
+                            if (dd > needy[i].r && dd < L)
+                                L = dd;
+                        }
+                    }
+                    // The bar stops ON the rib centre line rather than a rib
+                    // width past it. L is measured ALONG the spoke, but the rib
+                    // is a slab of half width h = rib / 2 + toolRad measured
+                    // PERPENDICULAR to itself, and frcBar gives the bar a
+                    // SQUARE end that is perpendicular to the spoke rather than
+                    // to the rib. So the end's leading corner sits
+                    //
+                    //     rib * |cos| + h * |sin|
+                    //
+                    // past the centre line, where cos is between the spoke and
+                    // the rib normal, and anything over h is standing in the
+                    // next pocket. On the isogrid a spoke meets a rib family at
+                    // a cosine of 0.174, 0.766 or 0.940, and the corner pokes
+                    // out at ALL THREE for every rib and cutter this feature
+                    // can be given: 0.070 to 0.102 in on a quarter inch rib cut
+                    // with a quarter inch mill, 0.112 to 0.125 in with an
+                    // eighth inch mill, 0.223 in on a half inch rib. It would
+                    // take a cutter 1.86 times the rib width to bury that
+                    // corner, and frcMinWall holds the rib at or above the
+                    // cutter diameter, so the stub was there at every setting.
+                    // The photographs that found it show three per boss.
+                    //
+                    // Ending on the centre line cannot leave one. The end's
+                    // corners then sit at h * |sin| of it, which is inside the
+                    // slab for every angle, and the joint along the spoke is
+                    // h / |cos|, so it is never shorter than one half width and
+                    // usually longer than the overshoot it replaces.
+                    //
+                    // That containment argument rests on the spoke and the rib
+                    // being drawn the SAME width. Both are s.rib + 2 * toolRad,
+                    // here and at the lattice bars above, which is what makes
+                    // the spoke's half width equal to the band's h and puts its
+                    // corners at h * |sin| rather than at something larger. A
+                    // later edit that widens one without the other brings the
+                    // stub back, and nothing else in this file would notice.
+                    //
+                    // Residual, stated rather than fixed. GRID and DIAGONAL use
+                    // these same three spoke angles against families 90 degrees
+                    // apart, so a spoke can meet its rib at a cosine of 0.174.
+                    // The corner is then 0.985 h from the centre line: inside,
+                    // but by 1.5 per cent of h, and the union is close to
+                    // tangent. Any pocket sliver that leaves is far under the
+                    // cutter and frcDropSlivers takes it, so it costs nothing
+                    // in the cut. Mitring the end to the rib instead would be
+                    // worse, not better: at that cosine the two corners land
+                    // 5.7 h either side of the centre line and the tether comes
+                    // out as a long skewed parallelogram.
+                    const quad = frcBar(needy[i].center, u, L, s.rib + 2 * toolRad);
+                    skPolyline(sks, "s" ~ i, { "points" : append(quad, quad[0]) });
+                }
+                skSolve(sks);
+                opExtrude(context, id + ("spk" ~ d), { "entities" : qSketchRegion(id + ("spksk" ~ d), false),
+                            "direction" : -pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : overshoot });
+                spokeBodies = append(spokeBodies, qCreatedBy(id + ("spk" ~ d), EntityType.BODY));
+            }
+            try silent
+            {
+                opBoolean(context, id + "spksub", { "tools" : qUnion(spokeBodies), "targets" : tool,
+                            "operationType" : BooleanOperationType.SUBTRACTION });
+            }
+        }
+    }
+
+    // One nub, dead center, on every rib long enough to hold one. The length
+    // comes from the rib itself, measured between its two junctions, so a
+    // nub's distance from each junction is a property of the geometry.
+    //
+    // The bump has to read as a feature on the finished plate, not as a
+    // ripple on the rib edge, so it is sized from the rib rather than from a
+    // small fixed number.
+    // Each nub is a circular arc bulging off the rib edge, a chord nubLen long
+    // with a sagitta of prot.
+    const nubWant = max(0.14 * inch, s.rib * 0.9) + toolRad;
+    // How far the finished bump stands proud is prot - toolRad, and that is
+    // the only part of this a cutter does not already decide: nothing under a
+    // cutter radius of drawn sagitta survives the grow-back at all.
+    //
+    // It was 0.35 of the rib, which put a 0.0875 in bump on each side of a
+    // 0.25 in rib and swelled it to 0.425 wherever a nub sat. Two bumps a side
+    // that big, on every rib, is not a rib with a bump on it: it is a rib that
+    // changes width, and the whole plate reads as a wave. A fifth of the rib
+    // is plenty for a tie to catch on and reads as the lobe it is meant to be.
+    const prot = max(0.045 * inch, s.rib * 0.20) + toolRad;
+    // An arc whose sagitta is more than half its chord is a MAJOR arc:
+    // more than a half circle, and its own circle bulges sideways past
+    // both ends of the chord it stands on. Offsetting a face like that
+    // outward is what scalloped the finished bump into a saw tooth.
+    // Adding the cutter radius to both terms is what pushed it over: at
+    // the shipped defaults the chord was 0.350 in and the sagitta 0.2125,
+    // against a limit of half the chord. Holding the chord at 2.4 times
+    // the protrusion keeps every nub a minor arc, and a wider, shallower
+    // lobe is what a cable tie sits against anyway.
+    const nubLen = max(nubWant, 2.4 * prot);
+    // Whether a nub survives the pass at the end of this function, which grows
+    // every pocket face outward by the cutter radius.
+    //
+    // The bite a nub actually takes out of the pocket is only the part of its
+    // arc standing inside the pocket wall, and the wall is drawn a cutter
+    // radius proud of the finished rib edge. Growing the pocket back erodes
+    // that bite by the cutter radius from every side, so what is left is a
+    // bump of height prot - toolRad, which is exactly the protrusion asked
+    // for. That is a good bump. It is only lost when the bite closes up
+    // entirely, which happens when the arc's own radius is under the cutter
+    // radius.
+    //
+    // The height holds because the arc is anchored on the FINISHED rib edge
+    // at s.rib / 2 rather than on the drawn pocket wall a cutter radius
+    // outside it, so the apex and the rib edge are eroded by the same
+    // amount and their difference survives. Anchoring it on the drawn wall
+    // instead would double the toolRad and leave a bump 2.25 times the one
+    // asked for at the shipped defaults.
+    //
+    // The base does NOT come out at the chord asked for, and which way it
+    // errs depends on the cutter: measured on offset geometry, a 0.25 in rib
+    // asks 0.225 wide by 0.050 proud and finishes 0.222 by 0.050 with an
+    // eighth inch mill and 0.274 by 0.050 with a quarter inch one. The
+    // height is the number the tie cares about and it is exact in both.
+    //
+    // What used to stand here predicted the surviving footprint by shrinking
+    // the arc's radius and keeping its center, which is what happens to an arc
+    // that lies wholly inside the pocket, not to one whose ends are buried in
+    // the rib. It read the 0.25 in rib and 0.125 in end mill case as a 0.041 in
+    // half footprint against a 0.0625 in floor and skipped the nubs, and since
+    // those are the shipped defaults no nub was ever cut. Offsetting the draw
+    // and the grow-back puts the real bump at 0.222 in by 0.050 in against
+    // the 0.225 by 0.050 asked for. The 0.294 by 0.087 this note used to
+    // quote was measured before the protrusion went from 0.35 of the rib to
+    // 0.20 of it, and the 0.0875 in it compared against was the old figure.
+    const nubArcR = ((nubLen / 2) * (nubLen / 2) + prot * prot) / (2 * prot);
+    // Where the drawn arc crosses the drawn pocket wall, a cutter radius
+    // proud of the finished rib edge. That chord is the bite the nub takes
+    // out of the pocket, and the finished bump is that bite eroded.
+    const nubBack = nubArcR - prot + toolRad;
+    const nubBite = 2 * sqrt(max(0 * inch * inch,
+                nubArcR * nubArcR - nubBack * nubBack));
+    const nubsFit = nubArcR > toolRad + 0.01 * inch;
+    var tieStations = 0;
+    if (definition.cableTieNubs && size(ribSpans) > 0 && !nubsFit)
+        note = note ~ " NOTE Tie nubs skipped, a " ~ frcInches(s.rib)
+            ~ " rib is too thin to carry one.";
+    if (definition.cableTieNubs && size(ribSpans) > 0 && nubsFit)
+    {
+        const tieW = frcTieWidth(definition.tieSize);
+        const channel = tieW + 0.020 * inch;
+        const probe = s.rib / 2 + prot + 0.03 * inch;
+        const half = channel / 2 + nubLen;
+        // Whether the pair of bumps and the channel between them physically
+        // fit on the rib at all. Necessary, and nowhere near sufficient.
+        const nubFit = max(2 * half + 0.25 * inch, 1.2 * inch);
+        // The bar a rib has to clear to be worth a tie in the first place.
+        //
+        // The fit test on its own is a bar the whole plate walks over. Rib
+        // runs on a truss sit around the mesh's own target edge, which on
+        // 0.190 in 6061 is 2.9 in against a fit bar of 1.3 in, so every rib
+        // qualified and the plate came out serrated: 90 nubs on a 15 by 20 in
+        // plate, one for every three square inches, and a nub is a PAIR of
+        // bumps drawn on both edges of the rib. That reads as texture down the
+        // whole lattice rather than as somewhere to put a cable tie.
+        //
+        // The bar that works is a length measured against the mesh rather than
+        // against the cutter. A rib worth a tie is one that runs further than
+        // the triangle the pocket size asked for, which makes it a member
+        // reaching across the lattice rather than an incidental short chord.
+        // That triangle side is the same 2 (pocket + rib) / sqrt(3) the truss
+        // sizes itself by. The 1.15 was measured rather than chosen: over five
+        // plates from 30 to 300 square inches, three presets and four
+        // thicknesses, it leaves no case denser than one nub per 15 square
+        // inches where the fit bar alone put 23 of those 60 cases there, and
+        // it lands the two 300 square inch reference plates at one nub per 30
+        // and one per 25 square inches at the default preset.
+        //
+        // Two rules that were asked for were measured and are not here.
+        // Preferring a rib that runs BETWEEN TWO BOSSES is the most physical
+        // of them and it is unusable: a boss holds every other node a ring
+        // radius plus half a target edge away, so two bosses are almost never
+        // Delaunay neighbours. Counted on the reference plates there were 0, 0
+        // and 2 boss to boss ribs out of 118 to 202 ribs. Requiring only that a
+        // rib TOUCH a boss thins nothing either; on thick stock it still left
+        // one nub every six square inches.
+        //
+        // Only the truss carries this bar. On a regular lattice every interior
+        // run is the same length by construction, so no bar on length can thin
+        // one: it passes all of them or none. And the ties that hold a boss
+        // ring on a single pocket or a cell pattern are few, and every one of
+        // them has earned its nub. Both keep the fit bar they have always had.
+        const uEdgeNub = 2 * (pocketUsed + s.rib) / sqrt(3);
+        const minSpan = (definition.pattern == FRCLightenPattern.TRUSS)
+            ? max(nubFit, 1.15 * uEdgeNub) : nubFit;
+        // Every rib that clears the bar gets one, at its middle. There is no
+        // cap and no spacing rule between ribs: a rib either clears the bar
+        // and stands clear of the junctions and bosses at its ends, or it does
+        // not, and that is the whole of the test. The checks below are all
+        // about whether this rib can hold one, never about how many are
+        // already placed.
+        const skn = newSketchOnPlane(context, id + "nubsk", { "sketchPlane" : skPlane });
+        var made = 0;
+        for (var si = 0; si < size(ribSpans); si += 1)
+        {
+            const st = ribSpans[si][0];
+            const u = ribSpans[si][1];
+            const L = ribSpans[si][2];
+            if (L < minSpan)
+                continue;
+            const v = vector(-u[1], u[0]);
+            const p = st + u * (L / 2);
+            var nearBoss = false;
+            for (var isl in islands)
+            {
+                if (norm(p - isl.center) < isl.r + half + 0.12 * inch)
+                {
+                    nearBoss = true;
+                    break;
+                }
+            }
+            if (nearBoss)
+                continue;
+            var ok = true;
+            for (var along in [-half - 0.05 * inch, -half / 2, 0 * inch, half / 2, half + 0.05 * inch])
+            {
+                const q = p + u * along;
+                for (var pr in [probe, probe * 1.7])
+                {
+                    if (size(evaluateQuery(context, qContainsPoint(tool,
+                                    frcToPoint(cSys, q + v * pr, depth / 2)))) == 0
+                        || size(evaluateQuery(context, qContainsPoint(tool,
+                                    frcToPoint(cSys, q - v * pr, depth / 2)))) == 0)
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok)
+                    break;
+            }
+            if (!ok)
+                continue;
+            // Rounded bump: an arc that rises off the rib face and comes back
+            // down, so the nub holds the tie without a sharp point.
+            for (var sgn in [-1, 1])
+            {
+                // The drawn arc is wider than the bump that survives the
+                // grow-back, and the survivor is centred on the apex, not
+                // on the drawn chord start. Anchoring the drawn start at
+                // channel / 2 therefore opened the finished channel by the
+                // difference. nubBite is the part of the arc standing
+                // inside the drawn pocket wall, which is what the bump is
+                // eroded down from, and it lands the channel within about
+                // 0.03 in of the width asked for instead of 0.07 in over.
+                const base = p + u * (sgn * (channel / 2 + (nubBite - nubLen) / 2));
+                for (var side in [-1, 1])
+                {
+                    const t0 = base + v * (side * s.rib / 2);
+                    const t2 = base + u * (sgn * nubLen) + v * (side * s.rib / 2);
+                    const tm = base + u * (sgn * nubLen / 2) + v * (side * (s.rib / 2 + prot));
+                    skArc(skn, "n" ~ si ~ "_" ~ sgn ~ "_" ~ side,
+                        { "start" : t0, "mid" : tm, "end" : t2 });
+                    skLineSegment(skn, "nc" ~ si ~ "_" ~ sgn ~ "_" ~ side,
+                        { "start" : t2, "end" : t0 });
+                    made += 1;
+                }
+            }
+            tieStations += 1;
+        }
+        // Asked for, fits the rib, and still nowhere to put one.
+        if (tieStations == 0)
+            note = note ~ " NOTE Tie nubs skipped, no rib run reaches "
+                ~ frcInches(minSpan) ~ " clear of a junction, boss or pocket edge.";
+        skSolve(skn);
+        if (made > 0)
+        {
+            opExtrude(context, id + "nub", { "entities" : qSketchRegion(id + "nubsk", false),
+                        "direction" : -pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : overshoot });
+            try silent
+            {
+                opBoolean(context, id + "nubsub", { "tools" : qCreatedBy(id + "nub", EntityType.BODY),
+                            "targets" : tool, "operationType" : BooleanOperationType.SUBTRACTION });
+            }
+        }
+    }
+
+    // Every pattern draws its pockets undersize by the end mill radius and
+    // opens them back out below, so a pocket measured here is smaller than
+    // the one the part ends up with. The truss sizes its triangles against
+    // the finished pocket and clears this test on the drawn one as well, so
+    // its threshold is set to catch only scrap the boolean made; the other
+    // patterns keep the number they have always used.
+    const slvArea = (definition.pattern == FRCLightenPattern.TRUSS)
+        ? (0.6 * s.rib) * (0.6 * s.rib) : (2.0 * s.rib) * (2.0 * s.rib);
+    // The width the pocket has to reach, measured on the drawn pocket, so a
+    // threshold on the finished one has to come back by the cutter diameter
+    // the reopen adds. On a CNC the end mill radius is exactly half the tool
+    // diameter, so "one tool wide when finished" came back to exactly zero and
+    // the width test rejected nothing at all. That is what let a boss ring
+    // leave a crescent a few thousandths wide beside a lattice cell. Half the
+    // cutter radius on the drawn pocket is one and a quarter tool diameters on
+    // the finished one, which is the narrowest slot worth cutting. Processes
+    // whose corner radius is not half the tool keep the number they had.
+    const slvW = max(max(0.02 * inch, 0.5 * toolRad),
+        effTool - 2 * toolRad);
+    frcDropSlivers(context, id + "sliver", tool, pl.normal, slvW, slvArea);
+    if (size(evaluateQuery(context, tool)) == 0)
+        throw regenError("Every pocket was too small to machine. Try bigger pockets or a thinner wall.", sizeParam, face0);
+
+    if (definition.roundCorners && toolRad > 0 * inch)
+    {
+        // The caps must not move: offsetting them would change the pocket
+        // depth rather than its corners.
+        var caps = [];
+        for (var f in evaluateQuery(context, qOwnedByBody(tool, EntityType.FACE)))
+        {
+            try silent
+            {
+                if (abs(dot(evPlane(context, { "face" : f }).normal, pl.normal)) > 0.999)
+                    caps = append(caps, f);
+            }
+        }
+        frcExpandWithFillet(context, id + "exp", tool, qUnion(caps), toolRad);
+    }
+
+    // The move goes on before the subtraction, not after it. A subtraction
+    // consumes the cutters, so a transform at the end of the feature would find
+    // none of this feature's own bodies left to move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    opBoolean(context, id + "cut", { "tools" : tool, "targets" : cutTarget,
+                "operationType" : BooleanOperationType.SUBTRACTION });
+
+    // Round the outside edges last, on the finished part, so the pick and the
+    // pockets never see the outline change under them. If the full radius does
+    // not fit the outline, half of it is tried, and a corner that takes neither
+    // is counted rather than dropped in silence: a corner left sharp is one the
+    // end mill named in this feature cannot cut, and a team that does not hear
+    // about it here finds out at the router.
+    var sharpCorners = 0;
+    if (definition.filletOutsideEdges)
+    {
+        const pg2 = frcSideWallGroups(context, bodyStable, pl.normal);
+        const pc2 = frcClassifyBoundaries(context, pg2, cSys);
+        const ve2 = evaluateQuery(context, frcVerticalEdgesOf(context, pc2.outer, pl.normal));
+        // A failed fillet burns its id, so every attempt gets its own id, and
+        // each corner falls back to half the radius on its own.
+        var attempt = 0;
+        var allDone = false;
+        if (size(ve2) > 0)
+        {
+            try silent
+            {
+                opFillet(context, id + "efA", { "entities" : qUnion(ve2),
+                            "radius" : definition.edgeFilletRadius });
+                allDone = true;
+            }
+        }
+        if (!allDone)
+        {
+            for (var e in ve2)
+            {
+                var done = false;
+                for (var rr in [definition.edgeFilletRadius, definition.edgeFilletRadius / 2])
+                {
+                    if (done)
+                        continue;
+                    try silent
+                    {
+                        opFillet(context, id + ("ef" ~ attempt), { "entities" : e, "radius" : rr });
+                        done = true;
+                    }
+                    attempt += 1;
+                }
+                // Neither the full radius nor half of it fitted this corner, so
+                // it stays sharp. The count goes back to the caller.
+                if (!done)
+                    sharpCorners += 1;
+            }
+        }
+    }
+
+    // Onshape renders the info panel as one flowing paragraph and throws the
+    // newlines away, so every fact here is closed with a full stop instead. A
+    // line that leaned on a newline to separate two of them ran them together
+    // on the part the owner photographed.
+    //
+    // The hole count is here because it is the one number that says whether
+    // the feature saw the same part the reader is looking at. A real plate
+    // reported sixteen small regions left solid where a model of this same
+    // code predicted seven, and the count of holes the mesh actually hung on
+    // settles that in one regeneration.
+    var msg = detail ~ ", " ~ size(islands) ~ " hole" ~ (size(islands) == 1 ? "" : "s");
+    if (mergedBosses > 0)
+        msg = msg ~ ", " ~ mergedBosses ~ " merged";
+    msg = msg ~ ". Wall " ~ frcInches(s.wall) ~ ", rib " ~ frcInches(s.rib);
+    if (definition.pattern != FRCLightenPattern.TRUSS)
+        msg = msg ~ ", pocket " ~ frcInches(pocketUsed);
+    msg = msg ~ ".";
+    if (tieStations > 0)
+        msg = msg ~ " " ~ tieStations ~ " tie nubs.";
+    return { "text" : msg ~ note, "ribs" : ribCount, "sharpCorners" : sharpCorners };
+}
+
+export function frcLightenBuild(context is Context, id is Id, definition is map)
+{
+    const faces = evaluateQuery(context, definition.faces);
+    if (size(faces) == 0)
+        throw regenError("Select at least one flat face to lighten.", ["faces"]);
+
+    // Transient body queries survive modeling operations; tracking queries
+    // resolve to nothing here, which silently reported "100% removed".
+    var bodies = evaluateQuery(context, qOwnerBody(qUnion(faces)));
+    if (definition.multipleBodies == true && definition.otherBodies is Query)
+    {
+        // Weighing has to cover every body the cut can reach, or the percentage
+        // removed is measured against the wrong part. Evaluating the union
+        // again drops any body that was both picked and owned by a face.
+        bodies = evaluateQuery(context, qUnion([qUnion(bodies), definition.otherBodies]));
+    }
+    const volBefore = evVolume(context, { "entities" : qUnion(bodies) });
+    const solidsBefore = size(evaluateQuery(context, qAllModifiableSolidBodies()));
+
+    var summary = [];
+    var ribTotal = 0;
+    var sharpTotal = 0;
+    for (var i = 0; i < size(faces); i += 1)
+    {
+        if (size(evaluateQuery(context, faces[i])) == 0)
+            continue;
+        const one = frcLightenOneFace(context, id + ("f" ~ i), faces[i], definition);
+        summary = append(summary, one.text);
+        ribTotal += one.ribs;
+        sharpTotal += one.sharpCorners;
+    }
+    // Published back to the dialog so the feature can name itself by how many
+    // ribs it actually drew.
+    setFeatureComputedParameter(context, id, { "name" : "ribs", "value" : ribTotal });
+
+    // The part takes the material it was lightened as, in the color of the
+    // class the dialog says it is. Lighten runs on tube and gusset as often
+    // as on plate, so the class is asked for rather than assumed.
+    try silent
+    {
+        frcApplyPart(context, qUnion(bodies), definition.material, definition.partClass);
+    }
+
+    const volAfter = evVolume(context, { "entities" : qUnion(bodies) });
+    const solidsAfter = size(evaluateQuery(context, qAllModifiableSolidBodies()));
+    const rho = frcDensity(definition.material);
+    const massBefore = volBefore * rho;
+    const massAfter = volAfter * rho;
+    const saved = massBefore - massAfter;
+    const pct = (volBefore > 0 * meter ^ 3) ? roundToPrecision(100 * saved / massBefore, 1) : 0;
+
+    // The mass removed and the share of the part it was is the answer the
+    // reader came for, so it goes first, and in pounds, the unit the rules are
+    // written in.
+    var lines = "Lighten removed " ~ frcPounds(saved) ~ " of " ~ frcPounds(massBefore)
+        ~ ", " ~ pct ~ "%, leaving " ~ frcPounds(massAfter) ~ ".";
+    for (var sLine in summary)
+        lines ~= " " ~ sLine;
+    if (solidsAfter > solidsBefore)
+        lines ~= " NOTE The part came apart. Use a smaller pocket or a thicker wall.";
+    if (sharpTotal > 0)
+        lines ~= " NOTE " ~ sharpTotal ~ " corner" ~ (sharpTotal == 1 ? " was" : "s were")
+            ~ " left sharp. Reduce the edge radius.";
+
+    const through = definition.depthMode == FRCLightenDepth.THROUGH
+        || (definition.depthMode == FRCLightenDepth.AUTO
+            && !(definition.loading == FRCLoading.ACROSS_FACE && frcCanPocketBlind(definition.process)));
+    if (through && definition.loading == FRCLoading.ACROSS_FACE)
+        lines ~= " NOTE This bends across its face, where a floor keeps half the"
+            ~ " solid stiffness and a through cut a third. Leave a floor.";
+    lines ~= " Sizes are heuristics, not FEA. Verify load-critical parts.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################# HOLE #################################
+
+export enum FRCHoleMode
+{
+    annotation { "Name" : "Resize existing holes" } RESIZE,
+    annotation { "Name" : "New holes at points" }   NEW
+}
+
+export function frcNominalBore(definition is map) returns ValueWithUnits
+{
+    if (definition.boreType == FRCBoreType.BEARING)
+        return frcBearingOD(definition.bearingOD);
+    else if (definition.boreType == FRCBoreType.SHAFT)
+        return frcShaftDia(definition.shaftSize);
+    else if (definition.boreType == FRCBoreType.FASTENER)
+        return frcHoleDiameter(definition.fastenerSize);
+    return definition.customDiameter;
+}
+
+export function frcHoleBuild(context is Context, id is Id, definition is map)
+{
+    const nominal = frcNominalBore(definition);
+    const allowance = (definition.boreType == FRCBoreType.FASTENER) ? 0 * inch :
+        frcFitAllowance(definition.fit, definition.process, definition.printerComp);
+    const finalDia = nominal + allowance;
+    if (finalDia < 1e-5 * meter)
+        throw regenError("That fit leaves the hole at zero diameter or less. Increase the nominal diameter, or choose a looser fit.", ["customDiameter"]);
+
+    var actedOn = 0;
+    // Resizing runs both ways. A bore already larger than the target is
+    // driven SMALLER, which adds material rather than removing it, and a
+    // single count cannot say that happened.
+    var shrunk = 0;
+    if (definition.mode == FRCHoleMode.RESIZE)
+    {
+        const faces = evaluateQuery(context, definition.holeFaces);
+        if (size(faces) == 0)
+            throw regenError("Select the round faces of the holes you want resized.", ["holeFaces"]);
+        for (var i = 0; i < size(faces); i += 1)
+        {
+            var r = -1 * meter;
+            try silent
+            {
+                r = evSurfaceDefinition(context, { "face" : faces[i] }).radius;
+            }
+            if (r < 0 * meter)
+                continue;
+            const delta = finalDia / 2 - r;
+            if (abs(delta) < 1e-7 * meter)
+            {
+                actedOn += 1;
+                continue;
+            }
+            // A negative offset on a hole's wall grows the hole.
+            try
+            {
+                opOffsetFace(context, id + ("rs" ~ i), { "moveFaces" : faces[i],
+                            "offsetDistance" : -delta });
+                actedOn += 1;
+                if (delta < 0 * meter)
+                    shrunk += 1;
+            }
+            catch
+            {
+                throw regenError("Could not resize one of the holes to " ~ frcInches(finalDia)
+                    ~ ". It may be too close to an edge or another hole.", ["holeFaces"], faces[i]);
+            }
+        }
+    }
+    else
+    {
+        const tf = evaluateQuery(context, definition.targetFace);
+        if (size(tf) == 0)
+            throw regenError("Select the flat face you want to drill into.", ["targetFace"]);
+        const pts = evaluateQuery(context, definition.locations);
+        if (size(pts) == 0)
+            throw regenError("Select one or more points to place holes at.", ["locations"]);
+
+        // Pattern and mirror support, for the new-holes branch only. Resizing an
+        // existing hole creates nothing, so a pattern of that branch has nothing
+        // of its own to move. The picked face is what anchors new holes in
+        // space, so it is the reference the pattern transform is measured
+        // against.
+        const remainderTransform = getRemainderPatternTransform(context,
+            { "references" : definition.targetFace });
+
+        const pl = evPlane(context, { "face" : tf[0] });
+        const cSys = frcFaceCSys(pl);
+        const yAxis = cross(cSys.zAxis, cSys.xAxis);
+        const bodyQ = qOwnerBody(tf[0]);
+        const thickness = frcMaterialDepth(context, bodyQ, cSys);
+        const cutDepth = definition.throughAll ? thickness + 0.1 * inch : definition.holeDepth;
+        const sk = newSketchOnPlane(context, id + "hsk",
+            { "sketchPlane" : plane(pl.origin + pl.normal * (0.02 * inch), pl.normal, pl.x) });
+        for (var i = 0; i < size(pts); i += 1)
+        {
+            var p3 = vector(0, 0, 0) * inch;
+            var got = false;
+            try silent
+            {
+                p3 = evVertexPoint(context, { "vertex" : pts[i] });
+                got = true;
+            }
+            if (!got)
+                continue;
+            const rel = p3 - cSys.origin;
+            skCircle(sk, "h" ~ i, { "center" : vector(dot(rel, cSys.xAxis), dot(rel, yAxis)),
+                        "radius" : finalDia / 2 });
+            actedOn += 1;
+        }
+        skSolve(sk);
+        if (actedOn == 0)
+            throw regenError("None of those points could be read. Pick vertices or sketch points.", ["locations"], definition.locations);
+        opExtrude(context, id + "hcut", { "entities" : qSketchRegion(id + "hsk", false),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : cutDepth + 0.02 * inch });
+
+        // The move goes on before the subtraction, not after it. A subtraction
+        // consumes the drills, so a transform at the end of the feature would
+        // find none of this feature's own bodies left to move.
+        transformResultIfNecessary(context, id, remainderTransform);
+
+        opBoolean(context, id + "hsub", { "tools" : qCreatedBy(id + "hcut", EntityType.BODY),
+                    "targets" : bodyQ, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+
+    // The size actually cut, and how many of them, is what the reader checks
+    // against the drill they are about to pick up. The nominal size came off
+    // the dialog and is only here to say what the allowance was measured from.
+    var lines = ((definition.mode == FRCHoleMode.RESIZE)
+            ? "Hole resized " : "Hole cut ")
+        ~ actedOn ~ " hole" ~ (actedOn == 1 ? "" : "s")
+        ~ " at " ~ frcInches(finalDia);
+    if (definition.boreType == FRCBoreType.FASTENER)
+        lines ~= ", a fastener clearance or tap size.";
+    else
+        lines ~= ", " ~ frcThou(allowance) ~ " on " ~ frcInches(nominal) ~ " nominal.";
+    if (definition.boreType != FRCBoreType.FASTENER)
+    {
+        if (definition.process == FRCProcess.WATERJET && definition.fit == FRCFitClass.PRESS)
+            lines ~= " NOTE Cut undersize, because a jet holds no press fit. Ream it.";
+        else if (definition.process == FRCProcess.MANUAL && definition.fit == FRCFitClass.PRESS)
+            lines ~= " NOTE Drills cut oversize and wander. Ream to size.";
+        else if (definition.process == FRCProcess.PRINTED)
+            lines ~= " NOTE Printed holes shrink, so " ~ frcThou(definition.printerComp)
+                ~ " was added. Calibrate.";
+    }
+    if (shrunk > 0)
+        lines ~= " NOTE " ~ shrunk ~ " of them were driven smaller, which adds"
+            ~ " material rather than removing it.";
+    lines ~= " Fits are allowances. Test one piece before a full set.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################# TUBE #################################
+
+export enum FRCTubeSpline
+{
+    annotation { "Name" : "MAXSpline (REV)" } MAXSPLINE,
+    annotation { "Name" : "SplineXL (WCP)" }  SPLINEXL
+}
+
+/** Named by vendor, with the hole diameter that vendor punches beside it. */
+export enum FRCTubeStandard
+{
+    annotation { "Name" : "WCP or AndyMark 0.196 in" }  WCP_AM,
+    annotation { "Name" : "REV MAXTube 0.200 in" }      REV,
+    annotation { "Name" : "The Thrifty Bot 0.197 in" }  TTB,
+    annotation { "Name" : "Custom" }                    CUSTOM
+}
+
+/**
+ * Stock hole patterns, from the vendor drawings. Every FRC tube vendor lands
+ * on the same 0.500 in grid with the first hole 0.500 in from the end and
+ * three rows at 0.500 in across a 2 in face; only the drill size differs.
+ */
+export function frcTubeStandardData(t is FRCTubeStandard) returns map
+{
+    return {
+            FRCTubeStandard.WCP_AM : { "hole" : 0.196 * inch, "pitch" : 0.500 * inch,
+                                       "rowPitch" : 0.500 * inch, "start" : 0.500 * inch },
+            FRCTubeStandard.REV : { "hole" : 0.200 * inch, "pitch" : 0.500 * inch,
+                                    "rowPitch" : 0.500 * inch, "start" : 0.500 * inch },
+            FRCTubeStandard.TTB : { "hole" : 0.197 * inch, "pitch" : 0.500 * inch,
+                                    "rowPitch" : 0.500 * inch, "start" : 0.500 * inch },
+            FRCTubeStandard.CUSTOM : { "hole" : 0.196 * inch, "pitch" : 0.500 * inch,
+                                       "rowPitch" : 0.500 * inch, "start" : 0.500 * inch }
+        }[t];
+}
+
+export enum FRCTubeFaces
+{
+    annotation { "Name" : "All four sides" }         ALL,
+    annotation { "Name" : "Wide sides only" }        WIDE,
+    annotation { "Name" : "Narrow sides only" }      NARROW,
+    annotation { "Name" : "No holes (hollow only)" } NONE
+}
+
+export enum FRCTubeRows
+{
+    annotation { "Name" : "Automatic (from spacing)" } AUTO,
+    annotation { "Name" : "One row, centered" }        ONE,
+    annotation { "Name" : "Two rows" }                 TWO,
+    annotation { "Name" : "Three rows" }               THREE
+}
+
+export function frcTubeBuild(context is Context, id is Id, definition is map)
+{
+    const bodies = evaluateQuery(context, definition.bodies);
+    if (size(bodies) == 0)
+        throw regenError("Select the solid extrusions you want turned into tube.", ["bodies"]);
+
+    // No pattern transform here, unlike every other builder on this tab. This
+    // feature makes no body of its own: it shells and punches the bodies that
+    // were picked, and the cutters it does make are consumed inside the loop
+    // below, so a pattern would find nothing of this feature's to move. Pattern
+    // the feature that drew the extrusion together with this one instead.
+
+    const volBefore = evVolume(context, { "entities" : qUnion(bodies) });
+    var totalHoles = 0;
+    var totalSplines = 0;
+    var converted = 0;
+    var anyAngled = false;
+    // The section and length note is printed beside a count of every tube this
+    // feature made, so it has to be true of all of them and not only of the
+    // first one. Tracking both ends of each range is what lets it say so, and
+    // both cross dimensions are tracked, because a 2 by 1 tube and a 1 by 1 tube
+    // agree on the small one and differ only on the large one: on the small one
+    // alone they read as a single agreed section.
+    var secMin = 0 * inch;
+    var secMax = 0 * inch;
+    var bigMin = 0 * inch;
+    var bigMax = 0 * inch;
+    var lenMin = 0 * inch;
+    var lenMax = 0 * inch;
+
+    for (var bi = 0; bi < size(bodies); bi += 1)
+    {
+        const body = bodies[bi];
+        const bid = id + ("b" ~ bi);
+
+        // The long axis is the longest side of the bounding box, so any stock
+        // size works: 0.5 x 0.5 up to 2 x 2 and beyond.
+        const bx = evBox3d(context, { "topology" : body });
+        const dims = [bx.maxCorner[0] - bx.minCorner[0], bx.maxCorner[1] - bx.minCorner[1],
+                      bx.maxCorner[2] - bx.minCorner[2]];
+        var axis = 0;
+        for (var i = 1; i < 3; i += 1)
+        {
+            if (dims[i] > dims[axis])
+                axis = i;
+        }
+        const axisVec = [vector(1, 0, 0), vector(0, 1, 0), vector(0, 0, 1)][axis];
+        const L = dims[axis];
+        var crossMin = 1e6 * inch;
+        var crossMax = 0 * inch;
+        for (var i = 0; i < 3; i += 1)
+        {
+            if (i != axis && dims[i] < crossMin)
+                crossMin = dims[i];
+            if (i != axis && dims[i] > crossMax)
+                crossMax = dims[i];
+        }
+        if (definition.wallThickness * 2 >= crossMin)
+            throw regenError("A " ~ frcInches(definition.wallThickness)
+                ~ " wall does not fit in a " ~ frcInches(crossMin) ~ " section. Use a thinner wall.", ["wallThickness"], body);
+        if (bi == 0 || crossMin < secMin)
+            secMin = crossMin;
+        if (bi == 0 || crossMin > secMax)
+            secMax = crossMin;
+        if (bi == 0 || crossMax < bigMin)
+            bigMin = crossMax;
+        if (bi == 0 || crossMax > bigMax)
+            bigMax = crossMax;
+        if (bi == 0 || L < lenMin)
+            lenMin = L;
+        if (bi == 0 || L > lenMax)
+            lenMax = L;
+
+        var caps = [];
+        var sides = [];
+        var angled = false;
+        for (var f in evaluateQuery(context, qOwnedByBody(body, EntityType.FACE)))
+        {
+            try silent
+            {
+                const p = evPlane(context, { "face" : f });
+                // The ends are whatever is not parallel to the long axis, not
+                // only what is square to it. A member mitered or butted by FRC
+                // Frame has ends cut on an angle, and they still shell fine.
+                const along = abs(dot(p.normal, axisVec));
+                if (along > 0.01)
+                {
+                    caps = append(caps, f);
+                    if (along < 0.999)
+                        angled = true;
+                }
+                else
+                    sides = append(sides, [f, p.normal, p.origin]);
+            }
+        }
+        if (size(caps) != 2 || size(sides) < 3)
+            throw regenError("That body is not a straight rectangular extrusion. Pick a rectangular solid, or one whose ends have been trimmed or mitered.", ["bodies"], body);
+        if (angled)
+            anyAngled = true;
+
+        try
+        {
+            opShell(context, bid + "shell", { "entities" : qUnion(caps),
+                        "thickness" : -definition.wallThickness });
+        }
+        catch
+        {
+            throw regenError("A " ~ frcInches(definition.wallThickness)
+                ~ " wall does not fit in that tube. Use a thinner wall.", ["wallThickness"], body);
+        }
+        converted += 1;
+
+        // The size note below can only report agreement or "mixed", so the
+        // numbers that belong to one tube go on that tube. Named for the stock
+        // it comes out of and the length it is cut to, stock first so one
+        // stock groups together, larger section dimension first the way stock
+        // is listed, and the length padded to two digits so a group runs short
+        // to long in an alphabetical parts list.
+        const cutLen = roundToPrecision(L / inch, 4);
+        try silent
+        {
+            setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                        "value" : "Tube " ~ roundToPrecision(crossMax / inch, 4) ~ "x"
+                        ~ roundToPrecision(crossMin / inch, 4) ~ "x"
+                        ~ roundToPrecision(definition.wallThickness / inch, 4)
+                        ~ " - " ~ ((cutLen < 10) ? "0" : "") ~ cutLen ~ " in" });
+        }
+
+        // Round the four outer long edges, as real punched tube stock is.
+        var tubeEdges = [];
+        const bcen = (bx.minCorner + bx.maxCorner) / 2;
+        for (var e in evaluateQuery(context, qGeometry(qOwnedByBody(body, EntityType.EDGE), GeometryType.LINE)))
+        {
+            try silent
+            {
+                const ln = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5 });
+                if (abs(dot(ln.direction, axisVec)) > 0.999)
+                {
+                    const rel = ln.origin - bcen;
+                    var outer = true;
+                    for (var i = 0; i < 3; i += 1)
+                    {
+                        if (i != axis && abs(rel[i]) < dims[i] / 2 - 0.01 * inch)
+                            outer = false;
+                    }
+                    if (outer)
+                        tubeEdges = append(tubeEdges, e);
+                }
+            }
+        }
+        if (size(tubeEdges) > 0)
+        {
+            try silent
+            {
+                opFillet(context, bid + "rnd", { "entities" : qUnion(tubeEdges), "radius" : 0.062 * inch });
+            }
+        }
+
+        if (definition.faceChoice == FRCTubeFaces.NONE)
+            continue;
+
+        // Pair opposite faces: cutting through one of a pair punches both
+        // walls, which is how real punched tube is made.
+        var used = makeArray(size(sides), false);
+        var pairs = [];
+        for (var i = 0; i < size(sides); i += 1)
+        {
+            if (used[i])
+                continue;
+            for (var j = i + 1; j < size(sides); j += 1)
+            {
+                if (used[j])
+                    continue;
+                if (dot(sides[i][1], sides[j][1]) < -0.999)
+                {
+                    used[i] = true;
+                    used[j] = true;
+                    pairs = append(pairs, sides[i]);
+                    break;
+                }
+            }
+        }
+
+        var widths = [];
+        for (var pi = 0; pi < size(pairs); pi += 1)
+        {
+            const pl0 = evPlane(context, { "face" : pairs[pi][0] });
+            const fb = evBox3d(context, { "topology" : pairs[pi][0],
+                        "cSys" : coordSystem(pl0.origin, axisVec, pl0.normal) });
+            widths = append(widths, fb.maxCorner[1] - fb.minCorner[1]);
+        }
+        var widest = 0;
+        for (var i = 1; i < size(widths); i += 1)
+        {
+            if (widths[i] > widths[widest])
+                widest = i;
+        }
+
+        const std = frcTubeStandardData(definition.standard);
+        const isCustom = definition.standard == FRCTubeStandard.CUSTOM;
+        const holeD = isCustom ? frcHoleDiameter(definition.holeSize) : std.hole;
+        const pitchL = isCustom ? definition.lengthPitch : std.pitch;
+        const pitchR = isCustom ? definition.rowPitch : std.rowPitch;
+        const startL = isCustom ? definition.holeStart : std.start;
+
+        for (var pi = 0; pi < size(pairs); pi += 1)
+        {
+            if (definition.faceChoice == FRCTubeFaces.WIDE && pi != widest)
+                continue;
+            if (definition.faceChoice == FRCTubeFaces.NARROW && pi == widest)
+                continue;
+
+            const nrm = pairs[pi][1];
+            const pl0 = evPlane(context, { "face" : pairs[pi][0] });
+            const fb = evBox3d(context, { "topology" : pairs[pi][0],
+                        "cSys" : coordSystem(pl0.origin, axisVec, nrm) });
+            const wAcross = fb.maxCorner[1] - fb.minCorner[1];
+            // Vendor tubes carry one fewer row than the face holds half inches:
+            // 2 in is three rows at 0.5, 1.5 in is two, 1 in is one, centered.
+            var nRows = max(1, round(wAcross / pitchR) - 1);
+            if (definition.rowMode == FRCTubeRows.ONE)
+                nRows = 1;
+            else if (definition.rowMode == FRCTubeRows.TWO)
+                nRows = 2;
+            else if (definition.rowMode == FRCTubeRows.THREE)
+                nRows = 3;
+            // Every row must still leave material at the edge of the face.
+            while (nRows > 1 && (nRows - 1) * pitchR + holeD + 0.06 * inch > wAcross)
+                nRows -= 1;
+
+            // Vendors index the first hole a fixed distance from the end.
+            // Centering instead suits a part cut to an arbitrary length: the
+            // leftover is split between the two ends rather than all landing
+            // at the far one.
+            //
+            // Both modes reserve the SAME end margin. Centering used to fit
+            // against L - pitchL, which reserves nothing, so on a 16 in tube at
+            // a 0.5 in pitch it took 32 holes and left the end one 0.25 in from
+            // the end, half the index the indexed branch and the vendor grid
+            // both use. It bought one extra hole by cutting into the end of the
+            // part. Fitting against L - 2 startL and then centring what is left
+            // over keeps the centring and cannot come closer than startL, since
+            // the span is at most L - 2 startL by construction.
+            const nLen = max(1, floor((L - 2 * startL) / pitchL) + 1);
+            const x0 = definition.centerPattern
+                ? fb.minCorner[0] + (L - (nLen - 1) * pitchL) / 2
+                : fb.minCorner[0] + startL;
+            if (nRows * nLen > 3000)
+                throw regenError("That spacing makes too many holes. Increase the spacing.", ["lengthPitch"], pairs[pi][0]);
+
+            const sk = newSketchOnPlane(context, bid + ("sk" ~ pi),
+                { "sketchPlane" : plane(pl0.origin + nrm * (0.05 * inch), nrm, axisVec) });
+            var cnt = 0;
+            const y0 = fb.minCorner[1] + (wAcross - (nRows - 1) * pitchR) / 2;
+            for (var r = 0; r < nRows; r += 1)
+            {
+                const yy = y0 + r * pitchR;
+                for (var q = 0; q < nLen; q += 1)
+                    skCircle(sk, "h" ~ r ~ "_" ~ q,
+                        { "center" : vector(x0 + q * pitchL, yy), "radius" : holeD / 2 });
+                cnt += nLen;
+            }
+
+            // The MAX and Spline patterns put a large spline bore between
+            // every second column of holes on the wide faces.
+            var splines = 0;
+            if (definition.splineBores && pi == widest && nRows >= 2)
+            {
+                const kind = (definition.splineKind == FRCTubeSpline.MAXSPLINE)
+                    ? FRCDriveBore.MAXSPLINE : FRCDriveBore.SPLINEXL;
+                const sd = frcLobedSplineData(kind);
+                const yMid = fb.minCorner[1] + wAcross / 2;
+                if (2 * sd.tip + 0.06 * inch < wAcross)
+                {
+                    var xs = fb.minCorner[0] + definition.splineStart;
+                    var si = 0;
+                    while (xs < fb.maxCorner[0] - definition.splineStart + 1e-6 * inch)
+                    {
+                        if (si >= 120)
+                            throw regenError("That spline spacing puts more than 120 bores on one face. Increase the spline spacing.", ["splinePitch"], pairs[pi][0]);
+                        frcDrawProfile(sk, "sp" ~ si ~ "_",
+                            frcLobedSplineArcs(sd, vector(xs, yMid), 0.0005 * inch));
+                        xs = xs + definition.splinePitch;
+                        si += 1;
+                        splines += 1;
+                    }
+                }
+            }
+            skSolve(sk);
+            opExtrude(context, bid + ("cut" ~ pi), { "entities" : qSketchRegion(bid + ("sk" ~ pi), false),
+                        "direction" : -nrm, "endBound" : BoundingType.BLIND,
+                        "endDepth" : dims[0] + dims[1] + dims[2] });
+            try
+            {
+                opBoolean(context, bid + ("sub" ~ pi), { "tools" : qCreatedBy(bid + ("cut" ~ pi), EntityType.BODY),
+                            "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+            }
+            catch
+            {
+                throw regenError("The hole pattern did not fit on that tube. Try a smaller hole or wider spacing.", ["holeSize"], body);
+            }
+            // Each cut is extruded deep enough to leave through the far wall, so
+            // one sketched circle is two holes in the finished tube. The panel
+            // reports holes a bolt can pass through, not cuts made.
+            totalHoles += 2 * cnt;
+            totalSplines += splines;
+        }
+    }
+
+    // Published back to the dialog so the feature can name itself by how many
+    // tubes it made.
+    setFeatureComputedParameter(context, id, { "name" : "tubes", "value" : converted });
+
+    frcApplyPart(context, qUnion(bodies), definition.material, FRCPartClass.STRUCTURE);
+
+    const volAfter = evVolume(context, { "entities" : qUnion(bodies) });
+    const rho = frcDensity(definition.material);
+    // One number where every tube agrees, a word where they do not, so the note
+    // never claims a size that only one of them has. Both cross dimensions,
+    // larger first, the way stock is listed and the way the part name set on
+    // each body already reads: the small one on its own called a 2 by 1 tube a
+    // 1 in section and never mentioned the 2 in at all.
+    const secText = (secMax - secMin < 0.001 * inch && bigMax - bigMin < 0.001 * inch)
+        ? (roundToPrecision(bigMin / inch, 4) ~ " x " ~ frcInches(secMin) ~ " section")
+        : "mixed sections";
+    const lenText = (lenMax - lenMin < 0.001 * inch)
+        ? (frcInches(lenMin) ~ " long") : "mixed lengths";
+    // The wall came off the dialog, so it is not repeated back. That the hole
+    // count is of holes a bolt passes through rather than of cuts made is not
+    // derivable from anything, so it is said in the same breath as the count.
+    var lines = "Tube made " ~ converted ~ " tube" ~ (converted == 1 ? "" : "s")
+        ~ ", " ~ secText ~ ", " ~ lenText ~ ".";
+    if (totalHoles > 0)
+        lines ~= " " ~ totalHoles ~ " holes, each through both walls.";
+    if (totalSplines > 0)
+        lines ~= " " ~ totalSplines ~ " spline bores.";
+    lines ~= " " ~ frcPounds(volAfter * rho) ~ " finished, "
+        ~ frcPounds((volBefore - volAfter) * rho) ~ " removed, "
+        ~ roundToPrecision(100 * (volBefore - volAfter) / volBefore, 1) ~ "%.";
+    if (anyAngled)
+        lines ~= " NOTE An angled end: center the pattern, do not index.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################ GUSSET ################################
+
+/** Wrap the holes is the convex hull of the bosses. */
+export enum FRCGussetShape
+{
+    annotation { "Name" : "Wrap the holes" }       HULL,
+    annotation { "Name" : "Bosses and arms only" } SKELETON
+}
+
+export function frcGussetBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a plane, flat face, hole, vertex or mate connector to build the gusset on.", ["location"]);
+
+    // Pattern and mirror support. The picked plane, face, hole, vertex or mate
+    // connector is what places the gusset, so it is the reference the pattern
+    // transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+
+    var pts = [];
+    for (var e in evaluateQuery(context, definition.holes))
+    {
+        var p3 = vector(0, 0, 0) * inch;
+        var got = false;
+        try silent
+        {
+            p3 = evVertexPoint(context, { "vertex" : e });
+            got = true;
+        }
+        if (!got)
+        {
+            try silent
+            {
+                const cyl = evSurfaceDefinition(context, { "face" : e });
+                p3 = cyl.coordSystem.origin;
+                got = true;
+            }
+        }
+        if (!got)
+            continue;
+        const rel = p3 - cSys.origin;
+        const p2 = vector(dot(rel, cSys.xAxis), dot(rel, yAxis));
+        var dup = false;
+        for (var q in pts)
+        {
+            if (norm(q - p2) < 0.01 * inch)
+                dup = true;
+        }
+        if (!dup)
+            pts = append(pts, p2);
+    }
+    if (size(pts) < 2)
+        throw regenError("Pick at least two bolt locations on this plane.", ["holes"], definition.holes);
+    if (size(pts) > 60)
+        throw regenError("That is more bolt locations than a gusset needs. Pick fewer.", ["holes"], definition.holes);
+
+    // Published back to the dialog so the feature can name itself by how many
+    // bolt holes it ties together. The parameter is called bolts and not holes
+    // because the dialog already has a holes parameter, and a #holes token
+    // would resolve to that selection instead of to this count.
+    setFeatureComputedParameter(context, id, { "name" : "bolts", "value" : size(pts) });
+
+    const holeD = frcHoleDiameter(definition.holeSize);
+    const bossR = holeD / 2 + definition.bossWall;
+    const skPlane = plane(pl.origin, pl.normal, pl.x);
+
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : skPlane });
+    for (var i = 0; i < size(pts); i += 1)
+        skCircle(sk, "b" ~ i, { "center" : pts[i], "radius" : bossR });
+
+    // Arms that have to stand on their own are collected here and drawn one to a
+    // sketch below. The hull is the exception: its bars are meant to close a
+    // solid plate, so they stay in the boss sketch, where the region they
+    // enclose is exactly what is wanted.
+    var arms = [];
+    if (definition.shape == FRCGussetShape.HULL && size(pts) >= 3)
+    {
+        const hull = frcConvexHull(pts);
+        for (var i = 0; i < size(hull); i += 1)
+        {
+            const a = hull[i];
+            const b = hull[(i + 1) % size(hull)];
+            const L = norm(b - a);
+            if (L < 1e-6 * inch)
+                continue;
+            const u = (b - a) / L;
+            const quad = frcBar(a, u, L, 2 * bossR);
+            skPolyline(sk, "h" ~ i, { "points" : append(quad, quad[0]) });
+        }
+    }
+    else
+    {
+        // Join every pair that the Delaunay triangulation says are neighbors,
+        // which is the shortest set of arms that still ties the holes together.
+        var unitless = [];
+        for (var q in pts)
+            unitless = append(unitless, vector(q[0] / inch, q[1] / inch));
+        var edges = [];
+        if (size(pts) == 2)
+            edges = [[0, 1]];
+        else
+        {
+            for (var t in frcDelaunay(unitless))
+            {
+                for (var pr in [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]])
+                {
+                    const lo = min(pr[0], pr[1]);
+                    const hi = max(pr[0], pr[1]);
+                    var dup = false;
+                    for (var sv in edges)
+                    {
+                        if (sv[0] == lo && sv[1] == hi)
+                            dup = true;
+                    }
+                    if (!dup)
+                        edges = append(edges, [lo, hi]);
+                }
+            }
+        }
+        const armW = (definition.shape == FRCGussetShape.SKELETON)
+            ? definition.armWidth : 2 * bossR;
+        for (var i = 0; i < size(edges); i += 1)
+        {
+            const a = pts[edges[i][0]];
+            const b = pts[edges[i][1]];
+            const L = norm(b - a);
+            if (L < 1e-6 * inch)
+                continue;
+            arms = append(arms, frcBar(a, (b - a) / L, L, armW));
+        }
+    }
+    skSolve(sk);
+    opExtrude(context, id + "ex", { "entities" : qSketchRegion(id + "s", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : definition.thickness });
+    const body = qCreatedBy(id + "ex", EntityType.BODY);
+
+    // One sketch per arm. Arms drawn into one sketch enclose the triangles
+    // between them, and an enclosed sketch region extrudes solid, which filled
+    // the skeleton in: the two shapes came out the same part to within the arm
+    // width. The Lighten builder draws its truss bars one to a sketch for this
+    // same reason.
+    var pieces = [body];
+    for (var i = 0; i < size(arms); i += 1)
+    {
+        const ska = newSketchOnPlane(context, id + ("ask" ~ i), { "sketchPlane" : skPlane });
+        skPolyline(ska, "a", { "points" : append(arms[i], arms[i][0]) });
+        skSolve(ska);
+        opExtrude(context, id + ("ax" ~ i), { "entities" : qSketchRegion(id + ("ask" ~ i), false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.thickness });
+        pieces = append(pieces, qCreatedBy(id + ("ax" ~ i), EntityType.BODY));
+    }
+    // Every arm runs between two boss centers, so it overlaps both bosses and
+    // the union has material to join at. The bosses go first, so the query above
+    // still names the part that comes out.
+    if (size(arms) > 0)
+        opBoolean(context, id + "join", { "tools" : qUnion(pieces),
+                    "operationType" : BooleanOperationType.UNION });
+    if (size(evaluateQuery(context, body)) == 0)
+        throw regenError("No plate came out of those locations. Check that they lie on the chosen plane.", ["holes"], definition.holes);
+
+    var pockets = 0;
+    if (definition.lighten && size(pts) >= 3)
+    {
+        var unitless = [];
+        for (var q in pts)
+            unitless = append(unitless, vector(q[0] / inch, q[1] / inch));
+        // The triangle is inset from the lines joining boss CENTRES, so the
+        // inset distance is what the arm keeps on each side. On a skeleton
+        // the arms are the structure and the dialog says how wide they are,
+        // so the pocket has to stop at the arm EDGE: inset by half the arm
+        // width and the arm finishes at the width that was asked for.
+        // Insetting by half the RIB instead measured from the centreline and
+        // ate the arm from both sides at once, so a 0.5 in arm came out
+        // 0.326 in beside one pocket and 0.15 in between two, and the Arm
+        // width field meant nothing whenever lighten was on.
+        //
+        // A hull has no arms to protect; it is a solid web being pocketed,
+        // and there the rib is exactly the right measure, so it keeps it.
+        const insetHalf = (definition.shape == FRCGussetShape.SKELETON)
+            ? definition.armWidth / 2 : definition.ribWidth / 2;
+        var cells = [];
+        for (var t in frcDelaunay(unitless))
+        {
+            const inset = frcInsetTriangle(unitless[t[0]], unitless[t[1]], unitless[t[2]],
+                    insetHalf / inch);
+            if (inset != undefined)
+                cells = append(cells, [inset[0] * inch, inset[1] * inch, inset[2] * inch]);
+        }
+        if (size(cells) > 0)
+        {
+            const skl = newSketchOnPlane(context, id + "l", { "sketchPlane" : skPlane });
+            for (var i = 0; i < size(cells); i += 1)
+                skPolyline(skl, "c" ~ i, { "points" : append(cells[i], cells[i][0]) });
+            skSolve(skl);
+            opExtrude(context, id + "lx", { "entities" : qSketchRegion(id + "l", false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : definition.thickness + 0.2 * inch,
+                        "startBound" : BoundingType.BLIND, "startDepth" : 0.1 * inch });
+
+            // Keep the full boss around every hole by carving the bosses
+            // back out of the pocket tool before it cuts the plate.
+            const skb = newSketchOnPlane(context, id + "bk", { "sketchPlane" : skPlane });
+            for (var i = 0; i < size(pts); i += 1)
+                skCircle(skb, "k" ~ i, { "center" : pts[i], "radius" : bossR });
+            skSolve(skb);
+            opExtrude(context, id + "bkx", { "entities" : qSketchRegion(id + "bk", false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : definition.thickness + 0.4 * inch,
+                        "startBound" : BoundingType.BLIND, "startDepth" : 0.2 * inch });
+            try silent
+            {
+                opBoolean(context, id + "bksub", {
+                            "tools" : qCreatedBy(id + "bkx", EntityType.BODY),
+                            "targets" : qCreatedBy(id + "lx", EntityType.BODY),
+                            "operationType" : BooleanOperationType.SUBTRACTION });
+            }
+            try silent
+            {
+                opBoolean(context, id + "lsub", { "tools" : qCreatedBy(id + "lx", EntityType.BODY),
+                            "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+                pockets = size(cells);
+            }
+        }
+    }
+
+    const skh = newSketchOnPlane(context, id + "h", { "sketchPlane" : skPlane });
+    for (var i = 0; i < size(pts); i += 1)
+        skCircle(skh, "h" ~ i, { "center" : pts[i], "radius" : holeD / 2 });
+    skSolve(skh);
+    opExtrude(context, id + "hx", { "entities" : qSketchRegion(id + "h", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : definition.thickness + 0.2 * inch,
+                "startBound" : BoundingType.BLIND, "startDepth" : 0.1 * inch });
+    opBoolean(context, id + "hsub", { "tools" : qCreatedBy(id + "hx", EntityType.BODY),
+                "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+
+    setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                "value" : "Gusset" });
+    frcApplyPart(context, body, definition.material, FRCPartClass.PLATE);
+    frcRoundAlong(context, id + "rnd", body, pl.normal, 0.03 * inch);
+
+    // The gusset is one body that stays, so it moves once, here, after all the
+    // geometry work. Its volume reads the same either side of the move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : body });
+    // The thickness came off the dialog. The boss diameter did not: it is how
+    // much material the feature decided to leave round each bolt.
+    var lines = "Gusset weighs " ~ frcPounds(vol * frcDensity(definition.material))
+        ~ ", " ~ size(pts) ~ " bolt hole" ~ (size(pts) == 1 ? "" : "s")
+        ~ " at " ~ frcInches(holeD) ~ " on a " ~ frcInches(2 * bossR) ~ " boss";
+    if (pockets > 0)
+        lines ~= ", " ~ pockets ~ " pocket" ~ (pockets == 1 ? "" : "s") ~ " cut";
+    // A skeleton is already open between its arms, so once the pockets are
+    // inset to the arm EDGE there is usually nothing left for them to take.
+    // Cutting nothing is the right answer there, but a user who asked to
+    // lighten should be told that rather than left to wonder.
+    else if (definition.lighten && definition.shape == FRCGussetShape.SKELETON)
+        lines ~= ". Nothing to lighten: the web between the arms is already"
+            ~ " open, and the pockets stop at the arm edge so the arms keep"
+            ~ " the width you set";
+    lines ~= ". Bolt patterns on 1 in and 2 in tube sit on a 0.5 in grid, so"
+        ~ " picking the tube holes gives a bolt-on gusset.";
+    reportFeatureInfo(context, id, lines);
+}

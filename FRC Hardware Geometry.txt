@@ -1,0 +1,1307 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+
+// ===========================================================================
+//  FRC HARDWARE GEOMETRY: bearing blocks, weight, balance, inspection
+// ---------------------------------------------------------------------------
+//  FRC Bearing Block, FRC Weight Budget, FRC Center of Gravity, FRC Battery
+//  Mount and FRC Inspection are declared in the FRC Toolkit tab and do their
+//  work here.
+// ===========================================================================
+
+// ############################# BEARING BLOCK ############################
+
+export const FRC_BLOCKWALL_BOUNDS = { (meter) : [0.0005, 0.009525, 0.1], (centimeter) : 0.9525,
+    (millimeter) : 9.525, (inch) : 0.375, (foot) : 0.03125, (yard) : 0.010417 } as LengthBoundSpec;
+export const FRC_BLOCKSIZE_BOUNDS = { (meter) : [0.005, 0.047625, 0.5], (centimeter) : 4.7625,
+    (millimeter) : 47.625, (inch) : 1.875, (foot) : 0.15625, (yard) : 0.052083 } as LengthBoundSpec;
+
+export enum FRCBlockStyle
+{
+    annotation { "Name" : "Square plate or block" } SQUARE,
+    annotation { "Name" : "Round boss" }            ROUND
+}
+
+export enum FRCBlockHoles
+{
+    annotation { "Name" : "None" }                                           NONE,
+    annotation { "Name" : "Grid at 0.5 in" }   GRID,
+    annotation { "Name" : "Bolt circle" }      CIRCLE,
+    annotation { "Name" : "AndyMark bearing plate" } AM_PLATE
+}
+
+/**
+ * A block or plate that carries a bearing.
+ *
+ * The default wall is 0.375 in, which is what makes a 1.125 in bearing land in
+ * a 1.875 in square: exactly the AndyMark bearing plate outline. That plate
+ * carries four #10 clearance holes on a 2 in bolt circle, which only fit
+ * inside the square at 45 degrees, so that is where the preset puts them.
+ * AndyMark publishes the circle and the outline but not the hole angles.
+ *
+ * With the outline sized automatically, that wall is a floor and not the
+ * answer, because the outline also has to hold the mounting holes. It grows
+ * to whatever they need, per axis on a square outline and radially on a round
+ * boss. Without that a 2 in bolt circle asked for on the same 1.875 in
+ * outline put its four holes 0.1605 in past the edge of the part.
+ */
+export function frcBearingBlockBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face or mate connector to build the block on.", ["location"]);
+
+    // Pattern and mirror support. The picked face or mate connector is what
+    // puts the block in space, so it is the reference the pattern transform is
+    // measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+    const center = vector(0, 0) * inch;
+
+    // The outline is sized off the nominal bearing rather than the fitted seat,
+    // so a 0.375 in wall on a 1.125 in bearing gives exactly 1.875 in of stock
+    // instead of half a thousandth under it.
+    const nominal = frcBearingOD(definition.bearingOD);
+    // frcBoreAllowance is RADIAL. nominal is a diameter, so it takes twice.
+    // Added once, a pressed seat got half a thousandth of interference where
+    // the fit class asks for one, which is a bearing that spins.
+    const bearing = nominal + 2 * frcBoreAllowance(FRCDriveBore.BEARING, definition.fit);
+    const wall = definition.wall;
+    const thick = definition.thickness;
+
+    const a = definition.angle;
+    const u = vector(cos(a), sin(a));
+    const v = vector(-sin(a), cos(a));
+
+    // The web this feature will not cut below, whether it lies between a
+    // mounting hole and the bearing seat or between a hole and the outside
+    // edge. It is the library's own CNC minimum wall, which is the tighter of
+    // the two floors frcMinWall knows, so holding it suits a printed block as
+    // well as a machined one. No tool diameter is a parameter of this
+    // feature, so the bare 0.090 in floor is what comes back.
+    const web = frcMinWall(FRCProcess.CNC, 0 * inch);
+    // The web the two tests below actually hold, which is one thousandth
+    // under it. The floor is a design guideline and not a gauge, and this
+    // library prints and reasons in thousandths, so a pattern that misses it
+    // by less than one is meeting it. Measured, the shipped 1.5 in bolt
+    // circle leaves exactly 0.090 in against the seat: half the circle less
+    // half a 0.196 in hole less half the 1.124 in seat is 0.750 - 0.098 -
+    // 0.562. It meets the floor rather than missing it, and the thousandth
+    // of slack is there so float noise cannot turn an exact pass into a
+    // failure. The 2 by 2 grid on a 1 in pitch misses by 0.0432 in, which is
+    // not slack.
+    const webMin = web - 0.001 * inch;
+
+    // The mounting hole centres are laid out before the outline is drawn, so
+    // that the outline can be sized to hold them.
+    const holeD = (definition.holes == FRCBlockHoles.NONE)
+        ? 0 * inch : frcHoleDiameter(definition.holeSize);
+    var pts = [];
+    var holeNote = "";
+    if (definition.holes == FRCBlockHoles.GRID)
+    {
+        const nx = definition.countX;
+        const ny = definition.countY;
+        // FRC_COUNT_BOUNDS lets each count reach 500, and a 500 by 500 grid is
+        // a quarter of a million circles in one sketch, which does not finish.
+        // No bearing block carries anything near 400 mounting holes.
+        if (nx * ny > 400)
+            throw regenError("That is more mounting holes than one block can carry. Reduce Holes along or Holes across.", ["countX", "countY"]);
+        for (var i = 0; i < nx; i += 1)
+        {
+            for (var j = 0; j < ny; j += 1)
+                pts = append(pts, center + u * ((i - (nx - 1) / 2) * definition.pitch)
+                    + v * ((j - (ny - 1) / 2) * definition.pitch));
+        }
+        holeNote = "" ~ nx ~ " by " ~ ny ~ " on " ~ frcInches(definition.pitch);
+    }
+    else if (definition.holes != FRCBlockHoles.NONE)
+    {
+        const dia = (definition.holes == FRCBlockHoles.AM_PLATE)
+            ? 2.0 * inch : definition.boltCircle;
+        const cnt = (definition.holes == FRCBlockHoles.AM_PLATE) ? 4 : definition.boltCount;
+        const start = (definition.holes == FRCBlockHoles.AM_PLATE) ? 45 * degree : 0 * degree;
+        for (var i = 0; i < cnt; i += 1)
+            pts = append(pts, center + frcPolar(dia / 2, a + start + (360 * degree) * i / cnt));
+        holeNote = "" ~ cnt ~ " on a " ~ frcInches(dia) ~ " circle";
+    }
+
+    // Sizing from the bearing gives the outline its floor. It then grows to
+    // whatever the mounting holes need, because a bolt circle wider than the
+    // wall allows would otherwise hang its holes over the edge of the part: a
+    // 2 in circle on the 1.875 in auto outline put them 0.1605 in past it on
+    // both the round and the square style. The requirement is read off the
+    // hole positions rather than off the circle diameter, so the AndyMark
+    // preset, whose four holes sit at 45 degrees and are already inside its
+    // published 1.875 in square, is left at the size AndyMark publishes.
+    var needU = 0 * inch;
+    var needV = 0 * inch;
+    var needR = 0 * inch;
+    for (var p in pts)
+    {
+        needU = max(needU, abs(dot(p, u)) + holeD / 2 + webMin);
+        needV = max(needV, abs(dot(p, v)) + holeD / 2 + webMin);
+        needR = max(needR, norm(p) + holeD / 2 + webMin);
+    }
+    const isRound = definition.style == FRCBlockStyle.ROUND;
+    const fromBearing = nominal + 2 * wall;
+    const across = definition.autoSize
+        ? max(fromBearing, 2 * (isRound ? needR : needU)) : definition.blockWidth;
+    const tall = definition.autoSize
+        ? max(fromBearing, 2 * (isRound ? needR : needV)) : definition.blockHeight;
+    const grew = definition.autoSize && max(across, tall) > fromBearing + 1e-6 * inch;
+    if (min(across, tall) <= bearing + 1e-6 * inch)
+        throw regenError("The block is not larger than the bearing. Increase the size, or let it size itself.", ["blockWidth"]);
+
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : pl });
+    if (isRound)
+        skCircle(sk, "o", { "center" : center, "radius" : max(across, tall) / 2 });
+    else
+    {
+        const c = [center + u * (across / 2) + v * (tall / 2),
+                   center - u * (across / 2) + v * (tall / 2),
+                   center - u * (across / 2) - v * (tall / 2),
+                   center + u * (across / 2) - v * (tall / 2)];
+        skPolyline(sk, "o", { "points" : append(c, c[0]) });
+    }
+    skSolve(sk);
+    opExtrude(context, id + "ex", { "entities" : qSketchRegion(id + "s", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : thick });
+    const body = qCreatedBy(id + "ex", EntityType.BODY);
+
+    // The bearing seat, cut from the front face inward.
+    const seatDepth = definition.throughSeat ? thick + 0.1 * inch : definition.seatDepth;
+    if (!definition.throughSeat && seatDepth >= thick - 1e-6 * inch)
+        throw regenError("The seat is as deep as the block, so nothing is left behind the bearing. Reduce the seat depth, or run the seat through.", ["seatDepth"]);
+    const sks = newSketchOnPlane(context, id + "b",
+        { "sketchPlane" : plane(pl.origin + pl.normal * (thick + 0.02 * inch), pl.normal, pl.x) });
+    skCircle(sks, "b", { "center" : center, "radius" : bearing / 2 });
+    skSolve(sks);
+    opExtrude(context, id + "bx", { "entities" : qSketchRegion(id + "b", false),
+                "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : seatDepth + 0.02 * inch });
+    opBoolean(context, id + "bsub", { "tools" : qCreatedBy(id + "bx", EntityType.BODY),
+                "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+
+    // A shaft clearance hole behind a blind seat, so the shaft still runs through.
+    var shaftCut = 0 * inch;
+    if (!definition.throughSeat && definition.shaftHole)
+    {
+        if (definition.shaftClear >= bearing)
+            throw regenError("The shaft clearance is as large as the bearing seat, so the seat has no shoulder left to hold the bearing. Reduce it.", ["shaftClear"]);
+        shaftCut = definition.shaftClear;
+        const skc = newSketchOnPlane(context, id + "c",
+            { "sketchPlane" : plane(pl.origin - pl.normal * (0.05 * inch), pl.normal, pl.x) });
+        skCircle(skc, "c", { "center" : center, "radius" : shaftCut / 2 });
+        skSolve(skc);
+        opExtrude(context, id + "cx", { "entities" : qSketchRegion(id + "c", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : thick + 0.1 * inch });
+        opBoolean(context, id + "csub", { "tools" : qCreatedBy(id + "cx", EntityType.BODY),
+                    "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+
+    var holes = 0;
+    var dropped = 0;
+    var drillFailed = false;
+    if (size(pts) > 0)
+    {
+        // A hole that lands inside the seat would only open it up, and one
+        // that lands close outside it leaves a web too thin to hold. The
+        // filter used to allow 0.010 in, which is a token rather than a web:
+        // the 2 by 2 grid on a 1 in pitch kept all four holes over a
+        // 0.0469 in web, about half this library's own minimum wall. It now
+        // holds the same web the outline is sized to.
+        var keep = [];
+        for (var p in pts)
+        {
+            if (norm(p) >= bearing / 2 + holeD / 2 + webMin)
+                keep = append(keep, p);
+        }
+        dropped = size(pts) - size(keep);
+        if (size(keep) > 0)
+        {
+            const skh = newSketchOnPlane(context, id + "h",
+                { "sketchPlane" : plane(pl.origin - pl.normal * (0.05 * inch), pl.normal, pl.x) });
+            for (var i = 0; i < size(keep); i += 1)
+                skCircle(skh, "h" ~ i, { "center" : keep[i], "radius" : holeD / 2 });
+            skSolve(skh);
+            opExtrude(context, id + "hx", { "entities" : qSketchRegion(id + "h", false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : thick + 0.1 * inch });
+            try silent
+            {
+                opBoolean(context, id + "hsub", { "tools" : qCreatedBy(id + "hx", EntityType.BODY),
+                            "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+                holes = size(keep);
+            }
+            // A subtraction that fails leaves its cutters behind: the extruded
+            // cylinders stay in the model as loose bodies with no name and no
+            // material, and a weight report would then count them as parts.
+            // They go, and the panel says the holes did not cut rather than
+            // leaving a reader to notice they are missing.
+            if (holes == 0)
+            {
+                drillFailed = true;
+                const leftover = evaluateQuery(context, qCreatedBy(id + "hx", EntityType.BODY));
+                if (size(leftover) > 0)
+                    opDeleteBodies(context, id + "hdel", { "entities" : qUnion(leftover) });
+            }
+        }
+    }
+
+    // Finish: a lead-in chamfer on the seat rim, as a real block is cut, and
+    // a light round on the square outline's corners. Round bosses have no
+    // corner edges, so the round pass quietly finds nothing.
+    frcBreakEdges(context, id + "ch", qCreatedBy(id + "bsub", EntityType.EDGE), 0.02 * inch);
+    frcRoundAlong(context, id + "rnd", body, pl.normal, 0.0625 * inch);
+
+    setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                "value" : "Bearing Block" });
+    frcApplyPart(context, body, definition.material, FRCPartClass.BEARING);
+
+    // The seat, the shaft clearance and the bolt holes are already subtracted
+    // into this feature's own block, so no cutter is left for the move to
+    // strand. Every measurement below is a volume or a parameter.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : body });
+    // Onshape renders this panel as one flowing paragraph, so it is written
+    // as prose: a full stop between facts, no padded columns, and nothing
+    // relying on a newline to keep two statements apart. What went out with
+    // the columns is what the dialog above already says: the nominal bearing
+    // size, the thickness, the seat depth, the shaft clearance and the hole
+    // pattern, along with the kilogram half of the mass.
+    var lines = "Seat " ~ frcInches(bearing) ~ ", "
+        ~ frcThou(2 * frcBoreAllowance(FRCDriveBore.BEARING, definition.fit))
+        ~ " on the diameter. ";
+    lines ~= "Outline " ~ (definition.style == FRCBlockStyle.ROUND
+            ? (frcInches(max(across, tall)) ~ " round")
+            : (frcInBare(across) ~ " x " ~ frcInches(tall)))
+        ~ ", thinnest wall " ~ frcInches((min(across, tall) - bearing) / 2)
+        ~ ". ";
+    // The pattern rides the count rather than a sentence of its own, and the
+    // two together are what show a hole went missing: three cut out of four
+    // on a circle reads as a drop without anyone counting the model.
+    if (holes > 0)
+        lines ~= "" ~ holes ~ " hole" ~ ((holes == 1) ? "" : "s") ~ " cut, "
+            ~ holeNote ~ ". ";
+    // Why a hole is missing, and why the part is not the size the bearing and
+    // the wall alone would have given, are both things a reader would
+    // otherwise have to measure the model to find out.
+    if (drillFailed)
+        lines ~= "NOTE: the mounting holes did not cut, so check the size and"
+            ~ " the angle. ";
+    if (dropped > 0)
+        lines ~= "NOTE: " ~ dropped ~ " hole"
+            ~ ((dropped == 1) ? " was" : "s were") ~ " dropped for leaving a"
+            ~ " web under " ~ frcInches(web) ~ " at the seat. ";
+    else if (grew)
+        lines ~= "The outline was grown to keep the holes on the part. ";
+    lines ~= "Mass " ~ frcLb(vol * frcDensity(definition.material)) ~ ". ";
+    // The AndyMark sentence explains why the preset's four holes sit at 45
+    // degrees on the outline AndyMark publishes. Once the outline has grown
+    // or a hole has gone, this is not that part any more, so it comes off.
+    if (definition.holes == FRCBlockHoles.AM_PLATE && dropped == 0 && !grew)
+        lines ~= "AndyMark gives the square and the circle, not the hole"
+            ~ " angles; 45 deg fits. ";
+    lines ~= "Press fit in aluminum; slip fit and retain in plastic.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ######################### WEIGHT AND BALANCE ###########################
+
+/** One pound in kilograms, exactly, so the report can talk in the units the
+ *  inspection table uses while the math stays in SI. */
+export const FRC_POUND = 0.45359237 * kilogram;
+
+export const FRC_ALLOWANCE_BOUNDS = { (unitless) : [0, 10, 100] } as RealBoundSpec;
+export const FRC_BUMPERMASS_BOUNDS = { (unitless) : [0, 15, 100] } as RealBoundSpec;
+export const FRC_TOPN_BOUNDS = { (unitless) : [0, 10, 60] } as IntegerBoundSpec;
+export const FRC_MU_BOUNDS = { (unitless) : [0.05, 1.1, 3.0] } as RealBoundSpec;
+export const FRC_TRACK_BOUNDS = { (meter) : [0.05, 0.5842, 3], (centimeter) : 58.42,
+    (millimeter) : 584.2, (inch) : 23, (foot) : 1.91667, (yard) : 0.63889 } as LengthBoundSpec;
+export const FRC_WEIGHTLIM_BOUNDS = { (unitless) : [0, 115, 300] } as RealBoundSpec;
+
+/** Print settings, so a team can match the weight report to their own slicer.
+ *  Infill is a percent because that is how every slicer states it; the code
+ *  divides by 100 before handing it to frcPrintedDensity. */
+export const FRC_INFILL_BOUNDS = { (unitless) : [0, 20, 100] } as RealBoundSpec;
+export const FRC_WALLS_BOUNDS = { (unitless) : [1, 3, 8] } as IntegerBoundSpec;
+
+/**
+ * The two weight limits, 2026 FRC Game Manual.
+ *   R103  the robot alone, without bumpers and without the battery, 115.0 lb
+ *   R408  the robot with its bumpers, still without the battery, 135.0 lb
+ * R408 invokes R103's definition, so the battery is outside both numbers.
+ * The limits the report checks are fields with these as their defaults,
+ * because the numbers move with the season. So R103 and R408 live here as
+ * documentation and as those field defaults, not as constants: constants for
+ * them were declared, exported and never read by anything.
+ * Inspection weighs the robot with every mechanism at no more than 150.0 lb
+ * (I102), and R601 puts the battery itself at 11.0 to 14.5 lb. The I102 figure
+ * is a constant because the closing note quotes it rather than checking it.
+ */
+export const FRC_INSPECTION_LIMIT = 150.0 * FRC_POUND;
+
+/**
+ * The name of a material, for a report that has to say what it assumed.
+ * This forwards to Core rather than keeping a second table. The copy that
+ * used to live here was missing the two materials Core gained later, and a
+ * missing key returns undefined against a string return, so Weight Budget,
+ * Center of Gravity and Inspection all threw the moment a user picked
+ * pool noodle foam or a wire bundle.
+ */
+export function frcMaterialLabel(m is FRCMaterial) returns string
+{
+    return frcMaterialName(m);
+}
+
+/** The materials in this library that come off a printer rather than a saw. */
+export function frcIsPrintedMaterial(m is FRCMaterial) returns boolean
+{
+    return m == FRCMaterial.PLA || m == FRCMaterial.PETG || m == FRCMaterial.ONYX;
+}
+
+/**
+ * Whether a material name read off a part means a 3D print.
+ *
+ * A part carrying its own material hands back a name and a density, not one of
+ * this library's enum values, so the name is the only signal there is. Onshape
+ * and this library's own frcApplyPart both write names like "PLA", "PETG" and
+ * "Onyx nylon", so those three are what is matched.
+ *
+ * Bare nylon and ABS are deliberately left out. FRC teams machine nylon and ABS
+ * bar stock about as often as they print it, and reading solid stock as a print
+ * would take weight off the budget that the robot really has. Missing a print
+ * only leaves the estimate heavy, which is the safe way to be wrong before
+ * inspection.
+ *
+ * FeatureScript match anchors the whole string and has no case-insensitive
+ * flag, so each pattern carries its own optional surroundings and spells its
+ * letters as classes. The [^A-Za-z] edges are what keep "plate stock" and
+ * "Polycarbonate" from reading as PLA.
+ */
+export function frcIsPrintedName(name is string) returns boolean
+{
+    const patterns = ["(.*[^A-Za-z])?[Pp][Ll][Aa]([^A-Za-z].*)?",
+                      "(.*[^A-Za-z])?[Pp][Ee][Tt][Gg]([^A-Za-z].*)?",
+                      "(.*[^A-Za-z])?[Oo][Nn][Yy][Xx]([^A-Za-z].*)?"];
+    for (var pattern in patterns)
+    {
+        if (match(name, pattern).hasMatch)
+            return true;
+    }
+    return false;
+}
+
+/**
+ * The print settings to weigh at, in the shape frcPrintedDensity wants.
+ *
+ * Weight Budget and Center of Gravity both offer these as fields. A caller
+ * that does not has to fall back to the Core default rather than throw, which
+ * is what the two undefined tests are for. Line width is left to
+ * FRC_PRINT_DEFAULTS, since it is a property of the nozzle rather than
+ * something worth asking for.
+ */
+export function frcPrintSettings(definition is map) returns map
+{
+    var infill = FRC_PRINT_DEFAULTS.infill;
+    var walls = FRC_PRINT_DEFAULTS.walls;
+    if (definition.infillPct != undefined)
+        infill = definition.infillPct / 100;
+    if (definition.wallCount != undefined)
+        walls = definition.wallCount;
+    return { "infill" : infill, "walls" : walls };
+}
+
+/**
+ * A length in inches with the unit left off, for a line that already gives
+ * the unit once.
+ *
+ * The R104 perimeter line quotes three lengths, all in inches, and frcInches
+ * spends up to eleven characters on each, so thirty-three of a sixty
+ * character line go before any of the words do. A 33.1875 by 31.9375 in frame
+ * against a 119.9375 in limit came to sixty one. Naming the unit once, on the
+ * limit the other two are measured against, is what brings it in.
+ * Not exported, for the same reason frcLb is not.
+ */
+function frcInBare(v is ValueWithUnits) returns string
+{
+    return "" ~ roundToPrecision(v / inch, 4);
+}
+
+/**
+ * A mass in pounds alone. frcFormatMass sets the kilogram figure beside it,
+ * which costs thirteen more characters, and the weight lines no longer have
+ * them: a total, the limit it is measured against and the headroom now share
+ * one line of sixty. Everywhere the width allows both, frcFormatMass stays.
+ * Not exported, because only the three reports in this file are that tight.
+ */
+function frcLb(m is ValueWithUnits) returns string
+{
+    return "" ~ roundToPrecision(m / FRC_POUND, 3) ~ " lb";
+}
+
+/**
+ * Weigh every part at its group's material, and at a reduced density where
+ * that material is printed.
+ *
+ * getProperty cannot read the material a part has been assigned. Onshape
+ * documents that it may not be called on the current context inside a custom
+ * feature, because features regenerate before any user-set property is
+ * applied. The read below therefore fails on every part and is swallowed by
+ * the try silent around it. It is kept because it costs one caught failure
+ * per part and would start working on its own if that ever changed.
+ *
+ * So the group pickers are the whole of the answer and not a fallback. Every
+ * part is weighed at the material picked for its group, and every part in no
+ * group at the material picked for the rest. `own` comes back zero and
+ * `assumed` equals the part count, which is why neither report prints them.
+ *
+ * A printed part is mostly air. A real FRC print runs 15 to 30 percent infill
+ * inside a solid wall shell, so weighing one at solid PLA, PETG or Onyx
+ * overstates it by roughly a factor of two, and a dozen printed brackets then
+ * puts a real error into the one number a team cannot afford to be wrong about
+ * before inspection. So a part whose material is printed is weighed at
+ * frcPrintedDensity instead.
+ *
+ * That test keys off the material actually used for the part, which is its
+ * group's for as long as the read above cannot work.
+ */
+export function frcWeighGroups(context is Context, definition is map) returns map
+{
+    var groupQ = [];
+    var rows = [];
+    var total = 0 * kilogram;
+    var firstMoment = vector(0, 0, 0) * kilogram * meter;
+    var counted = 0;
+    var ownCount = 0;
+    var printedCount = 0;
+    var thinCount = 0;
+    var failedCount = 0;
+
+    const printOpts = frcPrintSettings(definition);
+
+    const weigh = function(q is Query, mat is FRCMaterial, label is string)
+        {
+            const bodies = evaluateQuery(context, q);
+            var m = 0 * kilogram;
+            var fm = vector(0, 0, 0) * kilogram * meter;
+            var n = 0;
+            var own = 0;
+            var printed = 0;
+            var thin = 0;
+            var failed = 0;
+            var made = [];
+            for (var b in bodies)
+            {
+                // The group's material, which is what the part is weighed at.
+                // The read below would take over from it if it could work.
+                var density = frcDensity(mat);
+                var used = label;
+                var fromPart = false;
+                // Print status follows the material actually used, which is
+                // the group's until the read below can work.
+                var isPrint = frcIsPrintedMaterial(mat);
+                try silent
+                {
+                    const assigned = getProperty(context,
+                            { "entity" : b, "propertyType" : PropertyType.MATERIAL });
+                    // Unassigned comes back as undefined, and a zero density
+                    // would silently weigh the part as nothing.
+                    if (assigned != undefined && assigned.density > 0 * kilogram / meter ^ 3)
+                    {
+                        // Both fields are read before anything is committed, so
+                        // a part can never end up half switched over.
+                        const assignedDensity = assigned.density;
+                        const assignedName = assigned.name;
+                        density = assignedDensity;
+                        used = assignedName;
+                        fromPart = true;
+                        isPrint = frcIsPrintedName(assignedName);
+                    }
+                }
+
+                try silent
+                {
+                    const mp = evApproximateMassProperties(context,
+                            { "entities" : b, "density" : density });
+
+                    // The density the part is really weighed at. It stays at
+                    // the solid figure unless the part is printed and the area
+                    // the shell estimate needs can actually be read.
+                    var effective = density;
+                    var reduced = false;
+                    if (isPrint)
+                    {
+                        // evApproximateMassProperties returns no surface area,
+                        // so the area comes from evArea over the body's faces.
+                        // Anything that fails in here leaves the part solid,
+                        // which is the conservative way to be wrong in a
+                        // weight budget.
+                        try silent
+                        {
+                            const area = evArea(context,
+                                    { "entities" : qOwnedByBody(b, EntityType.FACE) });
+                            effective = frcPrintedDensity(density, area, mp.volume, printOpts);
+                            reduced = true;
+                        }
+                        if (!reduced)
+                            failed += 1;
+                    }
+
+                    // Volume does not depend on the density it was evaluated
+                    // at, and neither does the centroid of a uniform body, so
+                    // rescaling the mass is exact and saves a second pass over
+                    // the geometry.
+                    const mass = mp.mass * effective / density;
+                    m = m + mass;
+                    fm = fm + mp.centroid * mass;
+                    n += 1;
+                    // Counted only once the part actually made it into the
+                    // total, so the counts always add up to the parts weighed.
+                    if (fromPart)
+                        own += 1;
+                    if (reduced)
+                    {
+                        printed += 1;
+                        used = used ~ ", printed";
+                        // The shell estimate filled the whole part, so the
+                        // clamp handed back solid density. That is the
+                        // documented thin-part limitation, and the report says
+                        // so rather than passing the number off as a saving.
+                        if (effective >= density * 0.999 && printOpts.infill < 0.999)
+                            thin += 1;
+                    }
+                    made = append(made, { "mass" : mass, "at" : mp.centroid, "what" : used });
+                }
+            }
+            return { "mass" : m, "moment" : fm, "count" : n, "own" : own,
+                     "printed" : printed, "thin" : thin, "failed" : failed,
+                     "rows" : made };
+        };
+
+    for (var i = 0; i < size(definition.groups); i += 1)
+    {
+        const g = definition.groups[i];
+        groupQ = append(groupQ, g.bodies);
+        const r = weigh(g.bodies, g.material, frcMaterialLabel(g.material));
+        total = total + r.mass;
+        firstMoment = firstMoment + r.moment;
+        counted += r.count;
+        ownCount += r.own;
+        printedCount += r.printed;
+        thinCount += r.thin;
+        failedCount += r.failed;
+        rows = concatenateArrays([rows, r.rows]);
+    }
+
+    const rest = size(groupQ) == 0
+        ? qAllModifiableSolidBodies()
+        : qSubtraction(qAllModifiableSolidBodies(), qUnion(groupQ));
+    const r = weigh(rest, definition.material, frcMaterialLabel(definition.material));
+    total = total + r.mass;
+    firstMoment = firstMoment + r.moment;
+    ownCount += r.own;
+    printedCount += r.printed;
+    thinCount += r.thin;
+    failedCount += r.failed;
+    rows = concatenateArrays([rows, r.rows]);
+
+    rows = sort(rows, function(a, b)
+        {
+            return (b.mass - a.mass) / kilogram;
+        });
+    const parts = counted + r.count;
+    // Nothing in the library reads `grouped` any more. Weight Budget dropped
+    // that count from its panel because the own and assumed counts say more,
+    // and no other caller ever took it. It stays anyway: this map is the
+    // return contract of an exported function, part of the tab's public
+    // surface for teams extending the library, and `fallback`, which is read,
+    // is its other half, since grouped plus fallback is parts. Deleting one
+    // of a pair would break a team's own feature and buy this file nothing.
+    return { "mass" : total, "moment" : firstMoment, "grouped" : counted,
+             "fallback" : r.count, "parts" : parts, "own" : ownCount,
+             "assumed" : parts - ownCount, "printed" : printedCount,
+             "thin" : thinCount, "printFailed" : failedCount,
+             "infill" : printOpts.infill, "walls" : printOpts.walls,
+             "rows" : rows };
+}
+
+/**
+ * What the robot weighs so far, and how much of the limit is left.
+ *
+ * Everything a CAD model does not contain, which is most of the wiring, the
+ * fasteners and the electronics, is added as a flat allowance, because a model
+ * is always lighter than the robot it describes.
+ */
+export function frcWeightBuild(context is Context, id is Id, definition is map)
+{
+    const w = frcWeighGroups(context, definition);
+    if (w.parts == 0)
+        throw regenError("There are no solid parts to weigh. Check the group selections.", ["groups"]);
+    if (w.parts > 600)
+        throw regenError("That is more parts than one report should weigh. Select a smaller set.", ["groups"]);
+
+    const allowance = definition.allowanceLb * FRC_POUND;
+    const bumpers = definition.bumperLb * FRC_POUND;
+    const projected = w.mass + allowance;
+    const withBumpers = projected + bumpers;
+    const limRobot = definition.robotLimitLb * FRC_POUND;
+    const limBumpers = definition.bumpersLimitLb * FRC_POUND;
+
+    // Onshape renders this panel as one flowing paragraph, so it is written
+    // as prose and no fact depends on a newline to keep it apart from the
+    // next one. The count below is no longer a line budget, because there
+    // are no lines; it caps how many ranking entries the paragraph carries,
+    // so a report that already has a print note, a print failure and a
+    // no-group note does not run the whole table on top of them.
+    //
+    // What went out with the columns: the allowance and the bumper set, which
+    // are two numbers the user typed into this same dialog and are already
+    // inside the totals; the grouped count, which said nothing the part count
+    // does not; the own and assumed counts, which can only ever read zero and
+    // everything; and the padding itself. Every rule citation, the print
+    // settings, the print caveat and the ranking stayed.
+    var fixedLines = 5;
+    if (w.printed > 0)
+        fixedLines += 2;
+    if (w.printFailed > 0)
+        fixedLines += 1;
+    if (size(definition.groups) > 0 && w.fallback > 0)
+        fixedLines += 1;
+    const rowsShown = max(0, min(min(definition.topN, size(w.rows)), 10 - fixedLines));
+
+    // The totals first, each against the limit it is measured against, with
+    // the margin either way. Pounds only: a kilogram figure beside every one
+    // of them buys nothing at an FRC scale.
+    var lines = "Robot " ~ frcLb(projected) ~ " of " ~ frcLb(limRobot)
+        ~ ", " ~ ((projected <= limRobot)
+            ? (frcLb(limRobot - projected) ~ " left")
+            : ("over by " ~ frcLb(projected - limRobot))) ~ ". ";
+    lines ~= "With bumpers " ~ frcLb(withBumpers) ~ " of " ~ frcLb(limBumpers)
+        ~ ", " ~ ((withBumpers <= limBumpers)
+            ? (frcLb(limBumpers - withBumpers) ~ " left")
+            : ("over by " ~ frcLb(withBumpers - limBumpers))) ~ ". ";
+    lines ~= "" ~ w.parts ~ " parts at the group materials. ";
+    // Worth saying only when groups were set up and something fell outside
+    // them. With no groups at all, every part is meant to take the picked
+    // material.
+    if (size(definition.groups) > 0 && w.fallback > 0)
+        lines ~= "NOTE: " ~ w.fallback ~ " part"
+            ~ ((w.fallback == 1) ? "" : "s") ~ " in no group, weighed as "
+            ~ frcMaterialLabel(definition.material) ~ ". ";
+    // The thin count qualifies the printed count and the caveat qualifies
+    // both, so all three ride one sentence: the shell estimate filled those
+    // parts and the clamp handed them back at solid density. The infill and
+    // the wall count went with the columns, because both are fields in this
+    // same dialog; what they are an assumption about is what the caveat says.
+    if (w.printed > 0)
+        lines ~= "" ~ w.printed ~ " printed"
+            ~ ((w.thin > 0) ? (", " ~ w.thin ~ " read solid") : "")
+            ~ "; printed mass is a surface-area estimate, thin reads solid. ";
+    if (w.printFailed > 0)
+        lines ~= "NOTE: " ~ w.printFailed ~ " print"
+            ~ ((w.printFailed == 1) ? "" : "s")
+            ~ " had no surface area, weighed solid. ";
+    // The ranking names its units once, at the head, so the entries stay
+    // short enough to read inside a paragraph. The material is the only name
+    // a row can carry, since getProperty cannot read a part name inside a
+    // custom feature, and that is what makes the position worth printing.
+    if (rowsShown > 0)
+    {
+        lines ~= "Heaviest " ~ rowsShown ~ ", lb and in: ";
+        for (var i = 0; i < rowsShown; i += 1)
+        {
+            const r = w.rows[i];
+            lines ~= ((i == 0) ? "" : "; ")
+                ~ roundToPrecision(r.mass / FRC_POUND, 3) ~ " at ("
+                ~ roundToPrecision(r.at[0] / inch, 2) ~ ", "
+                ~ roundToPrecision(r.at[1] / inch, 2) ~ ", "
+                ~ roundToPrecision(r.at[2] / inch, 2) ~ ") " ~ r.what;
+        }
+        lines ~= ". ";
+    }
+    // Last. R103 and R408 both leave the battery out; I102 is the number the
+    // inspector's scale has to come in under. One verb serves both caps, and
+    // the two literals are written the way frcLb writes the same quantity
+    // above, without a trailing zero, so one panel does not print 115.0 lb
+    // and 115 lb for one limit.
+    lines ~= "R103 caps 115 lb, R408 135 lb with bumpers, neither with the"
+        ~ " battery. I102: " ~ frcLb(FRC_INSPECTION_LIMIT) ~ " on the scale.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ########################## CENTER OF GRAVITY ###########################
+
+/**
+ * Where the robot balances, and what that means for tipping.
+ *
+ * A robot tips about the line through the contact patches on the side it is
+ * leaning toward. Taking moments about that line, with the center of mass a
+ * height h above the floor and a horizontal distance d inside that line:
+ *
+ *     tan(tip angle) = d / h        the static ramp angle it falls over at
+ *     a_max          = g * d / h    the acceleration that lifts the far wheels
+ *
+ * The acceleration form is the one FRC publishes. Ether states it as a/g = b/h
+ * in "The physics of flipping"; FRC 95 states it in words as gravity times the
+ * horizontal distance from the CG to the edge of the wheelbase over the CG
+ * height; and YAGSL ships it as calcMaxAccel, projecting both the CG offset and
+ * the wheelbase edge onto the direction of travel, which is the right model for
+ * a swerve robot that can accelerate at any heading.
+ *
+ * Whether the robot tips or slips first is then d / h against the
+ * coefficient of friction: below it the wheels break loose first, above it the
+ * robot goes over. There is no rule in the 2026 manual about any of this.
+ */
+export function frcCenterOfGravityBuild(context is Context, id is Id, definition is map)
+{
+    const w = frcWeighGroups(context, definition);
+    if (w.parts == 0)
+        throw regenError("There are no solid parts to balance. Check the group selections.", ["groups"]);
+    // The same bound Weight Budget uses, because this is the same weighing
+    // pass over the same bodies: unbounded, a whole-robot pick hangs the
+    // regeneration rather than failing.
+    if (w.parts > 600)
+        throw regenError("That is more parts than one report should weigh. Select a smaller set.", ["groups"]);
+
+    // The floor, and which way is up. A picked face is taken to be the floor
+    // the robot stands on, with its normal pointing up out of the carpet.
+    const floor = frcPickFrame(context, definition.floor, XY_PLANE);
+    const up = normalize(floor.normal);
+    const fwd = normalize(floor.x - up * dot(floor.x, up));
+    const side = cross(up, fwd);
+
+    // Add the masses a CAD model never contains, each at its own height.
+    var mass = w.mass;
+    var moment = w.moment;
+    const addMass = function(m is ValueWithUnits, height is ValueWithUnits)
+        {
+            return { "m" : m, "at" : floor.origin + up * height };
+        };
+    const extras = [addMass(definition.allowanceLb * FRC_POUND, definition.allowanceHeight),
+                    addMass(definition.bumperLb * FRC_POUND, definition.bumperHeight),
+                    addMass(definition.batteryLb * FRC_POUND, definition.batteryHeight)];
+    for (var e in extras)
+    {
+        mass = mass + e.m;
+        moment = moment + e.at * e.m;
+    }
+    if (mass <= 0 * kilogram)
+        throw regenError("Everything selected weighs nothing. Check the materials.", ["groups"]);
+
+    const cg = moment / mass;
+    const rel = cg - floor.origin;
+    const h = dot(rel, up);
+    if (h <= 0 * inch)
+        throw regenError("The center of gravity came out on or below the floor plane. The floor face is probably picked from the wrong side, or its normal points down.", ["floor"], definition.floor);
+
+    const halfTrack = definition.track / 2 - abs(dot(rel, side));
+    const halfBase = definition.wheelbase / 2 - abs(dot(rel, fwd));
+    if (halfTrack <= 0 * inch || halfBase <= 0 * inch)
+        throw regenError("The center of gravity falls outside the wheels, so the robot is already tipping over. Check the track, the wheelbase and the floor face.", ["track"]);
+
+    // One sentence per axis, so the two read the same way inside a paragraph:
+    // how far the CG sits inside the tipping line it leans over, and what
+    // that costs in ramp angle and in acceleration.
+    const report = function(name is string, d is ValueWithUnits) returns string
+        {
+            const ratio = d / h;
+            return name ~ " " ~ frcInches(d) ~ " inside the wheels, tips at "
+                ~ roundToPrecision(atan(ratio) / degree, 1) ~ " deg or "
+                ~ roundToPrecision(ratio, 2) ~ " g. ";
+        };
+
+    // The answer first: where the balance point is, and what it was taken
+    // from. The modeled subtotal went, because the difference between it and
+    // the all-in figure is the allowance, the bumper and the battery masses
+    // the user typed above. The own-material count went for the reason
+    // Weight Budget's did.
+    var lines = "CG " ~ frcInches(h) ~ " up, " ~ frcInches(dot(rel, fwd))
+        ~ " along, " ~ frcInches(dot(rel, side)) ~ " across, from "
+        ~ w.parts ~ " parts at " ~ frcLb(mass) ~ " all in. ";
+    lines ~= report("Sideways", halfTrack);
+    lines ~= report("Forward", halfBase);
+    if (definition.showPoint)
+    {
+        opPoint(context, id + "cg", { "point" : cg });
+        setProperty(context, { "entities" : qCreatedBy(id + "cg", EntityType.VERTEX),
+                    "propertyType" : PropertyType.NAME, "value" : "Center of Gravity" });
+    }
+    // The printed count and the caveat that qualifies it are one statement,
+    // and this is the only place printing is mentioned. The caveat is the one
+    // Weight Budget prints, so a team reads the same words in both places.
+    if (w.printed > 0)
+        lines ~= "" ~ w.printed ~ " printed; that mass is a surface-area"
+            ~ " estimate, thin reads solid. ";
+    lines ~= "Tread grips " ~ roundToPrecision(definition.mu, 2)
+        ~ " g; a lower figure above tips first. ";
+    lines ~= "Wheels are assumed on a rectangle, the robot rigid. Rerun in the"
+        ~ " pose that worries you; an arm takes the CG with it.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################ BATTERY MOUNT #############################
+
+export const FRC_BATCLEAR_BOUNDS = { (meter) : [0, 0.003175, 0.013], (centimeter) : 0.3175,
+    (millimeter) : 3.175, (inch) : 0.125, (foot) : 0.010417, (yard) : 0.003472 } as LengthBoundSpec;
+export const FRC_TRAYTHK_BOUNDS = { (meter) : [0.0008, 0.0022860, 0.013], (centimeter) : 0.2286,
+    (millimeter) : 2.286, (inch) : 0.09, (foot) : 0.0075, (yard) : 0.0025 } as LengthBoundSpec;
+export const FRC_TRAYWALL_BOUNDS = { (meter) : [0.013, 0.0635, 0.21], (centimeter) : 6.35,
+    (millimeter) : 63.5, (inch) : 2.5, (foot) : 0.208333, (yard) : 0.069444 } as LengthBoundSpec;
+export const FRC_STRAPW_BOUNDS = { (meter) : [0.013, 0.0381, 0.08], (centimeter) : 3.81,
+    (millimeter) : 38.1, (inch) : 1.5, (foot) : 0.125, (yard) : 0.041667 } as LengthBoundSpec;
+export const FRC_SLOTCLEAR_BOUNDS = { (meter) : [0, 0.001524, 0.007], (centimeter) : 0.1524,
+    (millimeter) : 1.524, (inch) : 0.06, (foot) : 0.005, (yard) : 0.001667 } as LengthBoundSpec;
+export const FRC_TABW_BOUNDS = { (meter) : [0.013, 0.0254, 0.08], (centimeter) : 2.54,
+    (millimeter) : 25.4, (inch) : 1, (foot) : 0.083333, (yard) : 0.027778 } as LengthBoundSpec;
+
+/** The R601 battery envelope, nominal, in the battery's own frame: length,
+ *  width, height. The rule allows 0.1 in over each of these. */
+const FRC_BATTERY_L = 7.1 * inch;
+const FRC_BATTERY_W = 3.0 * inch;
+const FRC_BATTERY_H = 6.6 * inch;
+
+export enum FRCBatteryPose
+{
+    annotation { "Name" : "Upright, 6.6 in tall" }    UPRIGHT,
+    annotation { "Name" : "On its side, 3.0 in tall" } ON_SIDE,
+    annotation { "Name" : "On end, 7.1 in tall" }      ON_END
+}
+
+/**
+ * A tray that holds the FRC battery, sized from the rule rather than from a
+ * tape measure.
+ *
+ * R601 fixes the battery as a 12 V 17 to 18.2 Ah sealed lead acid brick,
+ * nominally 7.1 by 3.0 by 6.6 in with 0.1 in of allowance on each dimension,
+ * weighing 11.0 to 14.5 lb. The cavity here starts from the nominal size plus
+ * that 0.1 in, then adds the clearance you ask for, so a legal battery always
+ * drops in. R606 requires the battery to stay put with the robot in any
+ * orientation, tipped and upside down included, which is what the strap is
+ * for; walls alone do not pass. R607 requires the terminals protected from
+ * shorts, which the connector opening leaves to your leads and boots.
+ *
+ * The strap slots fit the common 1.5 in strap. AndyMark's battery strap
+ * plate, for scale, is a published 8.6 by 1.5 by 0.09 in piece of 5052.
+ */
+export function frcBatteryMountBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face or mate connector to build the tray on.", ["location"]);
+
+    // Pattern and mirror support. The picked face or mate connector is what
+    // puts the tray in space, so it is the reference the pattern transform is
+    // measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    // The footprint the pose presents, from the R601 nominal plus the rule's
+    // own 0.1 in allowance, plus the clearance parameter per side.
+    const grow = 0.1 * inch;
+    var fpL = FRC_BATTERY_L + grow;
+    var fpW = FRC_BATTERY_W + grow;
+    var ht = FRC_BATTERY_H + grow;
+    if (definition.batteryPose == FRCBatteryPose.ON_SIDE)
+    {
+        fpL = FRC_BATTERY_L + grow;
+        fpW = FRC_BATTERY_H + grow;
+        ht = FRC_BATTERY_W + grow;
+    }
+    else if (definition.batteryPose == FRCBatteryPose.ON_END)
+    {
+        fpL = FRC_BATTERY_H + grow;
+        fpW = FRC_BATTERY_W + grow;
+        ht = FRC_BATTERY_L + grow;
+    }
+    const c = definition.batteryClear;
+    const t = definition.trayThickness;
+    const wallH = definition.wallHeight;
+    const innerL = fpL + 2 * c;
+    const innerW = fpW + 2 * c;
+    const outerL = innerL + 2 * t;
+    const outerW = innerW + 2 * t;
+
+    const rect = function(sk is Sketch, name is string, cx is ValueWithUnits, cy is ValueWithUnits,
+            dw is ValueWithUnits, dh is ValueWithUnits)
+        {
+            const p = [vector(cx + dw / 2, cy + dh / 2), vector(cx - dw / 2, cy + dh / 2),
+                       vector(cx - dw / 2, cy - dh / 2), vector(cx + dw / 2, cy - dh / 2)];
+            skPolyline(sk, name, { "points" : append(p, p[0]) });
+        };
+    const zPlane = function(z is ValueWithUnits)
+        {
+            return plane(pl.origin + pl.normal * z, pl.normal, pl.x);
+        };
+
+    // The outer solid, floor and walls in one piece.
+    const sk = newSketchOnPlane(context, id + "o", { "sketchPlane" : pl });
+    rect(sk, "o", 0 * inch, 0 * inch, outerL, outerW);
+    skSolve(sk);
+    opExtrude(context, id + "ox", { "entities" : qSketchRegion(id + "o", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : t + wallH });
+    const body = qCreatedBy(id + "ox", EntityType.BODY);
+
+    // The cavity, cut from the floor top upward.
+    const skc = newSketchOnPlane(context, id + "c", { "sketchPlane" : zPlane(t) });
+    rect(skc, "c", 0 * inch, 0 * inch, innerL, innerW);
+    skSolve(skc);
+    opExtrude(context, id + "cx", { "entities" : qSketchRegion(id + "c", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : wallH + 0.1 * inch });
+    opBoolean(context, id + "csub", { "tools" : qCreatedBy(id + "cx", EntityType.BODY),
+                "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+
+    // Strap slots through both long walls, cut from the wall top down to half
+    // an inch above the floor, so the strap passes through and pulls down.
+    if (definition.strapSlots)
+    {
+        const sw = definition.strapWidth + definition.slotClear;
+        const sks = newSketchOnPlane(context, id + "s", { "sketchPlane" : zPlane(t + 0.5 * inch) });
+        rect(sks, "s", 0 * inch, 0 * inch, sw, outerW + 0.2 * inch);
+        skSolve(sks);
+        opExtrude(context, id + "sx", { "entities" : qSketchRegion(id + "s", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : wallH + 0.1 * inch });
+        opBoolean(context, id + "ssub", { "tools" : qCreatedBy(id + "sx", EntityType.BODY),
+                    "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+
+    // A lead opening in one end wall. The width is sized by eye for an SB50
+    // and 6 AWG leads with boots, because nobody publishes that number.
+    if (definition.connectorNotch)
+    {
+        const nw = 1.75 * inch;
+        const skn = newSketchOnPlane(context, id + "n", { "sketchPlane" : zPlane(t + 0.75 * inch) });
+        rect(skn, "n", innerL / 2 + t / 2, 0 * inch, t + 0.2 * inch, nw);
+        skSolve(skn);
+        opExtrude(context, id + "nx", { "entities" : qSketchRegion(id + "n", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : wallH + 0.1 * inch });
+        opBoolean(context, id + "nsub", { "tools" : qCreatedBy(id + "nx", EntityType.BODY),
+                    "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+
+    // Mounting tabs off both long walls, with holes on the half inch grid.
+    var tabHoles = 0;
+    if (definition.mountTabs)
+    {
+        const tw = definition.tabWidth;
+        const skt = newSketchOnPlane(context, id + "t", { "sketchPlane" : pl });
+        rect(skt, "t0", 0 * inch, outerW / 2 + tw / 2, outerL, tw);
+        rect(skt, "t1", 0 * inch, -outerW / 2 - tw / 2, outerL, tw);
+        skSolve(skt);
+        opExtrude(context, id + "tx", { "entities" : qSketchRegion(id + "t", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : t });
+        // A union takes every participating body in `tools`; a target given to
+        // it is ignored, which once left the tabs as separate un-drilled bodies.
+        opBoolean(context, id + "tun", { "tools" : qUnion([body, qCreatedBy(id + "tx", EntityType.BODY)]),
+                    "operationType" : BooleanOperationType.UNION });
+
+        const holeD = frcHoleDiameter(definition.holeSize);
+        const m = floor((outerL / 2 - 0.3 * inch) / (0.5 * inch));
+        if (m >= 0)
+        {
+            const skh = newSketchOnPlane(context, id + "h",
+                { "sketchPlane" : zPlane(-0.05 * inch) });
+            var hi = 0;
+            for (var i = -m; i <= m; i += 1)
+            {
+                for (var s = -1; s <= 1; s += 2)
+                {
+                    skCircle(skh, "h" ~ hi, { "center" : vector(i * 0.5 * inch,
+                                    s * (outerW / 2 + tw / 2)), "radius" : holeD / 2 });
+                    hi += 1;
+                }
+            }
+            skSolve(skh);
+            opExtrude(context, id + "hx", { "entities" : qSketchRegion(id + "h", false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : t + 0.1 * inch });
+            opBoolean(context, id + "hsub", { "tools" : qCreatedBy(id + "hx", EntityType.BODY),
+                        "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+            tabHoles = hi;
+        }
+    }
+
+    // Round the outer corners, so the tray reads as a formed part rather than
+    // a block. The corner edges are the vertical ones out at both extremes of
+    // the footprint; the slot and notch edges stay sharp.
+    var corners = [];
+    for (var e in evaluateQuery(context, qGeometry(qOwnedByBody(body, EntityType.EDGE), GeometryType.LINE)))
+    {
+        try silent
+        {
+            const ln = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5 });
+            if (abs(dot(ln.direction, pl.normal)) > 0.999)
+            {
+                const rel = ln.origin - pl.origin;
+                const ex = abs(dot(rel, pl.x));
+                const ey = abs(dot(rel, cross(pl.normal, pl.x)));
+                if (ex > outerL / 2 - 0.02 * inch && ey > outerW / 2 - 0.02 * inch)
+                    corners = append(corners, e);
+            }
+        }
+    }
+    if (size(corners) > 0)
+    {
+        try silent
+        {
+            opFillet(context, id + "rnd", { "entities" : qUnion(corners), "radius" : 0.15 * inch });
+        }
+    }
+
+    setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                "value" : "Battery Tray" });
+    frcApplyPart(context, body, definition.material, FRCPartClass.PLATE);
+
+    // The cavity, the slots, the notch and the tab holes are already
+    // subtracted into this feature's own tray, so no cutter is left for the
+    // move to strand. Every measurement below is a volume or a parameter.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : body });
+    const engage = wallH / ht * 100;
+    // Prose, because Onshape renders this panel as one paragraph. The pose,
+    // the clearance, the wall height, the tray thickness, the strap width and
+    // the hole size all went: every one of them is a field in the dialog
+    // above, and what is left is what the feature worked out.
+    var lines = "Cavity " ~ frcInBare(innerL) ~ " x " ~ frcInches(innerW)
+        ~ ", walls hold " ~ roundToPrecision(engage, 0)
+        ~ " percent of the battery height. ";
+    if (definition.strapSlots)
+        lines ~= "Strap slots " ~ frcInches(definition.strapWidth
+                + definition.slotClear) ~ " in both walls. ";
+    if (definition.connectorNotch)
+        lines ~= "Lead opening 1.75 in in one end wall, by eye for an SB50. ";
+    if (tabHoles > 0)
+        lines ~= "" ~ tabHoles ~ " tab holes on 0.5 in. ";
+    lines ~= "Tray mass " ~ frcLb(vol * frcDensity(definition.material)) ~ ". ";
+    lines ~= "R601 fixes the battery at 7.1 x 3.0 x 6.6 in plus 0.1 in each"
+        ~ " way, 11.0 to 14.5 lb. R606: strap it, walls alone fail inspection."
+        ~ " R607: boots protect the terminals, not this tray. Keep it low.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################## INSPECTION ##############################
+
+/**
+ * Whether the robot passes the checks an inspector runs at the table.
+ *
+ * Inspection is two measurements and a scale, all three decided months earlier
+ * in CAD: the frame perimeter, taken with the bumpers on, the height, and the
+ * weight. In 2026 R104 sets the perimeter at 120 in with bumpers, and the
+ * height limit moves with the game, so both arrive here as fields rather than
+ * as numbers written into the code.
+ *
+ * The perimeter here is the footprint over the bumpers. It is not the number
+ * the Bumper feature in FRC Structure Geometry checks: that one measures the
+ * outer outline of the picked frame face itself, which is the bare frame
+ * before the bumper band is grown outward, and holds it to a smaller figure.
+ * Two different measurements against the same rule, so two different numbers,
+ * and the labels on both say which is which.
+ *
+ * The measured box is taken in the floor frame, which is what makes its top a
+ * height above the carpet rather than a height above whatever the origin
+ * happens to be. It covers the bodies as modeled, so bumpers that are not in
+ * the model are not in the box either. That is why the frame footprint is
+ * typed in rather than measured: the number the inspector uses includes
+ * bumper material that most CAD models never contain.
+ */
+export function frcInspectionBuild(context is Context, id is Id, definition is map)
+{
+    // The floor the robot stands on, and with it the direction that counts as
+    // up. An empty pick leaves the top plane, which is where a robot modeled
+    // from the origin usually sits.
+    const floorPlane = frcPickFrame(context, definition.floor, XY_PLANE);
+    const cSys = frcFaceCSys(floorPlane);
+
+    // Evaluated before anything is built, so that an envelope box drawn later
+    // in this same feature can never end up inside its own measurement.
+    const bodies = evaluateQuery(context, definition.bodies);
+
+    const w = definition.frameWidth;
+    const l = definition.frameLength;
+    const perimeter = 2 * (w + l);
+    const perimeterOk = perimeter <= definition.perimeterLimit;
+    const heightOk = definition.robotHeight <= definition.heightLimit;
+
+    const robot = definition.weightLb * FRC_POUND;
+    const limRobot = definition.weightLimitLb * FRC_POUND;
+    const limBumpers = definition.bumpersLimitLb * FRC_POUND;
+    const weightOk = robot <= limRobot;
+    const bumperRoom = limBumpers - robot;
+
+    // Onshape renders this panel as one flowing paragraph, so every check is
+    // a sentence of the same shape: the value, the limit it is measured
+    // against, then the margin either way, with the rule number leading
+    // wherever the manual gives one. What went: the footprint, which is the
+    // frame width and the frame length the user typed into this same dialog
+    // and which are already inside the perimeter below; the measured box
+    // width and length, which are checked against nothing, since the
+    // perimeter is typed in precisely because the model does not contain the
+    // bumpers; and the kilogram half of every weight. Every check kept its
+    // citation, the value behind it and its pass or fail, and the measured
+    // height still says it was not checked, never that it passed, when
+    // nothing was picked.
+    //
+    // "left" against "over by" is the pass and the fail of each sentence, and
+    // both have to stay unmistakable now that they run together in one
+    // paragraph. The measured perimeter goes through frcInBare, so its unit
+    // is stated once, on the limit it is measured against.
+    var lines = "R104 perimeter " ~ frcInBare(perimeter) ~ " of "
+        ~ frcInches(definition.perimeterLimit) ~ ", " ~ (perimeterOk
+            ? (frcInches(definition.perimeterLimit - perimeter) ~ " left")
+            : ("over by " ~ frcInches(perimeter - definition.perimeterLimit)))
+        ~ ". ";
+    // No rule number on this one. The height limit moves with the game and
+    // nothing in this library cites a rule for it, so the sentence carries
+    // none rather than an invented one.
+    lines ~= "Height " ~ frcInBare(definition.robotHeight) ~ " of "
+        ~ frcInches(definition.heightLimit) ~ ", " ~ (heightOk
+            ? (frcInches(definition.heightLimit - definition.robotHeight)
+                ~ " left")
+            : ("over by " ~ frcInches(definition.robotHeight
+                - definition.heightLimit))) ~ ". ";
+
+    // What the model itself says, which is the half of the report that cannot
+    // be fooled by a stale number typed into the panel.
+    var modeled = 0 * kilogram;
+    // Three states, not two. A height that was never measured is not a height
+    // that passed, and a feature whose whole job is telling a team whether it
+    // passes inspection must never report a check it did not run.
+    var boxChecked = false;
+    var boxOk = false;
+    if (size(bodies) == 0)
+        lines ~= "Measured height not checked: nothing picked. ";
+    else
+    {
+        // Tight, because this box is the measured height an inspector's gauge
+        // has to agree with. Onshape's loose box is allowed to be larger than
+        // the body on curved faces, and a height reported high fails a robot
+        // that would have passed.
+        const bb = evBox3d(context, { "topology" : qUnion(bodies), "cSys" : cSys,
+                    "tight" : true });
+        const top = bb.maxCorner[2];
+        boxOk = top <= definition.heightLimit;
+        boxChecked = true;
+        modeled = evVolume(context, { "entities" : qUnion(bodies) })
+            * frcDensity(definition.material);
+        lines ~= "Measured height " ~ frcInBare(top) ~ " of "
+            ~ frcInches(definition.heightLimit) ~ ", " ~ (boxOk
+                ? (frcInches(definition.heightLimit - top) ~ " left")
+                : ("over by " ~ frcInches(top - definition.heightLimit)))
+            ~ ". ";
+        // Worth saying only when it happens: a part hanging below the floor
+        // plane means the floor face was picked from the wrong side, and the
+        // measured height above is short by that much.
+        if (bb.minCorner[2] < -0.01 * inch)
+            lines ~= "NOTE: " ~ frcInches(-bb.minCorner[2])
+                ~ " of part below the floor, so flip the pick. ";
+    }
+
+    lines ~= "R103 robot " ~ frcLb(robot) ~ " of " ~ frcLb(limRobot)
+        ~ ", " ~ (weightOk
+            ? (frcLb(limRobot - robot) ~ " left")
+            : ("over by " ~ frcLb(robot - limRobot))) ~ ". ";
+    lines ~= ((bumperRoom >= 0 * kilogram)
+            ? ("R408 leaves bumpers " ~ frcLb(bumperRoom) ~ " of "
+                ~ frcLb(limBumpers))
+            : ("R408 leaves nothing for bumpers, over " ~ frcLb(limBumpers)
+                ~ " by " ~ frcLb(-bumperRoom))) ~ ". ";
+    // The modeled mass carries the caveat that qualifies it rather than
+    // spending a sentence of its own on it: a CAD model weighs less than the
+    // robot it describes, so this figure is a floor, not the scale reading.
+    if (size(bodies) > 0)
+        lines ~= "" ~ size(bodies) ~ " parts, " ~ frcLb(modeled) ~ " as "
+            ~ frcMaterialLabel(definition.material) ~ "; CAD runs light. ";
+
+    if (definition.showEnvelope)
+    {
+        // The box the robot has to live inside: the footprint you typed, as
+        // tall as the height limit, standing on the floor plane.
+        const sk = newSketchOnPlane(context, id + "e", { "sketchPlane" : floorPlane });
+        const c = [vector(w / 2, l / 2), vector(-w / 2, l / 2),
+                   vector(-w / 2, -l / 2), vector(w / 2, -l / 2)];
+        skPolyline(sk, "e", { "points" : append(c, c[0]) });
+        skSolve(sk);
+        opExtrude(context, id + "ex", { "entities" : qSketchRegion(id + "e", false),
+                    "direction" : floorPlane.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.heightLimit });
+        const envBody = qCreatedBy(id + "ex", EntityType.BODY);
+        setProperty(context, { "entities" : envBody, "propertyType" : PropertyType.NAME,
+                    "value" : "Inspection Envelope" });
+        // REFERENCE is what this box is; the enum calls that class "Envelopes
+        // and reference" and this is the envelope it was named for. The alpha
+        // form is used because every FRCTeamPaint color is opaque, and an
+        // opaque envelope hides the robot it is drawn around, which is the one
+        // thing it exists to let a team see. frcTeamColorA hands the literal
+        // back untouched when no color is set for the class, so a Part Studio
+        // without a color scheme gets exactly the blue it got before.
+        //
+        // The material is the other half of the same fix, and it is not really
+        // a material. This body carried none, and the weigh loop in Weight
+        // Budget only invents a density for parts that carry none: a 30 by 30
+        // by 48 in envelope is 0.71 m^3, which came out at over four thousand
+        // pounds of aluminum against a 150 lb limit, in the fallback group,
+        // silently. Any density above zero is read off the part instead, and
+        // Onshape has no zero-density material, so this is the smallest one
+        // that still reads as assigned. It would take a 45 m^3 envelope, 3.6 m
+        // on a side, to reach the 0.001 lb the report can print.
+        frcApplyNamed(context, envBody, "Reference envelope (no mass)",
+            1e-5 * kilogram / meter ^ 3,
+            frcTeamColorA(context, FRCPartClass.REFERENCE,
+                    color(0.20, 0.55, 0.85, 0.25), 0.25));
+        // The size is the frame width, the frame length and the height limit
+        // the user typed, so the sentence says only what the box is for.
+        lines ~= "The envelope has no mass but counts as a part. ";
+    }
+
+    // The verdict this feature exists to give, worked out here rather than
+    // after the panel so that it can lead it. A team reading one flowing
+    // paragraph should not have to assemble the answer out of six checks.
+    // The same list feeds the warning below, so the two can never disagree.
+    var failed = [];
+    if (!perimeterOk)
+        failed = append(failed, "perimeter");
+    if (!heightOk)
+        failed = append(failed, "height");
+    if (boxChecked && !boxOk)
+        failed = append(failed, "measured height");
+    if (!weightOk)
+        failed = append(failed, "weight");
+    if (bumperRoom < 0 * kilogram)
+        failed = append(failed, "weight with bumpers");
+    var list = "";
+    for (var i = 0; i < size(failed); i += 1)
+        list ~= ((i == 0) ? "" : ", ") ~ failed[i];
+    // Nothing picked means the measured height was skipped, not passed, so
+    // the verdict says which of the two clean sweeps this is. Every check
+    // still carries its own value and its own margin below.
+    var head = boxChecked ? "Passes every check. "
+        : "Passes every check it ran. ";
+    if (size(failed) > 0)
+        head = "Would not pass: " ~ list ~ ". ";
+
+    // One sentence, and the one that decides whether the numbers above mean
+    // anything: what each rule counts. R104 measures the frame perimeter with
+    // the bumpers on, R408 weighs the robot with them, R103 weighs it without,
+    // and none of the three includes the battery.
+    lines ~= "Bumpers are in R104 and R408, not R103; battery in none.";
+    reportFeatureInfo(context, id, head ~ lines);
+
+    if (size(failed) > 0)
+        reportFeatureWarning(context, id, "Would not pass inspection: " ~ list
+            ~ ". The report shows how far over each one is.");
+}

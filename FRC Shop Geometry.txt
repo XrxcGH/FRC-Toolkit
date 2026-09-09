@@ -1,0 +1,1112 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+
+// ===========================================================================
+//  FRC SHOP GEOMETRY: part setup, cut lists, patterns and studio utilities
+// ---------------------------------------------------------------------------
+//  FRC Parts, FRC Bolt Pattern, FRC COTS Pattern, FRC Extrude Individual,
+//  FRC Origin Cube, FRC Design Constants and FRC Mate Connectors are declared
+//  in the FRC Toolkit tab and do their work here.
+// ===========================================================================
+
+export const FRC_COUNT_BOUNDS = { (unitless) : [1, 4, 500] } as IntegerBoundSpec;
+export const FRC_STARTAT_BOUNDS = { (unitless) : [1, 1, 9999] } as IntegerBoundSpec;
+
+// ############################## PART REPORT #############################
+
+export enum FRCNameMode
+{
+    annotation { "Name" : "Leave the names alone" }   KEEP,
+    annotation { "Name" : "Number them in order" }    NUMBER,
+    annotation { "Name" : "Name them by stock size" } STOCK
+}
+
+/** Nearest stock thickness a plate would be cut from, for the cut list. */
+export function frcNearestStock(t is ValueWithUnits) returns ValueWithUnits
+{
+    var best = 0.125 * inch;
+    var err = 1e6 * inch;
+    for (var s in [0.032, 0.040, 0.0625, 0.090, 0.100, 0.125, 0.160, 0.190,
+                0.250, 0.312, 0.375, 0.500, 0.750, 1.000])
+    {
+        const d = abs(t - s * inch);
+        if (d < err)
+        {
+            err = d;
+            best = s * inch;
+        }
+    }
+    return best;
+}
+
+/**
+ * One pass over the selected parts that does the three jobs a build team keeps
+ * doing by hand: set the material so the mass is real, name the parts, and
+ * write out a cut list of the stock each one comes from.
+ */
+export function frcPartsBuild(context is Context, id is Id, definition is map)
+{
+    const bodies = evaluateQuery(context, definition.bodies);
+    if (size(bodies) == 0)
+        throw regenError("Select the parts to set up.", ["bodies"]);
+    if (size(bodies) > 200)
+        throw regenError("That is more parts than one report should carry. Split the selection.", ["bodies"], definition.bodies);
+
+    const rho = frcDensity(definition.material);
+    var total = 0 * kilogram;
+    var rows = "";
+
+    // What class the selected parts count as, for the studio-wide scheme. The
+    // Toolkit tab offers it as "These parts are". The guard below still
+    // stands, so a definition handed here without the field counts as
+    // everything else, which is the honest answer for a feature that will
+    // take any body given to it.
+    var partClass = FRCPartClass.OTHER;
+    if (definition.partClass is FRCPartClass)
+        partClass = definition.partClass;
+
+    for (var i = 0; i < size(bodies); i += 1)
+    {
+        const b = bodies[i];
+        const vol = evVolume(context, { "entities" : b });
+        const mass = vol * rho;
+        total = total + mass;
+
+        const bx = evBox3d(context, { "topology" : b, "tight" : true });
+        var dims = [bx.maxCorner[0] - bx.minCorner[0], bx.maxCorner[1] - bx.minCorner[1],
+                    bx.maxCorner[2] - bx.minCorner[2]];
+        dims = sort(dims, function(x, y)
+            {
+                return y - x;
+            });
+        const long = dims[0];
+        const wide = dims[1];
+        const thick = dims[2];
+
+        if (definition.setMaterial)
+        {
+            try silent
+            {
+                // The name written here is not decoration. Weight Budget reads
+                // it back and asks frcIsPrintedName whether the part is a print,
+                // and a print is weighed at an infill reduced density. Writing
+                // the free text field let a PLA part keep the shipped default
+                // name "6061 aluminum" and be weighed as solid plastic, which
+                // is the one error in this feature a user would never see. The
+                // dropdown that supplies rho supplies the name to match it.
+                setProperty(context, { "entities" : b, "propertyType" : PropertyType.MATERIAL,
+                            "value" : material(frcMaterialName(definition.material), rho) });
+            }
+        }
+        if (definition.colorParts)
+        {
+            try silent
+            {
+                // This feature used to carry three red, green and blue reals of
+                // its own, which was the library's only color override before
+                // there was a studio-wide one. Two ways to set a color, one of
+                // them reaching a single feature, is worse than one that reaches
+                // all of them, so the reals are gone and this now colors from
+                // exactly what frcApplyPart colors from everywhere else: the
+                // class scheme if there is one, the material if there is not.
+                // The alpha comes from the material too, so a polycarbonate part
+                // stays see-through.
+                setProperty(context, { "entities" : b, "propertyType" : PropertyType.APPEARANCE,
+                            "value" : frcTeamColorA(context, partClass,
+                                frcColor(definition.material),
+                                frcMaterialAlpha(definition.material)) });
+            }
+        }
+
+        var label = "";
+        if (definition.naming == FRCNameMode.NUMBER)
+            label = definition.prefix ~ "-" ~ (definition.startAt + i);
+        else if (definition.naming == FRCNameMode.STOCK)
+            label = definition.prefix ~ " " ~ frcInches(frcNearestStock(thick)) ~ " x "
+                ~ frcInches(wide) ~ " x " ~ frcInches(long);
+        if (label != "")
+        {
+            try silent
+            {
+                setProperty(context, { "entities" : b, "propertyType" : PropertyType.NAME,
+                            "value" : label });
+            }
+        }
+
+        // The row carries the cut size and the stock to cut it from, and not
+        // the mass: that costs 22 characters a row on a panel that already
+        // totals it. Under stock naming the name is the size, so that row
+        // prints the measured thickness rather than saying it all twice.
+        if (definition.cutList && i < 40)
+            rows = rows ~ ((definition.naming == FRCNameMode.STOCK)
+                ? (label ~ ", cut " ~ frcInches(thick))
+                : ((label == "" ? ("part " ~ (i + 1)) : label) ~ ", "
+                    ~ frcInches(long) ~ " x " ~ frcInches(wide) ~ " x " ~ frcInches(thick)
+                    ~ ", stock " ~ frcInches(frcNearestStock(thick)))) ~ ". ";
+    }
+
+    // The mass comes from the Material dropdown and is taken off the measured
+    // volume, so pockets and holes are already counted out of it.
+    var lines = "" ~ size(bodies) ~ " parts, " ~ frcFormatMass(total) ~ " in total. ";
+    if (definition.cutList)
+    {
+        lines ~= "Cut list, longest side first: " ~ rows;
+        if (size(bodies) > 40)
+            lines ~= "And " ~ (size(bodies) - 40) ~ " more, not listed.";
+    }
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################# BOLT PATTERN #############################
+
+export enum FRCPatternKind
+{
+    annotation { "Name" : "Grid, half inch spacing" } GRID,
+    annotation { "Name" : "A row of holes" }          ROW,
+    annotation { "Name" : "Bolt circle" }             CIRCLE
+}
+
+/**
+ * The hole patterns that come up over and over on an FRC robot: the half-inch
+ * grid every vendor's tube is drilled on, a single row, and a bolt circle for
+ * a motor face. Placed from one point, so it lands where you put it.
+ */
+export function frcPatternBuild(context is Context, id is Id, definition is map)
+{
+    const tf = evaluateQuery(context, definition.face);
+    if (size(tf) == 0)
+        throw regenError("Select the flat face to drill.", ["face"]);
+
+    // Pattern and mirror support. The picked face is what anchors the holes in
+    // space, so it is the reference the pattern transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.face });
+
+    const pl = evPlane(context, { "face" : tf[0] });
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    const bodyQ = qOwnerBody(tf[0]);
+    const thickness = frcMaterialDepth(context, bodyQ, cSys);
+
+    var org = vector(0, 0) * inch;
+    const anchors = evaluateQuery(context, definition.origin);
+    if (size(anchors) > 0)
+    {
+        try silent
+        {
+            const rel = evVertexPoint(context, { "vertex" : anchors[0] }) - cSys.origin;
+            org = vector(dot(rel, cSys.xAxis), dot(rel, yAxis));
+        }
+    }
+
+    const a = definition.angle;
+    const u = vector(cos(a), sin(a));
+    const v = vector(-sin(a), cos(a));
+    const dia = frcHoleDiameter(definition.holeSize);
+
+    var pts = [];
+    if (definition.kind == FRCPatternKind.GRID)
+    {
+        if (definition.countX * definition.countY > 900)
+            throw regenError("That grid has too many holes. Reduce the counts.", ["countX"]);
+        for (var i = 0; i < definition.countX; i += 1)
+        {
+            for (var j = 0; j < definition.countY; j += 1)
+                pts = append(pts, org + u * (i * definition.pitchX) + v * (j * definition.pitchY));
+        }
+    }
+    else if (definition.kind == FRCPatternKind.ROW)
+    {
+        for (var i = 0; i < definition.countX; i += 1)
+            pts = append(pts, org + u * (i * definition.pitchX));
+    }
+    else
+    {
+        for (var i = 0; i < definition.countX; i += 1)
+        {
+            const th = a + (360 * degree) * i / definition.countX;
+            pts = append(pts, org + frcPolar(definition.circleDia / 2, th));
+        }
+    }
+
+    const skPlane = plane(pl.origin + pl.normal * (0.02 * inch), pl.normal, pl.x);
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : skPlane });
+    for (var i = 0; i < size(pts); i += 1)
+        skCircle(sk, "h" ~ i, { "center" : pts[i], "radius" : dia / 2 });
+    if (definition.kind == FRCPatternKind.CIRCLE && definition.pilot)
+        skCircle(sk, "pilot", { "center" : org, "radius" : definition.pilotDia / 2 });
+    skSolve(sk);
+    // The cutter starts 0.02 in clear of the face, so a blind hole has to run
+    // that much further to reach the depth the dialog asked for. Without the
+    // term a 0.25 in hole reaches only 0.23 in into the material.
+    opExtrude(context, id + "x", { "entities" : qSketchRegion(id + "s", false),
+                "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : (definition.throughAll ? thickness + 0.1 * inch : definition.depth + 0.02 * inch) });
+
+    // The move goes on before the subtraction, not after it. A subtraction
+    // consumes the cutters, so a transform at the end of the feature would
+    // find none of this feature's own bodies left to move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    try
+    {
+        opBoolean(context, id + "sub", { "tools" : qCreatedBy(id + "x", EntityType.BODY),
+                    "targets" : bodyQ, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    catch
+    {
+        throw regenError("The pattern did not land on the part. Check the start point and the counts.", ["origin"], definition.origin);
+    }
+
+    var lines = "" ~ size(pts) ~ " holes cut at " ~ frcInches(dia) ~ ".";
+    // The pilot is a second, larger bore this feature also cuts, so it has to
+    // be reported. 0.755 in, the default, is the pilot the Falcon and NEO
+    // drawings publish, which clears the 0.750 in boss by 0.005 in.
+    if (definition.kind == FRCPatternKind.CIRCLE && definition.pilot)
+        lines ~= " Pilot bore " ~ frcInches(definition.pilotDia) ~ ".";
+    if (definition.kind == FRCPatternKind.GRID)
+        lines ~= " FRC tube vendors drill 0.5 in grids with #10 clearance.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ########################### EXTRUDE INDIVIDUAL #########################
+
+export enum FRCExtrudeSide
+{
+    annotation { "Name" : "One direction" }   ONE,
+    annotation { "Name" : "Symmetric" }       SYMMETRIC,
+    annotation { "Name" : "Both directions" } TWO
+}
+
+/**
+ * Extrude every selected region into a part of its own.
+ *
+ * A single extrude merges regions that touch into one body, which is the right
+ * answer for a solid and the wrong one for a sheet of parts nested edge to
+ * edge. Running one extrude per region keeps them separate whatever they touch.
+ */
+export function frcExtrudeIndividualBuild(context is Context, id is Id, definition is map)
+{
+    const regions = evaluateQuery(context, definition.regions);
+    if (size(regions) == 0)
+        throw regenError("Select the sketch regions or faces to extrude.", ["regions"]);
+    if (size(regions) > 200)
+        throw regenError("That is more regions than one feature should extrude. Split the selection.", ["regions"], definition.regions);
+
+    // Pattern and mirror support. The picked regions are what put the parts in
+    // space, so they are the reference the pattern transform is measured
+    // against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.regions });
+
+    // This feature used to hand back bare solids: no name, no material, no
+    // color. Every other creator in the library finishes what it makes, and
+    // the missing material was not cosmetic. Weight Budget weighs a part at
+    // the density the reader picks for it, so a nested sheet of parts that
+    // says nothing about what it is made of gets weighed at whatever was
+    // guessed, which is the one error here nobody would ever see.
+    //
+    // The Toolkit tab now carries a material for these parts. 6061 remains
+    // the fallback if the field is ever absent: it is the default every
+    // material dropdown in this library ships with, and it is what a sheet of
+    // nested parts is cut from far more often than not.
+    var m = FRCMaterial.AL_6061;
+    if (definition.material is FRCMaterial)
+        m = definition.material;
+
+    var made = 0;
+    var failed = 0;
+    for (var i = 0; i < size(regions); i += 1)
+    {
+        var n = vector(0, 0, 1);
+        var gotPlane = false;
+        try silent
+        {
+            n = evOwnerSketchPlane(context, { "entity" : regions[i] }).normal;
+            gotPlane = true;
+        }
+        if (!gotPlane)
+        {
+            try silent
+            {
+                n = evPlane(context, { "face" : regions[i] }).normal;
+                gotPlane = true;
+            }
+        }
+        if (!gotPlane)
+        {
+            failed += 1;
+            continue;
+        }
+        const dir = definition.flip ? -n : n;
+        var args = { "entities" : regions[i], "direction" : dir,
+                     "endBound" : BoundingType.BLIND, "endDepth" : definition.depth };
+        if (definition.side == FRCExtrudeSide.SYMMETRIC)
+        {
+            args.endDepth = definition.depth / 2;
+            args.startBound = BoundingType.BLIND;
+            args.startDepth = definition.depth / 2;
+        }
+        else if (definition.side == FRCExtrudeSide.TWO)
+        {
+            args.startBound = BoundingType.BLIND;
+            args.startDepth = definition.secondDepth;
+        }
+        var ok = false;
+        try silent
+        {
+            opExtrude(context, id + ("x" ~ i), args);
+            ok = true;
+        }
+        if (ok)
+        {
+            const partsQ = qCreatedBy(id + ("x" ~ i), EntityType.BODY);
+            const parts = evaluateQuery(context, partsQ);
+            // Numbered across the whole feature and not per region, so the
+            // parts read 1 to N down the list however many regions were
+            // picked and however many bodies each one turned into.
+            for (var b in parts)
+            {
+                made += 1;
+                try silent
+                {
+                    setProperty(context, { "entities" : b,
+                                "propertyType" : PropertyType.NAME,
+                                "value" : "Extruded Part " ~ made });
+                }
+            }
+            // A closed profile swept one blind depth is a plate whatever was
+            // drawn on the sketch: flat, one thickness, cut from sheet. That
+            // is the class it belongs in, and it is what the parts this
+            // feature exists for, a sheet of them nested edge to edge, are.
+            if (size(parts) > 0)
+                frcApplyPart(context, partsQ, m, FRCPartClass.PLATE);
+        }
+        else
+            failed += 1;
+    }
+    if (made == 0)
+        throw regenError("None of those regions could be extruded. Select closed sketch regions or flat faces.", ["regions"], definition.regions);
+
+    // Nothing here is measured after the fact, so every part this feature made
+    // moves once, here.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    // The panel names the material so the user can see what the parts were
+    // weighed as without opening the dialog again. The parts themselves carry
+    // it, and carry the name and the color of a plate with it.
+    var lines = "" ~ made ~ " of " ~ size(regions) ~ " regions extruded as "
+        ~ frcMaterialName(m) ~ " parts.";
+    if (failed > 0)
+        lines ~= " NOTE " ~ failed
+            ~ " were skipped, not a closed region on a flat plane.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################## ORIGIN CUBE #############################
+
+export const FRC_CUBE_BOUNDS = { (meter) : [0.001, 0.0254, 1], (centimeter) : 2.54,
+    (millimeter) : 25.4, (inch) : 1, (foot) : 0.0833, (yard) : 0.0278 } as LengthBoundSpec;
+
+/**
+ * A cube at the origin, for scale and for orientation.
+ *
+ * One corner is notched so the cube reads the same way up from every view,
+ * which is the whole point of it: a plain cube tells you nothing about which
+ * way a part has been derived in or exported. The notched corner is the one
+ * furthest along all three positive axes.
+ */
+export function frcOriginCubeBuild(context is Context, id is Id, definition is map)
+{
+    // Pattern and mirror support. The optional mate connector is what places
+    // the cube, so it is the reference the pattern transform is measured
+    // against. With nothing picked the query is empty, which leaves the whole
+    // pattern transform as the remainder, and that is what a cube sitting on
+    // the world origin wants.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    var cs = coordSystem(vector(0, 0, 0) * meter, vector(1, 0, 0), vector(0, 0, 1));
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) > 0)
+    {
+        try silent
+        {
+            cs = evMateConnector(context, { "mateConnector" : loc[0] });
+        }
+    }
+    const s = definition.size;
+    const half = definition.centered ? s / 2 : 0 * inch;
+    const yAxis = cross(cs.zAxis, cs.xAxis);
+    const base = cs.origin - cs.xAxis * half - yAxis * half - cs.zAxis * half;
+
+    const sk = newSketchOnPlane(context, id + "s",
+        { "sketchPlane" : plane(base, cs.zAxis, cs.xAxis) });
+    skRectangle(sk, "r", { "firstCorner" : vector(0, 0) * inch, "secondCorner" : vector(s, s) });
+    skSolve(sk);
+    opExtrude(context, id + "x", { "entities" : qSketchRegion(id + "s", false),
+                "direction" : cs.zAxis, "endBound" : BoundingType.BLIND, "endDepth" : s });
+    const cube = qCreatedBy(id + "x", EntityType.BODY);
+
+    // Notch the far corner, so which way is up is never in doubt.
+    const notch = s / 5;
+    const far = base + cs.xAxis * s + yAxis * s + cs.zAxis * s;
+    const skn = newSketchOnPlane(context, id + "n",
+        { "sketchPlane" : plane(far - cs.zAxis * notch, cs.zAxis, cs.xAxis) });
+    skRectangle(skn, "r", { "firstCorner" : vector(-notch, -notch),
+                "secondCorner" : vector(0, 0) * inch });
+    skSolve(skn);
+    opExtrude(context, id + "nx", { "entities" : qSketchRegion(id + "n", false),
+                "direction" : cs.zAxis, "endBound" : BoundingType.BLIND, "endDepth" : notch * 2 });
+    try silent
+    {
+        opBoolean(context, id + "nsub", { "tools" : qCreatedBy(id + "nx", EntityType.BODY),
+                    "targets" : cube, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    // The cube is reference geometry and takes no material on purpose: it is
+    // not made of anything, and a material on it would only invite the weight
+    // report to count it. The color follows the studio scheme like everything
+    // else, at the transparency it has always had. A cube you cannot see
+    // through is no use as a scale reference, and the team paint carries no
+    // alpha of its own, so the alpha is handed over beside it.
+    try silent
+    {
+        setProperty(context, { "entities" : cube, "propertyType" : PropertyType.NAME,
+                    "value" : "Origin Cube" });
+        setProperty(context, { "entities" : cube, "propertyType" : PropertyType.APPEARANCE,
+                    "value" : frcTeamColorA(context, FRCPartClass.REFERENCE,
+                        color(0.45, 0.48, 0.52, 0.45), 0.45) });
+    }
+
+    // The notch is cut out of this feature's own cube, so the cube survives
+    // the subtraction and is moved once, here.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    var lines = "A scale and orientation reference only. Delete the cube "
+        ~ "before release.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################ DESIGN CONSTANTS ##########################
+
+/**
+ * The handful of numbers a whole robot is dimensioned from, set as Part
+ * Studio variables in one place.
+ *
+ * Sketches and features reference them as #frcHoleSpacing and the like, so
+ * changing the tube size or the fastener once changes it everywhere rather
+ * than in forty sketches. The defaults are the sizes this library treats as
+ * standard, so a studio that never opens this feature still matches.
+ */
+export function frcConstantsBuild(context is Context, id is Id, definition is map)
+{
+    const values = [
+            ["frcTubeSize", definition.tubeSize],
+            ["frcTubeWall", definition.tubeWall],
+            ["frcHoleSpacing", definition.holeSpacing],
+            ["frcFastenerHole", frcHoleDiameter(definition.fastenerHole)],
+            ["frcBearingOD", frcBearingOD(definition.bearingOD)],
+            ["frcShaftFlats", frcHexAcrossFlats(definition.hexSize)],
+            ["frcPlateThickness", definition.plateThickness],
+            ["frcGussetThickness", definition.gussetThickness],
+            ["frcEndMill", definition.endMill]
+        ];
+    for (var v in values)
+        setVariable(context, v[0], v[1]);
+
+    // The color scheme rides along with the constants, because it is the
+    // same kind of thing: a decision a team makes once for the whole robot and
+    // wants every feature below to obey. It goes out as one variable holding a
+    // map keyed by part class, and only the classes actually painted are put
+    // in it. A class left at "Leave it the material" is simply absent, so
+    // frcTeamColor finds nothing for it and falls through to the material
+    // color, which is what that choice means.
+    //
+    // What the map carries is the paint choice itself and not the color it
+    // stands for. Half the bodies in this library are drawn translucent on
+    // purpose and have to rebuild the team color at their own alpha, and an
+    // alpha cannot be recovered from a color already flattened to opaque.
+    // frcTeamColorA does that rebuilding and needs the name of the paint to
+    // do it with.
+    var byClass = {};
+    var painted = 0;
+    if (definition.customColors == true)
+    {
+        const picks = [
+                [FRCPartClass.PLATE, definition.paintPlate],
+                [FRCPartClass.STRUCTURE, definition.paintStructure],
+                [FRCPartClass.DRIVE, definition.paintDrive],
+                [FRCPartClass.SHAFT, definition.paintShaft],
+                [FRCPartClass.WHEEL, definition.paintWheel],
+                [FRCPartClass.BEARING, definition.paintBearing],
+                [FRCPartClass.BUMPER, definition.paintBumper],
+                [FRCPartClass.PNEUMATIC, definition.paintPneumatic],
+                [FRCPartClass.ELECTRICAL, definition.paintElectrical],
+                [FRCPartClass.GAMEPIECE, definition.paintGamepiece],
+                [FRCPartClass.REFERENCE, definition.paintReference],
+                [FRCPartClass.LAYOUT, definition.paintLayout],
+                [FRCPartClass.OTHER, definition.paintOther]
+            ];
+        for (var pk in picks)
+        {
+            if (pk[1] != FRCTeamPaint.DEFAULT)
+            {
+                byClass[pk[0]] = pk[1];
+                painted += 1;
+            }
+        }
+    }
+    setVariable(context, FRC_COLOR_VAR,
+        { "on" : definition.customColors == true, "byClass" : byClass });
+
+    var lines = "";
+    for (var v in values)
+        lines ~= ((lines == "") ? "" : ", ") ~ "#" ~ v[0] ~ " " ~ frcInches(v[1]);
+    lines ~= ". Reference these in any sketch or field below as #frcHoleSpacing. ";
+    if (definition.customColors == true)
+        lines ~= "Custom colors are on, " ~ painted ~ " of 13 classes painted.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################# COTS PATTERNS ############################
+
+export enum FRCCotsPattern
+{
+    annotation { "Name" : "SDS MK4 chassis plate" } MK4,
+    annotation { "Name" : "1.125 bore, 1.500 C-C" } BP_1125_1500,
+    annotation { "Name" : "1.125 bore, 2.000 C-C" } BP_1125_2000,
+    annotation { "Name" : "0.875 bore, 1.250 C-C" } BP_0875_1250,
+    annotation { "Name" : "0.875 bore, 2.000 C-C" } BP_0875_2000,
+    annotation { "Name" : "CIM face" }              CIM_FACE,
+    annotation { "Name" : "CIM face, pilot boss" }  MOTOR_CIM,
+    annotation { "Name" : "550 motor" }             MOTOR_550,
+    annotation { "Name" : "775 motor" }             MOTOR_775,
+    annotation { "Name" : "BAG motor" }             MOTOR_BAG,
+    annotation { "Name" : "REV UltraPlanetary" }    GEARBOX_ULTRA,
+    annotation { "Name" : "REV MAXPlanetary" }      GEARBOX_MAXP,
+    annotation { "Name" : "Sport gearbox" }         GEARBOX_SPORT
+}
+
+/**
+ * Hole patterns for off-the-shelf parts. Every swerve and bearing pattern here
+ * is taken from the vendor's own dimensioned drawing. The motor and gearbox
+ * faces at the end are the one exception, and they say so.
+ *
+ * What is here is only what the vendors publish as dimensions. Most swerve
+ * makers publish an envelope and a fastener list but never locate the chassis
+ * holes: MK4i, MK4n, WCP Swerve X2, REV MAXSwerve, AndyMark Swerve and Steer,
+ * and Thrifty Swerve all keep those coordinates in a STEP file only, and
+ * no vendor dimensions a required plate bore for any module. Guessing any of
+ * that would produce a plate that does not bolt on, so those modules are left
+ * out rather than approximated and the report says where to get them instead.
+ *
+ * The motor faces are the exception this library makes, because no vendor
+ * dimensions those either and a team still has to cut the plate. They come
+ * from a community library instead, so `vendor` is false on those entries and
+ * both the comment on the table and the feature report say to measure the
+ * part before cutting.
+ *
+ * Returns hole positions relative to the anchor point, the hole diameter, an
+ * optional bore diameter, whether that bore is a motor pilot rather than a
+ * bearing seat, the bolt circle where there is one, whether the numbers are
+ * vendor data, and the source they came from.
+ */
+export function frcCotsPatternData(p is FRCCotsPattern, holes is number,
+    startAngle is ValueWithUnits) returns map
+{
+    if (p == FRCCotsPattern.MK4)
+    {
+        // From the SDS MK4 layout drawing: a 5.50 in square top plate with
+        // eight screws in an L along two adjacent edges, 1.000 in pitch and
+        // 0.250 in from each datum edge, with the steering axis at 3.00,
+        // 3.00 from the same corner. Positions below are measured from the
+        // steering axis, which is the point worth locating on a chassis plate.
+        // SDS has moved every module to 10-32 hardware; the layout drawing
+        // still shows 1/4-20, so the clearance hole here is #10 (0.196 in).
+        //
+        // Where the four holes sit along each leg is the one thing the
+        // dimensions quoted above do not settle, so each leg is placed
+        // symmetric about the steering axis, at plus and minus 0.500 and
+        // 1.500 in. That leaves the corner of the L with no hole in it, and
+        // it is the same eight positions FRC Swerve Chassis cuts from its
+        // own frcSwerveMk4Points. The two did not agree before: this entry
+        // ran each leg from 0.750 in behind the axis out to 0.250 in of the
+        // far plate edge, which nothing written here asks for.
+        var pts = [];
+        for (var k = 0; k < 4; k += 1)
+        {
+            pts = append(pts, vector(-1.5 + k * 1.0, -2.75) * inch);
+            pts = append(pts, vector(-2.75, -1.5 + k * 1.0) * inch);
+        }
+        return { "points" : pts, "hole" : 0.196 * inch, "bore" : 0 * inch,
+                 "pilot" : false, "circle" : 0 * inch, "vendor" : true,
+                 "name" : "SDS MK4 chassis mount",
+                 "note" : "Eight 10-32 in an L, 1.000 in pitch, 0.250 in from each datum edge, "
+                     ~ "each leg symmetric about the steering axis, so the corner of the L "
+                     ~ "carries no hole and FRC Swerve Chassis cuts the same eight. Every "
+                     ~ "SDS module is 10-32 now; the drawing still shows 1/4-20. No plate "
+                     ~ "bore is dimensioned.",
+                 "source" : "SDS MK4 layout drawing, hardware per the SDS 10-32 change" };
+    }
+    if (p == FRCCotsPattern.CIM_FACE)
+    {
+        var pts = [];
+        for (var k = 0; k < holes; k += 1)
+            pts = append(pts, frcPolar(1.0 * inch, startAngle + (360 * degree) * k / holes));
+        return { "points" : pts, "hole" : 0.196 * inch, "bore" : 0 * inch,
+                 "pilot" : false, "circle" : 2.000 * inch, "vendor" : true,
+                 "name" : "CIM-class motor face",
+                 "note" : "A 2.000 in bolt circle with #10-32 fasteners is the CIM-class standard "
+                     ~ "that VersaPlanetary, the WCP gearboxes and MAXPlanetary all mount "
+                     ~ "on. No vendor publishes the angular positions, so the count and "
+                     ~ "the start angle are yours to set against the part in hand.",
+                 "source" : "VEX, WCP and REV product documentation" };
+    }
+    // Motor and gearbox faces. Everything above comes from a vendor drawing;
+    // these do not, which is the whole reason they are flagged here and in
+    // the report. They come from a community FeatureScript library that
+    // asserts them without citing a drawing, so every number was checked
+    // against something else before it was let in: the vendor-cited motor
+    // data this library already carries, the hole sizes it already keeps,
+    // and whether the geometry can physically exist on the can it claims
+    // to fit.
+    //
+    // Corroborated, two sources agreeing:
+    //   the CIM-class 2.000 in circle and #10 holes, which match the
+    //   CIM_FACE entry above and the Falcon and NEO faces this library
+    //   cites to vendor drawings; the 0.750 in CIM boss, which is the
+    //   0.755 in pilot from those same drawings less this library's own
+    //   0.005 in clearance; the 550 face entire, count included, which the
+    //   NEO 550 entry in FRC Electrical Geometry carries from REV-21-1651-DR
+    //   and REV-21-1651-DS; and the MAXPlanetary bolt circle, which the
+    //   CIM_FACE note already places on the 2.000 in standard.
+    //
+    // Single source, community only:
+    //   the 775 and BAG faces entire, and every pilot boss except the CIM
+    //   and the 550 one. So are the hole counts, and a count is the last
+    //   thing to take on one source: this library's own NEO entry cuts six
+    //   holes where its note records REV's drawing calling out four, and the
+    //   550 count here was two until REV-21-1651-DS settled it at four.
+    //
+    // Left out on purpose:
+    //   VersaPlanetary. Its 0.1695 in hole is smaller than the 0.190 in
+    //   major diameter of the #10-32 screw it has to pass, so it cannot be
+    //   a clearance hole at all. The same library uses 0.1695 in for the
+    //   VRM and the PCM as well, where the vendor-cited number here is
+    //   0.150 in, so it reads as that library's generic small-screw hole
+    //   rather than a measurement. A VersaPlanetary mounts on the CIM-class
+    //   face, which is already offered.
+    const motors = {
+            FRCCotsPattern.MOTOR_CIM :
+                { "circle" : 2.000 * inch, "hole" : frcHoleDiameter(FRCHoleSize.NO10_CLEAR),
+                  "boss" : 0.750 * inch, "count" : 2,
+                  "name" : "CIM-class motor with pilot boss",
+                  "note" : "Community data, corroborated. The 2.000 in circle and the #10 holes are "
+                     ~ "the same numbers the vendor-cited CIM-class face above carries, and the "
+                     ~ "0.750 in boss is the 0.755 in pilot the Falcon and NEO drawings give, "
+                     ~ "less this library's own 0.005 in clearance. The two holes 180 degrees "
+                     ~ "apart are the community default; use the CIM-class face entry instead "
+                     ~ "if the gearbox in hand wants four or six.",
+                  "source" : "Community FeatureScript library, corroborated by the vendor-cited motor data here" },
+            FRCCotsPattern.MOTOR_550 :
+                { "circle" : 25 * millimeter, "hole" : frcHoleDiameter(FRCHoleSize.M3_CLEAR),
+                  "boss" : 13 * millimeter, "count" : 4,
+                  "name" : "550 motor face, 25 mm bolt circle",
+                  "note" : "Community data, corroborated by a vendor drawing. The NEO 550 entry in "
+                     ~ "FRC Electrical Geometry cites REV-21-1651-DR and DS and agrees on the "
+                     ~ "25.0 mm circle, the M3 hole and the 13.0 mm boss, which is its "
+                     ~ "0.517 in pilot less this library's 0.005 in clearance. The count was "
+                     ~ "two here; it is now the four M3 that REV-21-1651-DS states. REV does "
+                     ~ "not say where they sit, so they are cut 90 degrees apart.",
+                  "source" : "Community FeatureScript library, corroborated by REV-21-1651-DR and DS" },
+            FRCCotsPattern.MOTOR_775 :
+                { "circle" : 29 * millimeter, "hole" : 4.5 * millimeter,
+                  "boss" : 17.5 * millimeter, "count" : 2,
+                  "name" : "775 motor face, 29 mm bolt circle",
+                  "note" : "Community data, single source. The 29 mm circle and the 17.5 mm boss both "
+                     ~ "sit well inside the 44.5 mm can of a 775, so they are plausible, but "
+                     ~ "nothing here confirms them. The 4.5 mm hole is the usual M4 clearance, "
+                     ~ "written out because this library's hole table stops at M3 and M5. "
+                     ~ "Measure the part before cutting.",
+                  "source" : "Community FeatureScript library, no vendor drawing cited" },
+            FRCCotsPattern.MOTOR_BAG :
+                { "circle" : 25 * millimeter, "hole" : 4.5 * millimeter,
+                  "boss" : 12 * millimeter, "count" : 2,
+                  "name" : "BAG motor face, 25 mm bolt circle",
+                  "note" : "Community data, single source. It shares the 25 mm circle with the 550 but "
+                     ~ "not the hole or the boss, which is itself worth a second look at the "
+                     ~ "part. The 4.5 mm hole is within 0.0002 in of the #8 clearance this "
+                     ~ "library keeps, so a #8 screw is the likely fastener on what is a VEX "
+                     ~ "part. Measure the part before cutting.",
+                  "source" : "Community FeatureScript library, no vendor drawing cited" },
+            FRCCotsPattern.GEARBOX_ULTRA :
+                { "circle" : 32 * millimeter, "hole" : frcHoleDiameter(FRCHoleSize.M3_CLEAR),
+                  "boss" : 22 * millimeter, "count" : 6,
+                  "name" : "REV UltraPlanetary face, 32 mm bolt circle",
+                  "note" : "Community data, single source for the 32 mm circle and the 22 mm boss. "
+                     ~ "The 3.4 mm hole is this library's own M3 clearance and the six "
+                     ~ "positions are the count that source gives for this gearbox. The holes "
+                     ~ "clear the boss by 3 mm of plate, so the set is at least buildable. "
+                     ~ "Measure the part before cutting.",
+                  "source" : "Community FeatureScript library, no vendor drawing cited" },
+            FRCCotsPattern.GEARBOX_MAXP :
+                { "circle" : 2.000 * inch, "hole" : frcHoleDiameter(FRCHoleSize.NO10_CLEAR),
+                  "boss" : 1.125 * inch, "count" : 8,
+                  "name" : "REV MAXPlanetary face, 2.000 in bolt circle",
+                  "note" : "Community data, the circle corroborated. The 2.000 in circle and the #10 "
+                     ~ "holes agree with the CIM-class entry above, whose note already puts "
+                     ~ "MAXPlanetary on that standard. The 1.125 in boss and the eight "
+                     ~ "positions are single source, though 1.125 in is a size this library "
+                     ~ "already treats as standard. Check the boss against the gearbox before "
+                     ~ "cutting.",
+                  "source" : "Community FeatureScript library for the boss, vendor documentation for the circle" },
+            FRCCotsPattern.GEARBOX_SPORT :
+                { "circle" : 2.000 * inch, "hole" : frcHoleDiameter(FRCHoleSize.NO10_CLEAR),
+                  "boss" : 1.500 * inch, "count" : 0,
+                  "name" : "Sport gearbox face, 2.000 in bolt circle",
+                  "note" : "Community data, single source, and the weakest entry here. The 2.000 in "
+                     ~ "circle and the #10 holes are the corroborated CIM-class standard, but "
+                     ~ "the 1.500 in boss rests on that one source, which names no vendor for "
+                     ~ "the part, and the boss leaves only about 0.15 in of plate between it "
+                     ~ "and the holes. No count is published, so the dialog asks for one and "
+                     ~ "this cuts what you set, six by default as on the CIM-class face. "
+                     ~ "Measure the part first: a 1.500 in bore cut wrong is a scrapped plate.",
+                  "source" : "Community FeatureScript library, no vendor drawing cited" }
+        };
+    if (motors[p] != undefined)
+    {
+        const m = motors[p];
+        // A count of zero in the table means the source gives no number of
+        // screws. Sport is the only entry like that, which is why the dialog
+        // offers a count and a start angle for it and why they are read here
+        // rather than hard-coded. Every other face carries its source's own
+        // count and is cut from zero degrees.
+        const cnt = (m.count == 0) ? holes : m.count;
+        const first = (m.count == 0) ? startAngle : 0 * degree;
+        var pts = [];
+        for (var k = 0; k < cnt; k += 1)
+            pts = append(pts, frcPolar(m.circle / 2, first + (360 * degree) * k / cnt));
+        return { "points" : pts, "hole" : m.hole, "bore" : m.boss,
+                 "pilot" : true, "circle" : m.circle, "vendor" : false,
+                 "name" : m.name, "note" : m.note, "source" : m.source };
+    }
+    // The four bearing retention plates WCP lists: a bore flanked by two
+    // mounting holes, on one of two center distances per bore size.
+    const t = {
+            FRCCotsPattern.BP_1125_1500 : [1.125, 1.500],
+            FRCCotsPattern.BP_1125_2000 : [1.125, 2.000],
+            FRCCotsPattern.BP_0875_1250 : [0.875, 1.250],
+            FRCCotsPattern.BP_0875_2000 : [0.875, 2.000]
+        }[p];
+    // Plate left between the nominal bore wall and the near edge of a #10
+    // hole. The 1.500 and the 1.250 center distances both come to 0.0895 in,
+    // a shade under the 0.090 in frcMinWall keeps for a milled part. These
+    // are catalogued WCP parts, so the number is theirs and the plate is
+    // buildable; what it has no margin left for is being thinned further.
+    const web = (t[1] - t[0]) / 2 * inch - 0.098 * inch;
+    var note = "WCP catalogs these four combinations and no others. The mounting holes "
+        ~ "are #10 on their system standard; the size is not stated on the part "
+        ~ "itself. No vendor publishes a press fit tolerance for the bore, so "
+        ~ "the fit quoted above is this library's own bearing press allowance.";
+    if (web < 0.090 * inch)
+        note = note ~ " This is one of the two tightest of the four: " ~ frcInches(web)
+            ~ " between "
+            ~ "the bore and the hole, just under the 0.090 in minimum wall this "
+            ~ "library keeps. Do not thin the plate or open the holes up.";
+    return { "points" : [vector(-t[1] / 2, 0) * inch, vector(t[1] / 2, 0) * inch],
+             "hole" : 0.196 * inch, "bore" : t[0] * inch,
+             "pilot" : false, "circle" : 0 * inch, "vendor" : true,
+             "name" : "Bearing plate, " ~ t[0] ~ " in bore, " ~ t[1] ~ " in C-C",
+             "note" : note,
+             "source" : "WCP bearing mount and retention plates" };
+}
+
+export function frcCotsBuild(context is Context, id is Id, definition is map)
+{
+    const tf = evaluateQuery(context, definition.face);
+    if (size(tf) == 0)
+        throw regenError("Select the flat face to drill.", ["face"]);
+
+    // Pattern and mirror support. The picked face is what anchors the pattern
+    // in space, so it is the reference the pattern transform is measured
+    // against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.face });
+
+    const pl = evPlane(context, { "face" : tf[0] });
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    const bodyQ = qOwnerBody(tf[0]);
+    const thickness = frcMaterialDepth(context, bodyQ, cSys);
+
+    var org = vector(0, 0) * inch;
+    const anchors = evaluateQuery(context, definition.anchor);
+    if (size(anchors) > 0)
+    {
+        try silent
+        {
+            const rel = evVertexPoint(context, { "vertex" : anchors[0] }) - cSys.origin;
+            org = vector(dot(rel, cSys.xAxis), dot(rel, yAxis));
+        }
+    }
+
+    const d = frcCotsPatternData(definition.pattern, definition.holes, definition.startAngle);
+    const a = definition.angle;
+    const u = vector(cos(a), sin(a));
+    const v = vector(-sin(a), cos(a));
+
+    const skPlane = plane(pl.origin + pl.normal * (0.02 * inch), pl.normal, pl.x);
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : skPlane });
+    for (var i = 0; i < size(d.points); i += 1)
+    {
+        const p = org + u * d.points[i][0] + v * d.points[i][1];
+        skCircle(sk, "h" ~ i, { "center" : p, "radius" : d.hole / 2 });
+    }
+    var boreDia = 0 * inch;
+    if (d.bore > 0 * inch && definition.cutBore)
+    {
+        // A motor boss is already there and the plate has to go over it, so a
+        // pilot is cut over nominal whatever the fit says. The press allowance
+        // belongs to a bearing seat, where the bearing is the part that gives;
+        // on a cast boss it is the plate that distorts instead.
+        const fit = (d.pilot && definition.fit == FRCFitClass.PRESS)
+            ? FRCFitClass.CLEARANCE : definition.fit;
+        // frcBoreAllowance is RADIAL and d.bore is a diameter, so it takes twice.
+        boreDia = d.bore + 2 * frcBoreAllowance(FRCDriveBore.BEARING, fit);
+        skCircle(sk, "bore", { "center" : org, "radius" : boreDia / 2 });
+    }
+    skSolve(sk);
+    opExtrude(context, id + "x", { "entities" : qSketchRegion(id + "s", false),
+                "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : thickness + 0.1 * inch });
+
+    // The move goes on before the subtraction, not after it. A subtraction
+    // consumes the cutters, so a transform at the end of the feature would
+    // find none of this feature's own bodies left to move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    try
+    {
+        opBoolean(context, id + "sub", { "tools" : qCreatedBy(id + "x", EntityType.BODY),
+                    "targets" : bodyQ, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    catch
+    {
+        throw regenError("The pattern did not land on the part. Check the anchor point and the angle.", ["anchor"], definition.anchor);
+    }
+
+    var lines = "" ~ size(d.points) ~ " holes cut at " ~ frcInches(d.hole) ~ ". ";
+    if (boreDia > 0 * inch && d.pilot)
+        lines ~= "Pilot bore " ~ frcInches(boreDia) ~ " over a "
+            ~ frcInches(d.bore) ~ " boss. ";
+    else if (boreDia > 0 * inch)
+        lines ~= "Bearing seat " ~ frcInches(boreDia) ~ " for a "
+            ~ frcInches(d.bore) ~ " bearing. ";
+    // The note says which of the figures above came from a vendor and which
+    // did not, so it stays whole. The source line behind it is the
+    // provenance a team needs before it cuts to any of them.
+    lines ~= d.note ~ " Source: " ~ d.source ~ ". ";
+    if (d.vendor)
+        lines ~= "Vendor-dimensioned; for any other module, import their STEP.";
+    else
+        lines ~= "This is community data, not a vendor drawing, so measure the "
+            ~ "part first; the pilot boss is the figure most likely to be wrong.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ########################### MATE CONNECTORS ############################
+
+export enum FRCMCTarget
+{
+    annotation { "Name" : "At each hole axis" }   HOLES,
+    annotation { "Name" : "At each face center" } FACES,
+    annotation { "Name" : "At each vertex" }      VERTICES,
+    annotation { "Name" : "Everything picked" }   ALL
+}
+
+/**
+ * The frames a cylindrical face is worth carrying connectors on: the mouths of
+ * the hole rather than the middle of its wall.
+ *
+ * Z points out of the material at each mouth, the way a connector placed on a
+ * hole by hand does, so two parts bolted together meet connector to connector
+ * without either one having to be turned over in the assembly.
+ */
+export function frcHoleFrames(context is Context, f is Query, cyl is Cylinder,
+    bothEnds is boolean) returns array
+{
+    const axis = cyl.coordSystem.zAxis;
+    var mouths = [];
+    const circles = evaluateQuery(context,
+        qGeometry(qAdjacent(f, AdjacencyType.EDGE, EntityType.EDGE), GeometryType.CIRCLE));
+    for (var c in circles)
+    {
+        try silent
+        {
+            const crv = evCurveDefinition(context, { "edge" : c });
+            // Adjacency reaches round edges on neighboring faces too, so keep
+            // only the ones square to this hole's own axis.
+            if (crv is Circle && abs(dot(crv.coordSystem.zAxis, axis)) > 0.999)
+                mouths = append(mouths, crv.coordSystem.origin);
+        }
+    }
+    // A bore whose ends have both been cut away has no circular edge left, and
+    // its axis is still the only sensible place to sit.
+    if (size(mouths) == 0)
+        return [cyl.coordSystem];
+
+    var mid = vector(0, 0, 0) * meter;
+    for (var m in mouths)
+        mid = mid + m;
+    mid = mid / size(mouths);
+
+    // Onshape starts the cylindrical surface at one end of the hole, so the
+    // mouth nearest that origin is the end that reads as the near one.
+    var nearEnd = 0;
+    for (var i = 1; i < size(mouths); i += 1)
+    {
+        if (squaredNorm(mouths[i] - cyl.coordSystem.origin)
+            < squaredNorm(mouths[nearEnd] - cyl.coordSystem.origin))
+            nearEnd = i;
+    }
+
+    var frames = [];
+    for (var i = 0; i < size(mouths); i += 1)
+    {
+        if (i != nearEnd && !bothEnds)
+            continue;
+        const outward = dot(mouths[i] - mid, axis) < 0 * meter ? -axis : axis;
+        frames = append(frames, coordSystem(mouths[i], cyl.coordSystem.xAxis, outward));
+    }
+    return frames;
+}
+
+/**
+ * Mate connectors on every hole, face and vertex picked, in one feature.
+ *
+ * Assembling an FRC robot is mostly bolting flat things to round things, and
+ * Onshape otherwise has you place those connectors one at a time. A whole
+ * part's worth in one step is the difference between an assembly that goes
+ * together in an afternoon and one that never gets mated.
+ */
+export function frcMateConnectorsBuild(context is Context, id is Id, definition is map)
+{
+    const picks = evaluateQuery(context, definition.entities);
+    if (size(picks) == 0)
+        throw regenError("Select holes, faces or vertices to place mate connectors on.", ["entities"]);
+    if (size(picks) > 200)
+        throw regenError("That is more picks than one feature should carry. Split the selection.", ["entities"], definition.entities);
+
+    const want = definition.mcTarget;
+    var frames = [];
+    var owners = [];
+    var copies = 0;
+    var skipped = 0;
+
+    for (var e in picks)
+    {
+        // The owning body carries its connectors into the assembly and they
+        // move rigidly with it, which is the whole point of placing them here.
+        var owner = qNothing();
+        const bodies = evaluateQuery(context, qOwnerBody(e));
+        if (size(bodies) > 0)
+            owner = bodies[0];
+
+        var kind = "";
+        var got = [];
+        try silent
+        {
+            const s = evSurfaceDefinition(context, { "face" : e });
+            if (s is Cylinder)
+            {
+                got = frcHoleFrames(context, e, s, definition.atBothEnds);
+                kind = "hole";
+            }
+            else if (s is Plane)
+            {
+                const pl = evPlane(context, { "face" : e });
+                got = [coordSystem(pl.origin, pl.x, pl.normal)];
+                kind = "face";
+            }
+        }
+        if (kind == "")
+        {
+            try silent
+            {
+                const crv = evCurveDefinition(context, { "edge" : e });
+                if (crv is Circle)
+                {
+                    got = [crv.coordSystem];
+                    kind = "hole";
+                }
+            }
+        }
+        if (kind == "")
+        {
+            try silent
+            {
+                got = [evMateConnector(context, { "mateConnector" : e })];
+                kind = "copy";
+                // A connector body owns nothing, so a copy of one is loose
+                // unless the picked geometry hands it a part to belong to.
+                owner = qNothing();
+            }
+        }
+        if (kind == "")
+        {
+            try silent
+            {
+                // A vertex points nowhere on its own, so the connector takes
+                // the world axes and the flip option turns it over.
+                got = [coordSystem(evVertexPoint(context, { "vertex" : e }),
+                            vector(1, 0, 0), vector(0, 0, 1))];
+                kind = "vertex";
+            }
+        }
+        if (kind == "")
+        {
+            skipped += 1;
+            continue;
+        }
+
+        var keep = (kind == "copy");
+        if (kind == "hole")
+            keep = (want == FRCMCTarget.HOLES || want == FRCMCTarget.ALL);
+        else if (kind == "face")
+            keep = (want == FRCMCTarget.FACES || want == FRCMCTarget.ALL);
+        else if (kind == "vertex")
+            keep = (want == FRCMCTarget.VERTICES || want == FRCMCTarget.ALL);
+        if (!keep)
+            continue;
+
+        for (var cs in got)
+        {
+            frames = append(frames, definition.flipAxis
+                    ? coordSystem(cs.origin, cs.xAxis, -cs.zAxis) : cs);
+            owners = append(owners, owner);
+        }
+        // Only the copied connectors are still counted: they are the ones the
+        // panel warns about, because they belong to no part.
+        if (kind != "hole" && kind != "face" && kind != "vertex")
+            copies += size(got);
+    }
+
+    if (size(frames) == 0)
+        throw regenError("Select holes, faces or vertices to place mate connectors on.", ["entities"], definition.entities);
+
+    for (var i = 0; i < size(frames); i += 1)
+        opMateConnector(context, id + ("mc" ~ i),
+            { "coordSystem" : frames[i], "owner" : owners[i] });
+
+    var lines = "" ~ size(frames) ~ " mate connectors placed.";
+    // A copied connector is the one kind that owns nothing, so it is the one
+    // kind that will not travel into the assembly with a part.
+    if (copies > 0)
+        lines ~= " NOTE " ~ copies
+            ~ " were copied from picked connectors and belong to no part.";
+    if (skipped > 0)
+        lines ~= " NOTE " ~ skipped
+            ~ " selections were skipped, not a hole, flat face or vertex.";
+    reportFeatureInfo(context, id, lines);
+}

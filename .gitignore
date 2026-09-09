@@ -1,0 +1,13 @@
+# Editor backups of the tab sources. The live file is the one without a suffix.
+*.bak
+*.bak[0-9]
+
+# Python bytecode from the verification tooling under _renders/_tools.
+__pycache__/
+*.pyc
+
+# Editor and OS noise.
+.DS_Store
+Thumbs.db
+*.swp
+*~

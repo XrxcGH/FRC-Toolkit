@@ -1,0 +1,2916 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+export import(path : "82d221137a697995b51d4734", version : "da6966cb2fb984d08cceddd0");
+
+// ===========================================================================
+//  FRC MECHANISM GEOMETRY: drivetrains, elevators, rollers and shooters
+// ---------------------------------------------------------------------------
+//  FRC Elevator, FRC Roller, FRC Swerve Chassis, FRC Shooter, FRC Turret,
+//  FRC Arm Pivot, FRC Climber, FRC Pneumatic Cylinder and FRC Drivetrain are
+//  declared in the FRC Toolkit tab and do their work here.
+//  The turret's ring gear teeth come from FRC Motion Geometry, which is why it
+//  is imported above.
+//
+//  Nothing in this tab is tied to a season. Height limits, extension limits,
+//  frame perimeter limits and stage counts are all parameters, because the
+//  rules that cap them move every year and a mechanism feature that hard-codes
+//  one is worth a single build season. The defaults are only defaults.
+// ===========================================================================
+
+// Two helpers from FRC Hardware Geometry, copied here privately because this
+// tab deliberately imports only FRC Core and FRC Motion Geometry. The pound
+// is exact, and the padder matches the hardware original line for line.
+const FRC_POUND = 0.45359237 * kilogram;
+
+/**
+ * A multi-line vendor string flattened to one clipped line.
+ *
+ * The mixed-module chassis report has to name four modules' mounting data in
+ * a panel that will not hold four blocks of vendor text. Every one of these
+ * strings leads with its fastener count and size, which is the number that
+ * gets ordered, so a clip that keeps the front keeps what matters, and the
+ * panel says where the full text is.
+ */
+function frcOneLine(s is string, width is number) returns string
+{
+    var flat = "";
+    var gap = false;
+    for (var i = 0; i < size(s); i += 1)
+    {
+        const c = substring(s, i, i + 1);
+        if (c == " " || c == "\n")
+            gap = true;
+        else
+        {
+            if (gap && flat != "")
+                flat ~= " ";
+            gap = false;
+            flat ~= c;
+        }
+    }
+    if (size(flat) <= width)
+        return flat;
+    // Clip at the last space that fits, so the line never ends mid word.
+    var cut = 0;
+    for (var i = 0; i < width - 4; i += 1)
+    {
+        if (substring(flat, i, i + 1) == " ")
+            cut = i;
+    }
+    if (cut == 0)
+        cut = width - 4;
+    return substring(flat, 0, cut) ~ " ...";
+}
+
+// ############################### ELEVATOR ###############################
+
+export const FRC_STAGECOUNT_BOUNDS = { (unitless) : [1, 2, 6] } as IntegerBoundSpec;
+export const FRC_STAGELEN_BOUNDS = { (meter) : [0.05, 0.7112, 3], (centimeter) : 71.12,
+    (millimeter) : 711.2, (inch) : 28, (foot) : 2.33333, (yard) : 0.77778 } as LengthBoundSpec;
+export const FRC_TRAVEL_TOTAL_BOUNDS = { (meter) : [0.01, 1.143, 6], (centimeter) : 114.3,
+    (millimeter) : 1143, (inch) : 45, (foot) : 3.75, (yard) : 1.25 } as LengthBoundSpec;
+export const FRC_OVERLAP_BOUNDS = { (meter) : [0.005, 0.1524, 1], (centimeter) : 15.24,
+    (millimeter) : 152.4, (inch) : 6, (foot) : 0.5, (yard) : 0.16667 } as LengthBoundSpec;
+export const FRC_STAGEGAP_BOUNDS = { (meter) : [0, 0.0127, 0.2], (centimeter) : 1.27,
+    (millimeter) : 12.7, (inch) : 0.5, (foot) : 0.04167, (yard) : 0.01389 } as LengthBoundSpec;
+export const FRC_HEIGHTLIMIT_BOUNDS = { (meter) : [0.05, 1.9812, 10], (centimeter) : 198.12,
+    (millimeter) : 1981.2, (inch) : 78, (foot) : 6.5, (yard) : 2.16667 } as LengthBoundSpec;
+export const FRC_POSE_BOUNDS = { (unitless) : [0, 0, 1] } as RealBoundSpec;
+export const FRC_CARRIAGELOAD_BOUNDS = { (unitless) : [0, 15, 200] } as RealBoundSpec;
+
+export enum FRCElevatorStyle
+{
+    annotation { "Name" : "Nested stages" }       NESTED,
+    annotation { "Name" : "Side by side stages" } SIDE_BY_SIDE
+}
+
+export enum FRCElevatorSizing
+{
+    annotation { "Name" : "From the travel" }      FROM_TRAVEL,
+    annotation { "Name" : "From the stage length" } FROM_LENGTH
+}
+
+export enum FRCElevatorRig
+{
+    annotation { "Name" : "Cascade, all at once" } CASCADE,
+    annotation { "Name" : "Continuous, one by one" } CONTINUOUS
+}
+
+/** One rectangular tube, hollow if it has a wall, built between two heights. */
+function frcElevatorTube(context is Context, id is Id, pl is Plane, w is ValueWithUnits,
+    h is ValueWithUnits, wall is ValueWithUnits, sideways is ValueWithUnits,
+    bottom is ValueWithUnits, len is ValueWithUnits) returns Query
+{
+    const c = vector(sideways, 0 * inch);
+    const rect = function(sk is Sketch, name is string, dw is ValueWithUnits, dh is ValueWithUnits)
+        {
+            const p = [c + vector(dw / 2, dh / 2), c + vector(-dw / 2, dh / 2),
+                       c + vector(-dw / 2, -dh / 2), c + vector(dw / 2, -dh / 2)];
+            skPolyline(sk, name, { "points" : append(p, p[0]) });
+        };
+
+    const sk = newSketchOnPlane(context, id + "o", { "sketchPlane" : pl });
+    rect(sk, "r", w, h);
+    skSolve(sk);
+    opExtrude(context, id + "ox", { "entities" : qSketchRegion(id + "o", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : bottom + len, "startBound" : BoundingType.BLIND,
+                "startDepth" : -bottom });
+    const body = qCreatedBy(id + "ox", EntityType.BODY);
+
+    const iw = w - 2 * wall;
+    const ih = h - 2 * wall;
+    if (wall > 0 * inch && iw > 0 * inch && ih > 0 * inch)
+    {
+        const ski = newSketchOnPlane(context, id + "i", { "sketchPlane" : pl });
+        rect(ski, "r", iw, ih);
+        skSolve(ski);
+        opExtrude(context, id + "ix", { "entities" : qSketchRegion(id + "i", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : bottom + len + 0.1 * inch, "startBound" : BoundingType.BLIND,
+                    "startDepth" : -(bottom - 0.1 * inch) });
+        opBoolean(context, id + "isub", { "tools" : qCreatedBy(id + "ix", EntityType.BODY),
+                    "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+
+    // Real telescoping tube has radiused corners, so round the outer four.
+    var outerEdges = [];
+    for (var e in evaluateQuery(context, qGeometry(qOwnedByBody(body, EntityType.EDGE), GeometryType.LINE)))
+    {
+        try silent
+        {
+            const ln = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5 });
+            if (abs(dot(ln.direction, pl.normal)) > 0.999)
+            {
+                const rel = ln.origin - pl.origin;
+                if (abs(dot(rel, pl.x) - sideways) > w / 2 - 0.01 * inch
+                    && abs(dot(rel, cross(pl.normal, pl.x))) > h / 2 - 0.01 * inch)
+                    outerEdges = append(outerEdges, e);
+            }
+        }
+    }
+    if (size(outerEdges) > 0)
+    {
+        try silent
+        {
+            opFillet(context, id + "rnd", { "entities" : qUnion(outerEdges), "radius" : 0.062 * inch });
+        }
+    }
+    return body;
+}
+
+/**
+ * A telescoping elevator, drawn at whatever pose you want to look at.
+ *
+ * Stage length, per-stage travel and overlap are one relation with three terms:
+ * a stage rises until only the overlap is left inside its parent, so
+ *
+ *     per stage travel = stage length - overlap
+ *     total travel     = per stage travel * number of moving stages
+ *
+ * Give it a travel and it solves the stage length; give it a stage length and
+ * it reports the travel. Either way the overlap is what you set, and the
+ * overlap is the thing that stops an elevator binding: a stage carried on two
+ * bearing stations near its bottom cantilevers everything above them.
+ *
+ * Cascade rigging moves every stage at once and the carriage travels N times
+ * as far and as fast as the first stage, so the drive sees N times the carriage
+ * load. Continuous rigging moves one stage at a time at 1:1. Both are described
+ * in the GM0 linear motion guide, which is the clearest published account.
+ */
+export function frcElevatorBuild(context is Context, id is Id, definition is map)
+{
+    // Pattern and mirror support. The picked face or mate connector is what
+    // puts the elevator in space, so it is the reference the pattern transform
+    // is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    const n = definition.stageCount;
+    const overlap = definition.stageOverlap;
+    var stageLen = definition.stageLength;
+    var perStage = 0 * inch;
+    if (definition.sizing == FRCElevatorSizing.FROM_TRAVEL)
+    {
+        perStage = definition.totalTravel / n;
+        stageLen = perStage + overlap;
+    }
+    else
+    {
+        perStage = stageLen - overlap;
+    }
+    if (perStage <= 0 * inch)
+        throw regenError("The overlap is as long as the stage, so nothing can extend. Shorten the overlap or lengthen the stage.", ["stageOverlap"]);
+
+    const w = definition.sectionWidth;
+    const h = definition.sectionHeight;
+    const wall = definition.wallThickness;
+    const gap = definition.stageGap;
+    const baseLen = definition.matchBase ? stageLen : definition.baseLength;
+    const pose = definition.pose;
+
+    // Nesting eats two walls and two clearances off each dimension per stage.
+    const step = definition.style == FRCElevatorStyle.NESTED ? 2 * (wall + gap) : 0 * inch;
+    if (definition.style == FRCElevatorStyle.NESTED
+        && (w - n * step <= 0 * inch || h - n * step <= 0 * inch))
+        throw regenError("The innermost stage comes out with no section left. Use a bigger outer tube, a thinner wall, a smaller clearance, or fewer stages.", ["stageCount"]);
+
+    var bodies = [];
+    for (var k = 0; k < n + 1; k += 1)
+    {
+        const len = k == 0 ? baseLen : stageLen;
+        const bottom = perStage * k * pose;
+        const sw = definition.style == FRCElevatorStyle.NESTED ? w - k * step : w;
+        const sh = definition.style == FRCElevatorStyle.NESTED ? h - k * step : h;
+        const sideways = definition.style == FRCElevatorStyle.NESTED
+            ? 0 * inch : k * (w + gap);
+        const b = frcElevatorTube(context, id + ("s" ~ k), pl, sw, sh, wall,
+                sideways, bottom, len);
+        setProperty(context, { "entities" : b, "propertyType" : PropertyType.NAME,
+                    "value" : k == 0 ? "Elevator Base" : ("Elevator Stage " ~ k) });
+        bodies = append(bodies, b);
+    }
+    frcApplyPart(context, qUnion(bodies), definition.material, FRCPartClass.STRUCTURE);
+
+    // Nothing is left to cut: every wall subtraction happened inside its own
+    // stage. Every measurement below is a volume or a parameter, so it reads
+    // the same either side of the move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const totalTravel = perStage * n;
+    const extended = totalTravel + stageLen;
+    const vol = evVolume(context, { "entities" : qUnion(bodies) });
+    const ratio = definition.rigging == FRCElevatorRig.CASCADE ? n : 1;
+
+    var lines = "Reaches " ~ frcInches(extended) ~ ", "
+        ~ ((extended <= definition.heightLimit)
+            ? (frcInches(definition.heightLimit - extended) ~ " inside your height limit")
+            : ("over your height limit by " ~ frcInches(extended - definition.heightLimit)))
+        ~ ". ";
+    lines ~= "Travel " ~ frcInches(totalTravel) ~ " over " ~ n ~ " stage"
+        ~ (n == 1 ? "" : "s") ~ " on a base, tube alone "
+        ~ roundToPrecision(vol * frcDensity(definition.material) / FRC_POUND, 2) ~ " lb. ";
+    if (definition.rigging == FRCElevatorRig.CASCADE)
+        lines ~= "Cascade rigging, so the carriage and the drive both see " ~ n ~ "x. ";
+    if (definition.carriageLoad > 0)
+        lines ~= "About " ~ roundToPrecision(definition.carriageLoad * ratio, 1)
+            ~ " lb at the spool, before friction and weight. ";
+    lines ~= "Overlap " ~ frcInches(overlap) ~ ", "
+        ~ roundToPrecision(overlap / stageLen * 100, 1)
+        ~ " percent of the stage. ";
+    if (overlap < stageLen * 0.2)
+        lines ~= "NOTE That is under the fifth of a stage this wants; add more. ";
+    lines ~= "No vendor publishes a stage block pattern; "
+        ~ "shelf spacings are 0.25, 0.5 and 0.75 in.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################ ROLLER ################################
+
+export const FRC_ROLLERLEN_BOUNDS = { (meter) : [0.01, 0.254, 2], (centimeter) : 25.4,
+    (millimeter) : 254, (inch) : 10, (foot) : 0.83333, (yard) : 0.27778 } as LengthBoundSpec;
+export const FRC_WHEELOD_BOUNDS = { (meter) : [0.005, 0.0508, 0.5], (centimeter) : 5.08,
+    (millimeter) : 50.8, (inch) : 2, (foot) : 0.16667, (yard) : 0.05556 } as LengthBoundSpec;
+export const FRC_ROLLERTUBE_BOUNDS = { (meter) : [0.002, 0.03175, 0.2], (centimeter) : 3.175,
+    (millimeter) : 31.75, (inch) : 1.25, (foot) : 0.10417, (yard) : 0.03472 } as LengthBoundSpec;
+export const FRC_COMPRESSION_BOUNDS = { (meter) : [0, 0.0127, 0.15], (centimeter) : 1.27,
+    (millimeter) : 12.7, (inch) : 0.5, (foot) : 0.04167, (yard) : 0.01389 } as LengthBoundSpec;
+export const FRC_PIECEDIA_BOUNDS = { (meter) : [0.005, 0.15, 1], (centimeter) : 15,
+    (millimeter) : 150, (inch) : 5.906, (foot) : 0.49216, (yard) : 0.16405 } as LengthBoundSpec;
+export const FRC_WHEELCOUNT_BOUNDS = { (unitless) : [1, 4, 40] } as IntegerBoundSpec;
+export const FRC_DRIVESPEED_BOUNDS = { (unitless) : [1, 15, 30] } as RealBoundSpec;
+export const FRC_SPEEDFACTOR_BOUNDS = { (unitless) : [1, 2, 6] } as RealBoundSpec;
+
+export enum FRCRollerSpacing
+{
+    annotation { "Name" : "Spread evenly" }          EVEN,
+    annotation { "Name" : "Fixed spacing, centered" } PITCH
+}
+
+export enum FRCRollerContact
+{
+    annotation { "Name" : "A game piece" }        GAME_PIECE,
+    annotation { "Name" : "An opposing roller" }  OPPOSING,
+    annotation { "Name" : "A plate or the floor" } PLATE
+}
+
+/**
+ * An intake or indexer roller: the tube, the wheels on it, and the two numbers
+ * that decide whether it works.
+ *
+ * The first is where the axis goes. A compliant wheel only grips because it is
+ * squeezed, so the axis has to sit closer to what it touches than the radii
+ * add up to, by exactly the compression. The feature reports that distance
+ * rather than making you work it back from a squashed circle.
+ *
+ * The second is how fast it turns. Andrew Torrance's rule, which is what the
+ * intake calculators implement, is that the roller surface should move at least
+ * twice as fast as the robot drives, so the piece is drawn in rather than
+ * pushed along. The factor is a parameter because that rule was stated for a
+ * single roller over a ball and is argued about for anything else.
+ *
+ * No vendor publishes a compression figure for any compliant wheel. What is in
+ * circulation is a rule of thumb, roughly a quarter inch to an inch with half
+ * an inch to start, and per-team measurements. Prototype it.
+ */
+export function frcRollerBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face or mate connector at one end of the roller.", ["location"]);
+
+    // Pattern and mirror support. The picked face or mate connector is what
+    // puts the roller in space, so it is the reference the pattern transform
+    // is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+    const center = vector(0, 0) * inch;
+
+    const len = definition.rollerLength;
+    const wheelOD = definition.wheelOuter;
+    const wheelW = definition.wheelWidth;
+    const count = definition.wheelCount;
+    const tubeOD = definition.makeTube ? definition.tubeOuter : 0 * inch;
+
+    if (definition.makeTube && definition.tubeInner >= definition.tubeOuter)
+        throw regenError("The tube bore is as big as the tube. Reduce it.", ["tubeInner"]);
+    if (wheelOD <= tubeOD)
+        throw regenError("The wheels are no bigger than the tube they sit on, so nothing would touch the game piece. Increase the wheel diameter.", ["wheelOuter"]);
+    if (count * wheelW > len)
+        throw regenError("The wheels are wider laid end to end than the roller is long. Use fewer or narrower wheels, or a longer roller.", ["wheelCount"]);
+
+    // Where each wheel sits along the roller, measured to its middle.
+    var at = [];
+    if (definition.spacingMode == FRCRollerSpacing.EVEN)
+    {
+        const margin = definition.endMargin;
+        const span = len - 2 * margin - wheelW;
+        if (span < 0 * inch)
+            throw regenError("The end margins leave no room for a wheel. Reduce them.", ["endMargin"]);
+        for (var i = 0; i < count; i += 1)
+            at = append(at, count == 1 ? len / 2
+                : margin + wheelW / 2 + span * i / (count - 1));
+    }
+    else
+    {
+        const pitch = definition.wheelPitch;
+        const start = (len - (count - 1) * pitch) / 2;
+        if (start - wheelW / 2 < 0 * inch)
+            throw regenError("At that spacing the wheels hang off the end of the roller. Reduce the spacing or the count.", ["wheelPitch"]);
+        for (var i = 0; i < count; i += 1)
+            at = append(at, start + pitch * i);
+    }
+
+    // The wheels are given their own compliant-wheel density below, not the
+    // dialog material, so the mass line has to weigh them at that density too.
+    // Weighing the whole roller at the dialog material put a number in the
+    // panel that the Onshape part list disagreed with on every setting but the
+    // shipped polycarbonate default.
+    const wheelDensity = 1200 * kilogram / meter ^ 3;
+    var bodies = [];
+    var wheels = [];
+    if (definition.makeTube)
+    {
+        const sk = newSketchOnPlane(context, id + "t", { "sketchPlane" : pl });
+        skCircle(sk, "o", { "center" : center, "radius" : tubeOD / 2 });
+        skSolve(sk);
+        opExtrude(context, id + "tx", { "entities" : qSketchRegion(id + "t", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : len });
+        const tube = qCreatedBy(id + "tx", EntityType.BODY);
+        if (definition.tubeInner > 0 * inch)
+        {
+            const ski = newSketchOnPlane(context, id + "b",
+                { "sketchPlane" : plane(pl.origin - pl.normal * (0.05 * inch), pl.normal, pl.x) });
+            skCircle(ski, "b", { "center" : center, "radius" : definition.tubeInner / 2 });
+            skSolve(ski);
+            opExtrude(context, id + "bx", { "entities" : qSketchRegion(id + "b", false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : len + 0.1 * inch });
+            opBoolean(context, id + "bsub", { "tools" : qCreatedBy(id + "bx", EntityType.BODY),
+                        "targets" : tube, "operationType" : BooleanOperationType.SUBTRACTION });
+        }
+        setProperty(context, { "entities" : tube, "propertyType" : PropertyType.NAME,
+                    "value" : "Roller Tube" });
+        frcApplyPart(context, tube, definition.material, FRCPartClass.WHEEL);
+        frcBreakEdges(context, id + "tch", qOwnedByBody(tube, EntityType.EDGE), 0.02 * inch);
+        bodies = append(bodies, tube);
+    }
+
+    for (var i = 0; i < count; i += 1)
+    {
+        const wid = id + ("w" ~ i);
+        const sk = newSketchOnPlane(context, wid + "s",
+            { "sketchPlane" : plane(pl.origin + pl.normal * (at[i] - wheelW / 2), pl.normal, pl.x) });
+        skCircle(sk, "o", { "center" : center, "radius" : wheelOD / 2 });
+        skSolve(sk);
+        opExtrude(context, wid + "x", { "entities" : qSketchRegion(wid + "s", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : wheelW });
+        const wheel = qCreatedBy(wid + "x", EntityType.BODY);
+        const bore = definition.makeTube ? tubeOD : definition.tubeInner;
+        if (bore > 0 * inch)
+        {
+            const skb = newSketchOnPlane(context, wid + "b",
+                { "sketchPlane" : plane(pl.origin + pl.normal * (at[i] - wheelW), pl.normal, pl.x) });
+            skCircle(skb, "b", { "center" : center, "radius" : bore / 2 });
+            skSolve(skb);
+            opExtrude(context, wid + "bx", { "entities" : qSketchRegion(wid + "b", false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : 2 * wheelW });
+            opBoolean(context, wid + "bsub", { "tools" : qCreatedBy(wid + "bx", EntityType.BODY),
+                        "targets" : wheel, "operationType" : BooleanOperationType.SUBTRACTION });
+        }
+        setProperty(context, { "entities" : wheel, "propertyType" : PropertyType.NAME,
+                    "value" : "Roller Wheel " ~ (i + 1) });
+        // The green is the compliant wheel's own, not a material color, so it
+        // is the fallback rather than the value: a team that has set a wheel
+        // color gets it, and everyone else keeps the wheel that looks right.
+        frcApplyNamed(context, wheel, "Compliant wheel", wheelDensity,
+            frcTeamColorA(context, FRCPartClass.WHEEL, color(0.18, 0.55, 0.27), 1));
+        try silent
+        {
+            opFillet(context, wid + "f", { "entities" : qOwnedByBody(wheel, EntityType.EDGE),
+                        "radius" : 0.06 * inch });
+        }
+        bodies = append(bodies, wheel);
+        wheels = append(wheels, wheel);
+    }
+
+    // Every bore has already been subtracted into this feature's own tube and
+    // wheels, so nothing is left to cut. Every measurement below is a volume
+    // or a parameter, so it reads the same either side of the move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    // Where the axis has to sit for the compression asked for.
+    const comp = definition.compression;
+    var reach = wheelOD / 2 - comp;
+    var what = "the plate";
+    if (definition.contactKind == FRCRollerContact.GAME_PIECE)
+    {
+        reach = wheelOD / 2 + definition.pieceDiameter / 2 - comp;
+        what = "the middle of a " ~ frcInches(definition.pieceDiameter) ~ " game piece";
+    }
+    else if (definition.contactKind == FRCRollerContact.OPPOSING)
+    {
+        reach = wheelOD / 2 + definition.opposingOuter / 2 - comp;
+        what = "the axis of a " ~ frcInches(definition.opposingOuter) ~ " opposing roller";
+    }
+    if (reach <= 0 * inch)
+        throw regenError("That much compression puts the roller axis through whatever it is squeezing. Reduce it.", ["compression"]);
+
+    const surface = definition.speedFactor * definition.driveSpeed;
+    const rpm = surface * 12 * 60 / (PI * wheelOD / inch);
+    const wheelVol = evVolume(context, { "entities" : qUnion(wheels) });
+    const tubeVol = evVolume(context, { "entities" : qUnion(bodies) }) - wheelVol;
+    const mass = tubeVol * frcDensity(definition.material) + wheelVol * wheelDensity;
+
+    var lines = "Set the roller axis " ~ frcInches(reach) ~ " from " ~ what ~ " for "
+        ~ frcInches(comp) ~ " of compression. ";
+    lines ~= "Spin it at " ~ roundToPrecision(rpm, 0) ~ " rpm for "
+        ~ roundToPrecision(surface, 1) ~ " ft/s of surface speed. ";
+    if (count > 1)
+        lines ~= "" ~ count ~ " wheels, " ~ frcInches(at[1] - at[0])
+            ~ " apart with the first at " ~ frcInches(at[0]) ~ ". ";
+    lines ~= "Mass " ~ roundToPrecision(mass / FRC_POUND, 2)
+        ~ " lb, with the wheels solid at 1200 kg/m3. ";
+    lines ~= "Compression is folklore: 1/4 to 1 in, 1/2 to start, never zero. "
+        ~ "The 2x speed rule assumed one roller on a ball.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################## SWERVE CHASSIS ##############################
+
+export const FRC_FRAMESIZE_BOUNDS = { (meter) : [0.1, 0.6858, 2], (centimeter) : 68.58,
+    (millimeter) : 685.8, (inch) : 27, (foot) : 2.25, (yard) : 0.75 } as LengthBoundSpec;
+export const FRC_PERIMETER_BOUNDS = { (meter) : [0.4, 2.794, 12], (centimeter) : 279.4,
+    (millimeter) : 2794, (inch) : 110, (foot) : 9.16667, (yard) : 3.05556 } as LengthBoundSpec;
+export const FRC_RAILSIZE_BOUNDS = { (meter) : [0.006, 0.0254, 0.15], (centimeter) : 2.54,
+    (millimeter) : 25.4, (inch) : 1, (foot) : 0.08333, (yard) : 0.02778 } as LengthBoundSpec;
+export const FRC_AXISINSET_BOUNDS = { (meter) : [0, 0.0635, 0.5], (centimeter) : 6.35,
+    (millimeter) : 63.5, (inch) : 2.5, (foot) : 0.20833, (yard) : 0.06944 } as LengthBoundSpec;
+export const FRC_CORNERGAP_BOUNDS = { (meter) : [0, 0.0762, 0.4], (centimeter) : 7.62,
+    (millimeter) : 76.2, (inch) : 3, (foot) : 0.25, (yard) : 0.08333 } as LengthBoundSpec;
+export const FRC_MODULECLEAR_BOUNDS = { (meter) : [0, 0, 0.4], (centimeter) : 0,
+    (millimeter) : 0, (inch) : 0, (foot) : 0, (yard) : 0 } as LengthBoundSpec;
+export const FRC_PANTHICK_BOUNDS = { (meter) : [0.0004, 0.002286, 0.02], (centimeter) : 0.2286,
+    (millimeter) : 2.286, (inch) : 0.09, (foot) : 0.0075, (yard) : 0.0025 } as LengthBoundSpec;
+export const FRC_PANINSET_BOUNDS = { (meter) : [0, 0, 0.5], (centimeter) : 0,
+    (millimeter) : 0, (inch) : 0, (foot) : 0, (yard) : 0 } as LengthBoundSpec;
+export const FRC_PATTERNCOUNT_BOUNDS = { (unitless) : [1, 2, 12] } as IntegerBoundSpec;
+export const FRC_CIRCLEHOLES_BOUNDS = { (unitless) : [2, 6, 24] } as IntegerBoundSpec;
+export const FRC_PLATETHK_BOUNDS = { (meter) : [0.0004, 0.00635, 0.02], (centimeter) : 0.635,
+    (millimeter) : 6.35, (inch) : 0.25, (foot) : 0.020833, (yard) : 0.006944 } as LengthBoundSpec;
+
+export enum FRCChassisJoint
+{
+    annotation { "Name" : "Mitered corners" }        MITER,
+    annotation { "Name" : "Side rails run full" }    BUTT_SIDES,
+    annotation { "Name" : "End rails run full" }     BUTT_ENDS,
+    annotation { "Name" : "Module joins the corners" } MODULE_CORNER
+}
+
+export enum FRCChassisHoles
+{
+    annotation { "Name" : "From the module" }       MODULE,
+    annotation { "Name" : "Typed, down through top" } THROUGH_TOP,
+    annotation { "Name" : "Typed, in through face" } THROUGH_FACE,
+    annotation { "Name" : "None" }                   NONE
+}
+
+export enum FRCChassisPattern
+{
+    annotation { "Name" : "Grid" }        GRID,
+    annotation { "Name" : "Bolt circle" } CIRCLE
+}
+
+export enum FRCChassisFace
+{
+    annotation { "Name" : "The side rails" }          SIDE_RAILS,
+    annotation { "Name" : "The front and back rails" } END_RAILS
+}
+
+export enum FRCSwerveModule
+{
+    annotation { "Name" : "SDS MK4" }        SDS_MK4,
+    annotation { "Name" : "SDS MK4i" }       SDS_MK4I,
+    annotation { "Name" : "SDS MK4c" }       SDS_MK4C,
+    annotation { "Name" : "SDS MK4n" }       SDS_MK4N,
+    annotation { "Name" : "SDS MK5i" }       SDS_MK5I,
+    annotation { "Name" : "SDS MK5n" }       SDS_MK5N,
+    annotation { "Name" : "WCP Swerve X2" }  WCP_X2,
+    annotation { "Name" : "WCP Swerve X2i" } WCP_X2I,
+    annotation { "Name" : "WCP Swerve X2t" } WCP_X2T,
+    annotation { "Name" : "WCP Swerve X2c" } WCP_X2C,
+    annotation { "Name" : "WCP Swerve X2S" } WCP_X2S,
+    annotation { "Name" : "WCP Swerve X2St" } WCP_X2ST,
+    annotation { "Name" : "REV MAXSwerve" }  REV_MAXSWERVE,
+    annotation { "Name" : "REV EasySwerve (4 in)" } REV_EASYSWERVE,
+    annotation { "Name" : "ThriftyBot Swerve" } THRIFTY,
+    annotation { "Name" : "Custom or other" } CUSTOM
+}
+
+export enum FRCSwerveMount
+{
+    annotation { "Name" : "Top, rails on plate" }    TOP_MOUNT,
+    annotation { "Name" : "Bottom, plate on rails" } BOTTOM_MOUNT
+}
+
+export enum FRCSwerveHeightKit
+{
+    annotation { "Name" : "None" }                                        NONE,
+    annotation { "Name" : "SDS MK5 lift, +1 in" }     SDS_LIFT_MK5,
+    annotation { "Name" : "SDS MK5 lower, -7/8 in" }  SDS_LOWER_MK5,
+    annotation { "Name" : "SDS MK4c/4i/4n, -7/8 in" } SDS_LOWER_MK4
+}
+
+export enum FRCChassisTubeGrid
+{
+    annotation { "Name" : "None" }                                       NONE,
+    annotation { "Name" : "Two 1 in faces" }  TWO_FACE,
+    annotation { "Name" : "All four faces" }  FOUR_FACE,
+    annotation { "Name" : "REV MAX pattern" } MAX_PATTERN
+}
+
+/**
+ * What each vendor actually publishes about mounting its module to the frame.
+ *
+ * `railEnd` is the vendor's own frame tube print: hole stations measured from
+ * the cut end of the rail, drilled vertically through the rail on its
+ * centerline. It exists only where the vendor publishes one (SDS MK4c, MK4n,
+ * MK5i, MK5n). `cut` is how much shorter than the drive base each rail is cut
+ * at that corner, from the same print. `plate` is a plate-datum pattern
+ * measured from the steering axis, published only for the SDS MK4. Everything
+ * else mounts on an unpublished pattern, and the feature says so rather than
+ * guessing.
+ */
+export function frcSwerveModuleData(m is FRCSwerveModule) returns map
+{
+    const none = [];
+    if (m == FRCSwerveModule.SDS_MK4)
+        return { "name" : "SDS MK4", "railEnd" : none, "cut" : 0 * inch,
+                 "holeDia" : 0.196 * inch, "plateDatum" : true, "wheel" : 4.0 * inch,
+                 "screws" : "eight 10-32 into the tapped main plate;\n"
+                     ~ "                every SDS module is 10-32 now, though the\n"
+                     ~ "                MK4 layout drawing still shows 1/4-20",
+                 "height" : "plate 5.50 in square, underside 3.75 in\n"
+                     ~ "                above the floor; 8.23 in tall with NEOs,\n"
+                     ~ "                9.26 with Falcons (layout drawing)",
+                 "pattern" : "vendor: 8 holes in an L, both legs 2.75 in\n"
+                     ~ "                from the steering axis, 4 per leg at 1.000\n"
+                     ~ "                in pitch symmetric about the axis (MK4\n"
+                     ~ "                layout drawing)" };
+    if (m == FRCSwerveModule.SDS_MK4I)
+        return { "name" : "SDS MK4i", "railEnd" : none, "cut" : 0 * inch,
+                 "holeDia" : 0.196 * inch, "plateDatum" : false, "wheel" : 4.0 * inch,
+                 // SDS dimension the steering axis 2.625 in from both outer
+                 // edges of the 7.48 in square module. An axis inset smaller
+                 // than this stands the module proud of the frame face.
+                 "axisEdge" : 2.625 * inch,
+                 "screws" : "six 10-32 into the tapped main plate; every\n"
+                     ~ "                SDS module is 10-32 now, though the layout\n"
+                     ~ "                drawing still says 8-32",
+                 "height" : "module 7.48 in square, axis 2.625 in from\n"
+                     ~ "                both outer edges; plate underside 3.75 in\n"
+                     ~ "                above the floor, 6.81 in tall (layout\n"
+                     ~ "                drawing)",
+                 "pattern" : "not published: the MK4i layout drawing gives\n"
+                     ~ "                the envelope and axis but does not dimension\n"
+                     ~ "                the six chassis screws, so type the pattern\n"
+                     ~ "                in" };
+    if (m == FRCSwerveModule.SDS_MK4C || m == FRCSwerveModule.SDS_MK4N)
+        return { "name" : (m == FRCSwerveModule.SDS_MK4C) ? "SDS MK4c" : "SDS MK4n",
+                 "railEnd" : [0.250 * inch, 1.250 * inch, 2.250 * inch], "cut" : 4.250 * inch,
+                 "holeDia" : 0.196 * inch, "plateDatum" : false, "wheel" : 4.0 * inch,
+                 "screws" : "six 10-32 x 2.5 in through the rail ends",
+                 "height" : "module 6.69 in square with 19 tapped 10-32\n"
+                     ~ "                at 0.5 in; plate underside 3.75 in above the\n"
+                     ~ "                floor, 6.06 in tall, 9.50 with Kraken risers\n"
+                     ~ "                (layout drawing)",
+                 "pattern" : "vendor: 3 holes per rail end at 0.250,\n"
+                     ~ "                1.250, 2.250 in, cut length = drive base -\n"
+                     ~ "                8.500 in, from the SDS frame print" };
+    if (m == FRCSwerveModule.SDS_MK5I || m == FRCSwerveModule.SDS_MK5N)
+        return { "name" : (m == FRCSwerveModule.SDS_MK5I) ? "SDS MK5i" : "SDS MK5n",
+                 "railEnd" : [0.250 * inch, 1.750 * inch], "cut" : 4.250 * inch,
+                 "holeDia" : 0.196 * inch, "plateDatum" : false, "wheel" : 4.0 * inch,
+                 "screws" : "four 10-32 x 2.5 in through the rail ends,\n"
+                     ~ "                plus a 3/16 x 45 degree wheel chamfer on\n"
+                     ~ "                each rail",
+                 "height" : "module 7.45 in square, 15 tapped 10-32 on\n"
+                     ~ "                the plate plus 3 camera inserts on the\n"
+                     ~ "                housing; plate underside 3.75 in above the\n"
+                     ~ "                floor, 6.17 in tall (layout drawing)",
+                 "pattern" : "vendor: 2 holes per rail end at 0.250, 1.750\n"
+                     ~ "                in, cut length = drive base - 8.500 in, from\n"
+                     ~ "                the SDS frame print" };
+    if (m == FRCSwerveModule.WCP_X2 || m == FRCSwerveModule.WCP_X2I
+        || m == FRCSwerveModule.WCP_X2T || m == FRCSwerveModule.WCP_X2C)
+    {
+        var nm = "WCP Swerve X2";
+        if (m == FRCSwerveModule.WCP_X2I)
+            nm = "WCP Swerve X2i";
+        else if (m == FRCSwerveModule.WCP_X2T)
+            nm = "WCP Swerve X2t";
+        else if (m == FRCSwerveModule.WCP_X2C)
+            nm = "WCP Swerve X2c";
+        return { "name" : nm, "railEnd" : none, "cut" : 0 * inch,
+                 "holeDia" : 0.196 * inch, "plateDatum" : false, "wheel" : 4.0 * inch,
+                 "screws" : "ten 10-32 tapped in the module, on the 0.5\n"
+                     ~ "                in tube grid; WCP allows six",
+                 "height" : "corner mount 6.750 in square, tube mount\n"
+                     ~ "                5.750; 0.250 in plate, 5.563 in above it and\n"
+                     ~ "                3.750 below (WCP-1701 web drawings)",
+                 "pattern" : "not published: the WCP web drawings\n"
+                     ~ "                dimension the envelope, not the ten tapped\n"
+                     ~ "                holes; they land on the 0.5 in tube grid, so\n"
+                     ~ "                type the pattern in" };
+    }
+    if (m == FRCSwerveModule.WCP_X2S || m == FRCSwerveModule.WCP_X2ST)
+        return { "name" : (m == FRCSwerveModule.WCP_X2S) ? "WCP Swerve X2S" : "WCP Swerve X2St",
+                 "railEnd" : none, "cut" : 0 * inch,
+                 "holeDia" : 0.196 * inch, "plateDatum" : false, "wheel" : 3.5 * inch,
+                 "screws" : "corner mount only, holes on a 1 in pitch on\n"
+                     ~ "                the tube grid, count not published",
+                 "height" : "5.750 in square; 0.250 in plate, 5.188 in\n"
+                     ~ "                above it, 3.125 wheel drop; hole spans 4.500\n"
+                     ~ "                in with 1.000 insets (WCP-1606/1607 web\n"
+                     ~ "                drawings)",
+                 "pattern" : "not published: the web drawing spans the\n"
+                     ~ "                hole field at 4.500 in but does not\n"
+                     ~ "                dimension centers, so type the pattern in" };
+    if (m == FRCSwerveModule.REV_MAXSWERVE)
+        return { "name" : "REV MAXSwerve", "railEnd" : none, "cut" : 0 * inch,
+                 "holeDia" : 0.196 * inch, "plateDatum" : false, "wheel" : 3.0 * inch,
+                 "screws" : "10-32 x 3 in buttons through MAXTube\n"
+                     ~ "                internal supports at the rail ends",
+                 "height" : "6.75 in tall with a NEO, 7.66 with a Falcon;\n"
+                     ~ "                2.00 in of works above the plate, 2.75 wheel\n"
+                     ~ "                drop; footprint 5.24 in square over the\n"
+                     ~ "                tabs, 3.96 without (REV-21-3005)",
+                 "pattern" : "not published: bolts to the rail ends\n"
+                     ~ "                through MAXTube, no hole coordinates on the\n"
+                     ~ "                drawing, so type the pattern in" };
+    if (m == FRCSwerveModule.REV_EASYSWERVE)
+        return { "name" : "REV 4in EasySwerve", "railEnd" : none, "cut" : 0 * inch,
+                 "holeDia" : 0.196 * inch, "plateDatum" : false, "wheel" : 4.0 * inch,
+                 "screws" : "10-32 through the tube-grid wings at the\n"
+                     ~ "                module corners",
+                 "height" : "6.93 in square, 4.00 in wheel; 8.42 in tall\n"
+                     ~ "                with a NEO 1.1, 9.26 with a Vortex, wheel\n"
+                     ~ "                top at 3.92 (REV-21-3006)",
+                 "pattern" : "not published: the drawing gives the\n"
+                     ~ "                envelope; the wings land on the 0.5 in tube\n"
+                     ~ "                grid, so type the pattern in" };
+    if (m == FRCSwerveModule.THRIFTY)
+        return { "name" : "Thrifty Swerve", "railEnd" : none, "cut" : 0 * inch,
+                 "holeDia" : 0.196 * inch, "plateDatum" : false, "wheel" : 4.0 * inch,
+                 "screws" : "10-32 into the tapped flange holes (0.159\n"
+                     ~ "                tap, TTB-1706)",
+                 "height" : "7.064 in square, 6.040 in tall, 1.475 wheel\n"
+                     ~ "                drop, black anodized, 6.28 lb max (TTB-1706)",
+                 "pattern" : "vendor: 10-32 flange holes at 1.000 in pitch\n"
+                     ~ "                on a row 0.313 in inside each module edge\n"
+                     ~ "                (TTB-1706); anchor the run to your rail end\n"
+                     ~ "                and type it as a grid" };
+    return { "name" : "custom module", "railEnd" : none, "cut" : 0 * inch,
+             "holeDia" : 0.196 * inch, "plateDatum" : false, "wheel" : 4.0 * inch,
+             "screws" : "as the module requires",
+             "height" : "as the module requires",
+             "pattern" : "typed in" };
+}
+
+/**
+ * The SDS MK4 plate pattern in steering-axis coordinates, one corner's hand,
+ * from the MK4 layout drawing: each leg of the L sits 2.75 in from the
+ * steering axis, with four holes at 1.000 in pitch symmetric about the axis.
+ */
+export function frcSwerveMk4Points() returns array
+{
+    var pts = [];
+    for (var k = 0; k < 4; k += 1)
+    {
+        pts = append(pts, vector(-1.5 + k * 1.0, -2.75) * inch);
+        pts = append(pts, vector(-2.75, -1.5 + k * 1.0) * inch);
+    }
+    return pts;
+}
+
+/** One rail: a rectangular tube whose planform is the four points given. */
+function frcChassisRail(context is Context, id is Id, pl is Plane, pts is array,
+    height is ValueWithUnits, wall is ValueWithUnits) returns Query
+{
+    const sk = newSketchOnPlane(context, id + "o", { "sketchPlane" : pl });
+    skPolyline(sk, "r", { "points" : append(pts, pts[0]) });
+    skSolve(sk);
+    opExtrude(context, id + "ox", { "entities" : qSketchRegion(id + "o", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : height });
+    const body = qCreatedBy(id + "ox", EntityType.BODY);
+
+    // The cavity is offset along the face normal, which is perpendicular to
+    // the rail's own centerline. pts[3] - pts[0] is that normal only when the
+    // ends are square; on a mitered corner it is the 45 degree diagonal, so
+    // offsetting along it leaves a wall of wall / sqrt(2) and reads the rail
+    // as sqrt(2) times its real width. Both come off the centerline instead,
+    // with the sense taken from the point the diagonal actually reaches.
+    const u = normalize(pts[1] - pts[0]);
+    const inward = pts[3] - pts[0];
+    const perp = vector(-u[1], u[0]);
+    const n = (dot(perp, inward) > 0 * inch) ? perp : -perp;
+    const across = abs(dot(n, inward));
+    if (wall > 0 * inch && across > 2 * wall && height > 2 * wall)
+    {
+        const over = 0.25 * inch;
+        const c = [pts[0] + n * wall - u * over, pts[1] + n * wall + u * over,
+                   pts[2] - n * wall + u * over, pts[3] - n * wall - u * over];
+        const ski = newSketchOnPlane(context, id + "i", { "sketchPlane" : pl });
+        skPolyline(ski, "r", { "points" : append(c, c[0]) });
+        skSolve(ski);
+        opExtrude(context, id + "ix", { "entities" : qSketchRegion(id + "i", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : height - wall, "startBound" : BoundingType.BLIND,
+                    "startDepth" : -wall });
+        opBoolean(context, id + "isub", { "tools" : qCreatedBy(id + "ix", EntityType.BODY),
+                    "targets" : body, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    return body;
+}
+
+/**
+ * Every hole in one sketch, one extrude and one subtraction, because a belly
+ * pan grid runs to hundreds of holes and one operation each would take longer
+ * to regenerate than to machine.
+ */
+function frcChassisDrill(context is Context, id is Id, pl is Plane, at is array,
+    dia is ValueWithUnits, from is ValueWithUnits, to is ValueWithUnits, target is Query)
+{
+    if (size(at) == 0 || dia <= 0 * inch || to <= from)
+        return;
+    const sk = newSketchOnPlane(context, id + "s",
+        { "sketchPlane" : plane(pl.origin + pl.normal * from, pl.normal, pl.x) });
+    for (var i = 0; i < size(at); i += 1)
+        skCircle(sk, "c" ~ i, { "center" : at[i], "radius" : dia / 2 });
+    skSolve(sk);
+    opExtrude(context, id + "x", { "entities" : qSketchRegion(id + "s", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : to - from });
+    var done = false;
+    try silent
+    {
+        opBoolean(context, id + "b", { "tools" : qCreatedBy(id + "x", EntityType.BODY),
+                    "targets" : target, "operationType" : BooleanOperationType.SUBTRACTION });
+        done = true;
+    }
+    if (!done)
+    {
+        try silent
+        {
+            opDeleteBodies(context, id + "d", { "entities" : qCreatedBy(id + "x", EntityType.BODY) });
+        }
+    }
+}
+
+/** True when the point is inside the convex quad, which every rail planform is. */
+function frcChassisInQuad(p is Vector, quad is array) returns boolean
+{
+    var neg = false;
+    var pos = false;
+    for (var i = 0; i < 4; i += 1)
+    {
+        const c = frcCross2(quad[i], quad[(i + 1) % 4], p);
+        if (c < 0 * inch * inch)
+            neg = true;
+        if (c > 0 * inch * inch)
+            pos = true;
+    }
+    return !(neg && pos);
+}
+
+/** Where the bolts sit around one module axis, in the coordinates they are drilled in. */
+function frcChassisPatternPoints(definition is map, center is Vector) returns array
+{
+    var out = [];
+    if (definition.patternKind == FRCChassisPattern.GRID)
+    {
+        const nx = definition.patternCountX;
+        const ny = definition.patternCountY;
+        for (var i = 0; i < nx; i += 1)
+        {
+            for (var j = 0; j < ny; j += 1)
+                out = append(out, center + vector((i - (nx - 1) / 2) * definition.patternPitchX,
+                            (j - (ny - 1) / 2) * definition.patternPitchY));
+        }
+    }
+    else
+    {
+        const n = definition.circleHoles;
+        for (var i = 0; i < n; i += 1)
+            out = append(out, center + frcPolar(definition.circleDiameter / 2, i * 360 * degree / n));
+    }
+    return out;
+}
+
+/**
+ * A swerve drivetrain frame that knows the modules bolted to its corners.
+ *
+ * The datum is the steering axis, inset from the outside faces and mirrored
+ * about both centerlines, which is the frame of reference WPILib kinematics
+ * and every module vendor use. Corners can carry different modules, because
+ * teams mix them.
+ *
+ * Where a vendor publishes real frame-cutting data, this feature uses it: SDS
+ * publishes a dimensioned rail print for the MK4c, MK4n, MK5i and MK5n (hole
+ * stations from the rail end, and rails cut 4.250 in short of each corner),
+ * and a plate-datum bolt pattern for the MK4, verified here against the
+ * uploaded layout drawings. Thrifty dimensions its flange row on TTB-1706.
+ * MK4i, the WCP X2 family and both REV modules publish envelopes and heights
+ * but no hole coordinates, so those corners take a typed-in pattern and the
+ * report says which numbers are vendor data and which are yours.
+ *
+ * Mount style is read, but only the top mount is drawn: the module plate sits
+ * under the rail ends, which is the arrangement every published rail print
+ * dimensions. A bottom mount runs the rails over the plate, which changes
+ * both the rail lengths and the module height, and no vendor publishes a cut
+ * length, a hole datum or a plate thickness for it. Picking it therefore
+ * builds the top mount and the report says so, rather than guessing numbers
+ * that would be presented as vendor data.
+ *
+ * The frame perimeter limit is a field. It has moved more than once and it
+ * will move again, so nothing here is tied to a season.
+ */
+export function frcSwerveChassisBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face or mate connector to build the frame on.", ["location"]);
+
+    // Pattern and mirror support. The picked face or mate connector is what
+    // puts the frame in space, so it is the reference the pattern transform is
+    // measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    const w = definition.frameWidth;
+    const l = definition.squareFrame ? definition.frameWidth : definition.frameLength;
+    const t = definition.railWidth;
+    const h = definition.railHeight;
+    const wall = definition.wallThickness;
+    const a = w / 2;
+    const b = l / 2;
+
+    if (2 * t >= w || 2 * t >= l)
+        throw regenError("The rails are wider than the frame they make up. Reduce the rail width.", ["railWidth"]);
+    if (2 * wall >= t)
+        throw regenError("The wall is half the rail width or more, so there is no tube left. Reduce it.", ["wallThickness"]);
+
+    // The module at each corner. Corners are named looking down at the frame
+    // with +y forward: front right, front left, back left, back right.
+    var mods = [definition.swerveModule, definition.swerveModule,
+                definition.swerveModule, definition.swerveModule];
+    if (definition.mixedModules)
+        mods = [definition.moduleFrontRight, definition.moduleFrontLeft,
+                definition.moduleBackLeft, definition.moduleBackRight];
+    var data = [];
+    for (var i = 0; i < 4; i += 1)
+        data = append(data, frcSwerveModuleData(mods[i]));
+
+    // How much rail is missing at each corner. A vendor rail print forces its
+    // own cut; otherwise the open-corner joint takes the gap you typed.
+    const wantOpen = definition.cornerJoint == FRCChassisJoint.MODULE_CORNER;
+    var trims = [];
+    for (var i = 0; i < 4; i += 1)
+    {
+        var g = 0 * inch;
+        if (data[i].cut > 0 * inch)
+            g = data[i].cut;
+        else if (wantOpen)
+            g = definition.cornerGap;
+        trims = append(trims, g);
+    }
+    for (var g in trims)
+    {
+        // A vendor rail print sets its own cut, and the corner opening field is
+        // hidden unless the corner joint is the open one, so the frame size is
+        // the parameter that is always on screen to name here.
+        if (2 * g >= w || 2 * g >= l)
+            throw regenError("The corner openings meet in the middle of the rails. Use a larger frame, or a smaller corner opening where the module has no rail print of its own.", ["frameWidth"]);
+    }
+
+    // Rail planforms, one corner at a time. At each corner the outer and inner
+    // x (or y) stations of the two rail ends meeting there depend on the joint
+    // at that corner: mitered, one rail through, or cut short for the module.
+    // Corner index order: 0 FR (+x, +y), 1 FL (-x, +y), 2 BL (-x, -y), 3 BR (+x, -y).
+    const endStation = function(corner is number, along is ValueWithUnits) returns map
+        {
+            const g = trims[corner];
+            if (g > 0 * inch)
+                return { "endOuter" : along - g, "endInner" : along - g,
+                         "sideOuter" : along - g, "sideInner" : along - g };
+            if (definition.cornerJoint == FRCChassisJoint.BUTT_SIDES)
+                return { "endOuter" : along - t, "endInner" : along - t,
+                         "sideOuter" : along, "sideInner" : along };
+            if (definition.cornerJoint == FRCChassisJoint.BUTT_ENDS)
+                return { "endOuter" : along, "endInner" : along,
+                         "sideOuter" : along - t, "sideInner" : along - t };
+            return { "endOuter" : along, "endInner" : along - t,
+                     "sideOuter" : along, "sideInner" : along - t };
+        };
+
+    const eFR = endStation(0, a);
+    const eFL = endStation(1, a);
+    const eBL = endStation(2, a);
+    const eBR = endStation(3, a);
+    const sFR = endStation(0, b);
+    const sFL = endStation(1, b);
+    const sBL = endStation(2, b);
+    const sBR = endStation(3, b);
+
+    // Outer edge first, then the inner edge back, keeping each quad convex.
+    const quads = [
+            [vector(-eFL.endOuter, b), vector(eFR.endOuter, b),
+             vector(eFR.endInner, b - t), vector(-eFL.endInner, b - t)],
+            [vector(eBR.endOuter, -b), vector(-eBL.endOuter, -b),
+             vector(-eBL.endInner, -b + t), vector(eBR.endInner, -b + t)],
+            [vector(a, sFR.sideOuter), vector(a, -sBR.sideOuter),
+             vector(a - t, -sBR.sideInner), vector(a - t, sFR.sideInner)],
+            [vector(-a, -sBL.sideOuter), vector(-a, sFL.sideOuter),
+             vector(-a + t, sFL.sideInner), vector(-a + t, -sBL.sideInner)]];
+
+    const railName = ["Front Rail", "Back Rail", "Right Rail", "Left Rail"];
+    var rails = [];
+    for (var i = 0; i < 4; i += 1)
+    {
+        const body = frcChassisRail(context, id + ("r" ~ i), pl, quads[i], h, wall);
+        setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                    "value" : railName[i] });
+        rails = append(rails, body);
+    }
+
+    // The four steering axes, mirrored about both centerlines.
+    const ax = a - definition.axisInsetX;
+    const ay = b - definition.axisInsetY;
+    // Read guardedly: only the modules whose vendor publishes an axis-to-edge
+    // figure carry one, and the rest return undefined rather than a guess.
+    var axisEdge = 0 * inch;
+    for (var d in data)
+    {
+        if (d.axisEdge is ValueWithUnits)
+            axisEdge = max(axisEdge, d.axisEdge);
+    }
+    if (ax <= 0 * inch || ay <= 0 * inch)
+        throw regenError("The steering axes are inset past the middle of the frame. Reduce the axis inset across the width, the one along the length, or both.", ["axisInsetX", "axisInsetY"]);
+    const axes = [vector(ax, ay), vector(-ax, ay), vector(-ax, -ay), vector(ax, -ay)];
+    const sgn = [vector(1, 1), vector(-1, 1), vector(-1, -1), vector(1, -1)];
+
+    // The belly pan, under the rails, its top face against the frame plane.
+    var pans = [];
+    if (definition.bellyPan)
+    {
+        const pw = a - definition.panInset;
+        const ph = b - definition.panInset;
+        if (pw <= 0 * inch || ph <= 0 * inch)
+            throw regenError("The belly pan is inset past the middle of the frame. Reduce the inset.", ["panInset"]);
+        const p = [vector(pw, ph), vector(-pw, ph), vector(-pw, -ph), vector(pw, -ph)];
+        const sk = newSketchOnPlane(context, id + "p", { "sketchPlane" : pl });
+        skPolyline(sk, "r", { "points" : append(p, p[0]) });
+        skSolve(sk);
+        opExtrude(context, id + "px", { "entities" : qSketchRegion(id + "p", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : 0 * inch,
+                    "startBound" : BoundingType.BLIND, "startDepth" : definition.panThickness });
+        const pan = qCreatedBy(id + "px", EntityType.BODY);
+        setProperty(context, { "entities" : pan, "propertyType" : PropertyType.NAME,
+                    "value" : "Belly Pan" });
+        frcRoundAlong(context, id + "pr", pan, pl.normal, 0.25 * inch);
+        pans = [pan];
+
+        if (definition.moduleClearance > 0 * inch)
+            frcChassisDrill(context, id + "mc", pl, axes, definition.moduleClearance,
+                -definition.panThickness - 0.1 * inch, 0.1 * inch, pan);
+        if (definition.panGrid)
+        {
+            const pitch = definition.panPitch;
+            const nx = floor((pw - pitch) / pitch);
+            const ny = floor((ph - pitch) / pitch);
+            var grid = [];
+            for (var i = -nx; i <= nx; i += 1)
+            {
+                for (var j = -ny; j <= ny; j += 1)
+                {
+                    const at = vector(i * pitch, j * pitch);
+                    if (definition.moduleClearance <= 0 * inch)
+                        grid = append(grid, at);
+                    else
+                    {
+                        var clear = true;
+                        for (var c in axes)
+                        {
+                            if (norm(at - c) < definition.moduleClearance / 2 + pitch / 2)
+                                clear = false;
+                        }
+                        if (clear)
+                            grid = append(grid, at);
+                    }
+                }
+            }
+            frcChassisDrill(context, id + "pg", pl, grid, frcHoleDiameter(definition.holeSize),
+                -definition.panThickness - 0.1 * inch, 0.1 * inch, pan);
+        }
+    }
+
+    // Module support plates, one square under each corner, drilled with the
+    // module pattern along with the rails so the holes line through.
+    const panDrop = definition.bellyPan ? definition.panThickness : 0 * inch;
+    var supports = [];
+    if (definition.supportPlates)
+    {
+        const s = definition.supportSize;
+        if (s <= t)
+            throw regenError("The support plate is smaller than the rail width. Increase its size.", ["supportSize"]);
+        for (var i = 0; i < 4; i += 1)
+        {
+            const cx = sgn[i][0];
+            const cy = sgn[i][1];
+            const p = [vector(cx * a, cy * b), vector(cx * (a - s), cy * b),
+                       vector(cx * (a - s), cy * (b - s)), vector(cx * a, cy * (b - s))];
+            const sid = id + ("sp" ~ i);
+            const sk = newSketchOnPlane(context, sid, { "sketchPlane" : pl });
+            skPolyline(sk, "r", { "points" : append(p, p[0]) });
+            skSolve(sk);
+            opExtrude(context, sid + "x", { "entities" : qSketchRegion(sid, false),
+                        "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : definition.supportThickness + panDrop,
+                        "startBound" : BoundingType.BLIND, "startDepth" : -panDrop });
+            const plate = qCreatedBy(sid + "x", EntityType.BODY);
+            setProperty(context, { "entities" : plate, "propertyType" : PropertyType.NAME,
+                        "value" : "Module Support Plate " ~ (i + 1) });
+            frcRoundAlong(context, sid + "r", plate, pl.normal, 0.12 * inch);
+            supports = append(supports, plate);
+        }
+    }
+
+    const drillDeep = panDrop + (definition.supportPlates ? definition.supportThickness : 0 * inch);
+    const railTargets = qUnion(rails);
+    const stackTargets = qUnion(concatenateArrays([rails, pans, supports]));
+
+    // Module holes: the vendor rail print wherever one exists, the MK4 plate
+    // pattern where SDS publishes it, and the typed pattern everywhere else.
+    var wanted = 0;
+    var drilled = 0;
+    var vendorCorners = 0;
+    var plateMissed = false;
+    if (definition.mountHoles != FRCChassisHoles.NONE)
+    {
+        var topHit = [];
+        var topDia = 0 * inch;
+        for (var i = 0; i < 4; i += 1)
+        {
+            const cx = sgn[i][0];
+            const cy = sgn[i][1];
+            const useVendor = definition.mountHoles == FRCChassisHoles.MODULE;
+            if (useVendor && size(data[i].railEnd) > 0)
+            {
+                // The vendor print: holes from each cut rail end, drilled down
+                // through the rail on its centerline. Two rail ends per corner.
+                vendorCorners += 1;
+                var pts = [];
+                const g = trims[i];
+                for (var st in data[i].railEnd)
+                {
+                    pts = append(pts, vector(cx * (a - g - st), cy * (b - t / 2)));
+                    pts = append(pts, vector(cx * (a - t / 2), cy * (b - g - st)));
+                }
+                wanted += size(pts);
+                drilled += size(pts);
+                frcChassisDrill(context, id + ("mv" ~ i), pl, pts, data[i].holeDia,
+                    -drillDeep - 0.1 * inch, h + 0.1 * inch, stackTargets);
+            }
+            else if (useVendor && data[i].plateDatum)
+            {
+                // The SDS MK4 plate pattern, mirrored into this corner's
+                // hand. frcSwerveMk4Points is written in the hand of the back
+                // left corner, whose sign is (-1, -1), so negating both
+                // components against this corner's sign is the mirror that
+                // puts the L outboard of the axis, under the two rails that
+                // meet at the corner. That is where this same feature drills
+                // a vendor rail print, and it is the only direction a legal
+                // axis inset can reach: run the legs the other way and they
+                // land 2.75 in inboard of the axis, where no inset in range
+                // puts material. The MK4 layout drawing is not in this
+                // repository, so the direction is reasoned from the rails
+                // rather than read off a print.
+                var pts = [];
+                for (var p0 in frcSwerveMk4Points())
+                {
+                    const p = axes[i] + vector(-cx * p0[0], -cy * p0[1]);
+                    wanted += 1;
+                    var inside = false;
+                    for (var q in quads)
+                    {
+                        if (frcChassisInQuad(p, q))
+                            inside = true;
+                    }
+                    if (inside)
+                        pts = append(pts, p);
+                }
+                // A corner counts as drilled from the print only when a hole
+                // in it landed. Counting it ahead of the containment test
+                // claimed four corners off the vendor print while the feature
+                // cut nothing, which is worse than reporting no count at all.
+                if (size(pts) > 0)
+                    vendorCorners += 1;
+                else
+                    plateMissed = true;
+                drilled += size(pts);
+                frcChassisDrill(context, id + ("mv" ~ i), pl, pts, data[i].holeDia,
+                    -drillDeep - 0.1 * inch, h + 0.1 * inch, stackTargets);
+            }
+            else if (definition.mountHoles == FRCChassisHoles.THROUGH_FACE)
+            {
+                // Sideways, in through the outer face of whichever pair of
+                // rails carries the module.
+                const dia = frcHoleDiameter(definition.holeSize);
+                const ex = pl.x;
+                const ey = cross(pl.normal, pl.x);
+                const over = 0.25 * inch;
+                const c = axes[i];
+                const side = definition.faceRail == FRCChassisFace.SIDE_RAILS;
+                const outward = side ? ex * (c[0] > 0 * inch ? 1 : -1) : ey * (c[1] > 0 * inch ? 1 : -1);
+                const along = side ? c[1] : c[0];
+                const face = side ? a : b;
+                const origin = pl.origin + outward * face + (side ? ey : ex) * along
+                    + pl.normal * definition.faceHeight + outward * over;
+                const dpl = plane(origin, -outward, side ? ey : ex);
+                // The drilled face as a rectangle in the drill plane's own
+                // axes: x runs along the rail between the same outer end
+                // stations that shaped its planform, and y runs up or down
+                // the rail with the sign the plane construction gave its y
+                // axis. Test each hole against that rectangle the way the
+                // top branches test the planform quads, so a pattern that
+                // runs off the rail end or past its top or bottom reports a
+                // miss instead of counting air as drilled. A hole exactly on
+                // the edge counts as inside, as it does in the quad test,
+                // and the tolerance keeps float noise from rejecting it.
+                const upSign = dot(cross(dpl.normal, dpl.x), pl.normal);
+                const aLo = side ? -(c[0] > 0 * inch ? sBR.sideOuter : sBL.sideOuter)
+                    : -(c[1] > 0 * inch ? eFL.endOuter : eBL.endOuter);
+                const aHi = side ? (c[0] > 0 * inch ? sFR.sideOuter : sFL.sideOuter)
+                    : (c[1] > 0 * inch ? eFR.endOuter : eBR.endOuter);
+                const tol = 1e-8 * meter;
+                var pts = [];
+                for (var p in frcChassisPatternPoints(definition, vector(0, 0) * inch))
+                {
+                    wanted += 1;
+                    const st = along + p[0];
+                    const up = definition.faceHeight + upSign * p[1];
+                    if (st >= aLo - tol && st <= aHi + tol && up >= -tol && up <= h + tol)
+                        pts = append(pts, p);
+                }
+                drilled += size(pts);
+                frcChassisDrill(context, id + ("mf" ~ i), dpl, pts, dia, 0 * inch, t + 2 * over, railTargets);
+            }
+            else
+            {
+                // The typed pattern, down through the rails at this axis.
+                const dia = frcHoleDiameter(definition.holeSize);
+                var pts = [];
+                for (var p in frcChassisPatternPoints(definition, axes[i]))
+                {
+                    wanted += 1;
+                    var inside = false;
+                    for (var q in quads)
+                    {
+                        if (frcChassisInQuad(p, q))
+                            inside = true;
+                    }
+                    if (inside)
+                        pts = append(pts, p);
+                }
+                drilled += size(pts);
+                topHit = concatenateArrays([topHit, pts]);
+                topDia = dia;
+            }
+        }
+        if (size(topHit) > 0)
+            frcChassisDrill(context, id + "mt", pl, topHit, topDia,
+                -drillDeep - 0.1 * inch, h + 0.1 * inch, stackTargets);
+    }
+
+    // The stock hole grid along the rails, at the FRC 0.5 in pitch. Rows per
+    // face follow the vendor rule: one fewer row than the face holds half
+    // inches. Grid holes stop short of a vendor rail print so the two do not
+    // overlap into slots.
+    if (definition.tubeGrid != FRCChassisTubeGrid.NONE)
+    {
+        const pitch = 0.5 * inch;
+        const gDia = frcHoleDiameter(definition.holeSize);
+        const ex = pl.x;
+        const ey = cross(pl.normal, pl.x);
+        var vRows = max(1, round(t / pitch) - 1);
+        while (vRows > 1 && (vRows - 1) * pitch + gDia + 0.06 * inch > t)
+            vRows -= 1;
+        var sRows = max(1, round(h / pitch) - 1);
+        while (sRows > 1 && (sRows - 1) * pitch + gDia + 0.06 * inch > h)
+            sRows -= 1;
+
+        for (var i = 0; i < 4; i += 1)
+        {
+            const isEnd = i < 2;
+            var e0 = isEnd ? -(isEnd && i == 0 ? eFL.endOuter : eBL.endOuter)
+                : -(i == 2 ? sBR.sideOuter : sBL.sideOuter);
+            var e1 = isEnd ? (i == 0 ? eFR.endOuter : eBR.endOuter)
+                : (i == 2 ? sFR.sideOuter : sFL.sideOuter);
+            const cLo = isEnd ? (i == 0 ? 1 : 2) : (i == 2 ? 3 : 2);
+            const cHi = isEnd ? (i == 0 ? 0 : 3) : (i == 2 ? 0 : 1);
+            var keepLo = e0;
+            var keepHi = e1;
+            if (size(data[cLo].railEnd) > 0 && definition.mountHoles == FRCChassisHoles.MODULE)
+                keepLo = e0 + data[cLo].railEnd[size(data[cLo].railEnd) - 1] + 0.5 * inch;
+            if (size(data[cHi].railEnd) > 0 && definition.mountHoles == FRCChassisHoles.MODULE)
+                keepHi = e1 - data[cHi].railEnd[size(data[cHi].railEnd) - 1] - 0.5 * inch;
+            const mid = isEnd ? (i == 0 ? b - t / 2 : -(b - t / 2)) : (i == 2 ? a - t / 2 : -(a - t / 2));
+
+            // Stations along the rail, first hole 0.5 in from the low end.
+            var stations = [];
+            var s = e0 + 0.5 * inch;
+            while (s <= e1 - 0.5 * inch + 1e-6 * inch)
+            {
+                if (s >= keepLo - 1e-6 * inch && s <= keepHi + 1e-6 * inch)
+                    stations = append(stations, s);
+                s = s + pitch;
+            }
+            if (size(stations) * (vRows + sRows) > 1200)
+                throw regenError("The rail grid makes too many holes. Use a shorter frame or no grid.", ["tubeGrid"]);
+
+            // Vertical holes through the 1 in faces.
+            var vPts = [];
+            for (var st in stations)
+            {
+                for (var r = 0; r < vRows; r += 1)
+                {
+                    const off = (r - (vRows - 1) / 2) * pitch;
+                    vPts = append(vPts, isEnd ? vector(st, mid + off) : vector(mid + off, st));
+                }
+            }
+            frcChassisDrill(context, id + ("gv" ~ i), pl, vPts, gDia,
+                -0.05 * inch, h + 0.1 * inch, rails[i]);
+
+            // Sideways holes through the 2 in faces, on all-four-faces tube.
+            // The drill plane's x axis is chosen so its y axis is the frame
+            // normal on every rail; the station coordinate flips sign where
+            // the x axis runs against the world direction.
+            const outward = isEnd ? ey * (i == 0 ? 1 : -1) : ex * (i == 2 ? 1 : -1);
+            const xDir = cross(pl.normal, -outward);
+            const sAlong = (i == 0 || i == 3) ? 1 : -1;
+            const over = 0.25 * inch;
+            const faceAt = isEnd ? b : a;
+            if (definition.tubeGrid == FRCChassisTubeGrid.FOUR_FACE)
+            {
+                const dpl = plane(pl.origin + outward * (faceAt + over), -outward, xDir);
+                var sPts = [];
+                for (var st in stations)
+                {
+                    for (var r = 0; r < sRows; r += 1)
+                        sPts = append(sPts, vector(sAlong * st, h / 2 + (r - (sRows - 1) / 2) * pitch));
+                }
+                frcChassisDrill(context, id + ("gs" ~ i), dpl, sPts, gDia,
+                    0 * inch, t + 2 * over, rails[i]);
+            }
+
+            // The REV MAX pattern adds a MAXSpline bore every 2 in through the
+            // 2 in faces, centered on the rail height. REV does not publish
+            // where the first bore sits, so the run is centered on the rail.
+            if (definition.tubeGrid == FRCChassisTubeGrid.MAX_PATTERN)
+            {
+                const sd = frcLobedSplineData(FRCDriveBore.MAXSPLINE);
+                if (2 * sd.tip + 0.06 * inch < h)
+                {
+                    const span = keepHi - keepLo;
+                    const nSp = floor(span / (2 * inch)) + 1;
+                    if (nSp > 0 && nSp < 60)
+                    {
+                        const start = keepLo + (span - (nSp - 1) * 2 * inch) / 2;
+                        const spl = plane(pl.origin + outward * (faceAt + over), -outward, xDir);
+                        const sid = id + ("gm" ~ i);
+                        const sk = newSketchOnPlane(context, sid, { "sketchPlane" : spl });
+                        for (var k = 0; k < nSp; k += 1)
+                            frcDrawProfile(sk, "m" ~ k ~ "_",
+                                frcLobedSplineArcs(sd, vector(sAlong * (start + k * 2 * inch), h / 2), 0.0005 * inch));
+                        skSolve(sk);
+                        opExtrude(context, sid + "x", { "entities" : qSketchRegion(sid, false),
+                                    "direction" : spl.normal, "endBound" : BoundingType.BLIND,
+                                    "endDepth" : t + 2 * over });
+                        // A swallowed failure used to leave the spline cutters
+                        // standing in the model as unnamed bodies with no
+                        // material, so a failed cut is cleaned up the way
+                        // frcChassisDrill cleans up its own.
+                        var splineCut = false;
+                        try silent
+                        {
+                            opBoolean(context, sid + "b", { "tools" : qCreatedBy(sid + "x", EntityType.BODY),
+                                        "targets" : rails[i],
+                                        "operationType" : BooleanOperationType.SUBTRACTION });
+                            splineCut = true;
+                        }
+                        if (!splineCut)
+                        {
+                            try silent
+                            {
+                                opDeleteBodies(context, sid + "d",
+                                    { "entities" : qCreatedBy(sid + "x", EntityType.BODY) });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Corner gussets on top of joined corners, and covers over open ones.
+    var deco = [];
+    if (definition.cornerGussets)
+    {
+        for (var i = 0; i < 4; i += 1)
+        {
+            if (trims[i] > 0 * inch)
+                continue;
+            const cx = sgn[i][0];
+            const cy = sgn[i][1];
+            const leg = definition.gussetLeg;
+            const p = [vector(cx * (a - t), cy * (b - t)),
+                       vector(cx * (a - t - leg), cy * (b - t)),
+                       vector(cx * (a - t), cy * (b - t - leg))];
+            const gid = id + ("gu" ~ i);
+            const sk = newSketchOnPlane(context, gid, { "sketchPlane" : pl });
+            skPolyline(sk, "g", { "points" : append(p, p[0]) });
+            skSolve(sk);
+            opExtrude(context, gid + "x", { "entities" : qSketchRegion(gid, false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : h + definition.gussetThickness,
+                        "startBound" : BoundingType.BLIND, "startDepth" : -h });
+            const g = qCreatedBy(gid + "x", EntityType.BODY);
+            setProperty(context, { "entities" : g, "propertyType" : PropertyType.NAME,
+                        "value" : "Corner Gusset " ~ (i + 1) });
+            frcRoundAlong(context, gid + "r", g, pl.normal, 0.12 * inch);
+            deco = append(deco, g);
+        }
+    }
+
+    // Corner covers close the gap above each swerve module's motors. The
+    // parameter names, the dialog labels and the part names all say cover,
+    // so a reader of either tab sees the same word.
+    if (definition.cornerCovers)
+    {
+        for (var i = 0; i < 4; i += 1)
+        {
+            if (trims[i] <= 0 * inch)
+                continue;
+            const cx = sgn[i][0];
+            const cy = sgn[i][1];
+            const reach = trims[i] + t;
+            const p = [vector(cx * a, cy * b), vector(cx * (a - reach), cy * b),
+                       vector(cx * (a - reach), cy * (b - reach)), vector(cx * a, cy * (b - reach))];
+            const gid = id + ("mg" ~ i);
+            const sk = newSketchOnPlane(context, gid, { "sketchPlane" : pl });
+            skPolyline(sk, "g", { "points" : append(p, p[0]) });
+            skSolve(sk);
+            opExtrude(context, gid + "x", { "entities" : qSketchRegion(gid, false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : h + definition.cornerCoverThickness,
+                        "startBound" : BoundingType.BLIND, "startDepth" : -h });
+            const g = qCreatedBy(gid + "x", EntityType.BODY);
+            if (definition.moduleClearance > 0 * inch)
+                frcChassisDrill(context, gid + "c", pl, [axes[i]], definition.moduleClearance,
+                    h - 0.05 * inch, h + definition.cornerCoverThickness + 0.1 * inch, g);
+            setProperty(context, { "entities" : g, "propertyType" : PropertyType.NAME,
+                        "value" : "Corner Cover " ~ (i + 1) });
+            frcRoundAlong(context, gid + "r", g, pl.normal, 0.12 * inch);
+            deco = append(deco, g);
+        }
+    }
+
+    const solids = qUnion(concatenateArrays([rails, pans, supports]));
+
+    // Two classes, because this feature draws two kinds of part. The four
+    // rails are tube. The belly pan, the module support plates, the corner
+    // gussets and the corner covers are all flat plate cut from sheet, which
+    // is the pile a student would put them in.
+    frcApplyPart(context, qUnion(rails), definition.material, FRCPartClass.STRUCTURE);
+    const flat = concatenateArrays([pans, supports, deco]);
+    if (size(flat) > 0)
+        frcApplyPart(context, qUnion(flat), definition.material, FRCPartClass.PLATE);
+
+    // Every drill has already been subtracted into this feature's own rails,
+    // pans and plates, so no cutter is left for the move to strand. Every
+    // measurement below is a volume or a parameter.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const vol = evVolume(context, { "entities" : solids });
+    const mass = vol * frcDensity(definition.material);
+    const perimeter = 2 * (w + l);
+    const track = 2 * ax;
+    const base = 2 * ay;
+
+    var lines = "Bounding perimeter " ~ frcInches(perimeter) ~ ", "
+        ~ (perimeter > definition.perimeterLimit
+            ? ("over your limit by " ~ frcInches(perimeter - definition.perimeterLimit))
+            : (frcInches(definition.perimeterLimit - perimeter) ~ " spare"))
+        ~ ", on " ~ frcInches(track) ~ " track by " ~ frcInches(base) ~ " wheelbase. ";
+    if (definition.mountHoles != FRCChassisHoles.NONE)
+        lines ~= "Drilled " ~ drilled ~ " of " ~ wanted ~ " mount holes"
+            ~ ((drilled < wanted) ? (", " ~ (wanted - drilled) ~ " missed") : "")
+            ~ ", " ~ vendorCorners ~ " corners of 4 by vendor print. ";
+    // A module whose vendor publishes an axis-to-edge distance can be checked
+    // against the inset the user typed. Smaller, and the module hangs over the
+    // frame face, which costs perimeter and can foul a bumper.
+    if (axisEdge > 0 * inch)
+    {
+        const overX = axisEdge - definition.axisInsetX;
+        const overY = axisEdge - definition.axisInsetY;
+        const over = max(overX, overY);
+        if (over > 0.001 * inch)
+            lines ~= "NOTE The module reaches " ~ frcInches(axisEdge)
+                ~ " from its steering axis, so at this inset it stands "
+                ~ frcInches(over) ~ " proud of the frame face. Increase the axis"
+                ~ " inset to tuck it in. ";
+    }
+    if (definition.mountHoles == FRCChassisHoles.MODULE && vendorCorners == 0)
+        lines ~= "NOTE This module publishes no rail print or plate datum, so the "
+            ~ "typed pattern was cut instead. Check it against the module. ";
+    if (!plateMissed && wanted > 0 && 2 * drilled < wanted
+        && definition.mountHoles != FRCChassisHoles.NONE)
+    {
+        // A face pattern misses up the rail or off its ends, not across
+        // its width, so the advice names the dimension that was missed.
+        lines ~= (definition.mountHoles == FRCChassisHoles.THROUGH_FACE)
+            ? ("NOTE Most of the pattern missed. The rail face is "
+                ~ frcInches(h) ~ " tall, so holes above or below it, or past"
+                ~ " the rail ends, drill air. Move the pattern height or"
+                ~ " narrow the spacing. ")
+            : ("NOTE Most of the pattern missed. The rails are "
+                ~ frcInches(t) ~ " wide, so a pattern spread wider than that drills"
+                ~ " air. Narrow the spacing across the rail. ");
+    }
+    if (plateMissed)
+    {
+        // The leg standoff is read back from the pattern itself so the note
+        // cannot drift from the points that are drilled. A leg lands on a
+        // rail when the axis inset is between that standoff and one rail
+        // width more than it, but at either end of that band the hole
+        // CENTERS sit exactly on a rail face, where the boundary-inclusive
+        // containment test still counts them drilled while the drill cuts
+        // them half off the rail. The note therefore points at the middle
+        // of the band, where every hole lands whole.
+        var legOut = 0 * inch;
+        for (var p0 in frcSwerveMk4Points())
+            legOut = max(legOut, max(abs(p0[0]), abs(p0[1])));
+        lines ~= "NOTE Plate pattern missed: the legs sit " ~ frcInches(legOut)
+            ~ " out, so set both axis insets near " ~ frcInches(legOut + t / 2)
+            ~ ", which centers the holes in the rail; the pattern lands anywhere "
+            ~ "between " ~ frcInches(legOut) ~ " and " ~ frcInches(legOut + t)
+            ~ ", but at those ends the holes straddle a rail face. ";
+    }
+    // A height kit moves the module, which this feature does not draw, so the
+    // panel is the only place a chosen kit shows up at all. Dropping the line
+    // would leave the parameter with no effect anywhere.
+    if (definition.heightKit == FRCSwerveHeightKit.SDS_LIFT_MK5)
+        lines ~= "The SDS +1 in kit puts the plate near 4.75 in, by arithmetic only. ";
+    else if (definition.heightKit == FRCSwerveHeightKit.SDS_LOWER_MK5
+        || definition.heightKit == FRCSwerveHeightKit.SDS_LOWER_MK4)
+        lines ~= "The SDS -7/8 in kit puts the plate near 2.875 in, by arithmetic only. ";
+    lines ~= "Mass " ~ roundToPrecision(mass / FRC_POUND, 2) ~ " lb. ";
+    // Only the top mount is drawn, with the module plate under the rail ends,
+    // which is the arrangement every published vendor rail print dimensions.
+    // No vendor publishes a bottom mount cut length, hole datum or plate
+    // height, and the module data here carries none, so the feature reports
+    // what it built rather than inventing numbers for the other case.
+    if (definition.mountStyle == FRCSwerveMount.BOTTOM_MOUNT)
+        lines ~= "NOTE Bottom mount was picked but the top mount was built, so set "
+            ~ "the corner cut, pattern and height by hand. ";
+    // Vendor text belongs to the module it came from. Printing data[0] under
+    // one heading put one corner's screw count on the whole chassis, and a
+    // wrong screw count is wrong hardware ordered. One row per distinct
+    // module, naming its corners, serves a mixed chassis and a plain one, and
+    // each row leads with the fastener line, which is what gets ordered.
+    const shortCorner = ["FR", "FL", "BL", "BR"];
+    var seenName = [];
+    var seenAt = [];
+    for (var i = 0; i < 4; i += 1)
+    {
+        var isNew = true;
+        for (var nm in seenName)
+        {
+            if (nm == data[i].name)
+                isNew = false;
+        }
+        if (isNew)
+        {
+            seenName = append(seenName, data[i].name);
+            seenAt = append(seenAt, i);
+        }
+    }
+    lines ~= "From the vendor drawings, ";
+    for (var k = 0; k < size(seenName); k += 1)
+    {
+        const at = seenAt[k];
+        var tag = "";
+        for (var i = 0; i < 4; i += 1)
+        {
+            if (data[i].name == seenName[k])
+                tag ~= ((tag == "") ? "" : "/") ~ shortCorner[i];
+        }
+        // A cut that came from the module data is the vendor rail print
+        // overriding the corner joint that was picked, so the row says so.
+        lines ~= "" ~ tag ~ " is " ~ seenName[k]
+            ~ ((trims[at] > 0 * inch) ? (", cut " ~ frcInches(trims[at])
+                    ~ ((data[at].cut > 0 * inch) ? " by rail print" : "")) : "")
+            ~ ", " ~ frcOneLine(data[at].screws, 44)
+            ~ ((k < size(seenName) - 1) ? ". " : ".");
+    }
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################# SHOOTER #################################
+
+export const FRC_SHOOTPITCH_BOUNDS = { (meter) : [0.002, 0.0508, 0.5], (centimeter) : 5.08,
+    (millimeter) : 50.8, (inch) : 2, (foot) : 0.16667, (yard) : 0.05556 } as LengthBoundSpec;
+export const FRC_HOODTHICK_BOUNDS = { (meter) : [0.0005, 0.003175, 0.05], (centimeter) : 0.3175,
+    (millimeter) : 3.175, (inch) : 0.125, (foot) : 0.01042, (yard) : 0.00347 } as LengthBoundSpec;
+export const FRC_TARGETDIST_BOUNDS = { (meter) : [0.1, 3.048, 30], (centimeter) : 304.8,
+    (millimeter) : 3048, (inch) : 120, (foot) : 10, (yard) : 3.33333 } as LengthBoundSpec;
+export const FRC_TARGETRISE_BOUNDS = { (meter) : [-5, 1.8288, 10], (centimeter) : 182.88,
+    (millimeter) : 1828.8, (inch) : 72, (foot) : 6, (yard) : 2 } as LengthBoundSpec;
+export const FRC_LAUNCHANGLE_BOUNDS = { (degree) : [1, 45, 89], (radian) : 0.7854 } as AngleBoundSpec;
+export const FRC_HOODANGLE_BOUNDS = { (degree) : [0, 180, 360], (radian) : 3.14159 } as AngleBoundSpec;
+export const FRC_HOODWRAP_BOUNDS = { (degree) : [5, 90, 330], (radian) : 1.5708 } as AngleBoundSpec;
+export const FRC_SHOOTRPM_BOUNDS = { (unitless) : [100, 4000, 30000] } as RealBoundSpec;
+export const FRC_EXITSPEED_BOUNDS = { (unitless) : [1, 40, 300] } as RealBoundSpec;
+export const FRC_PIECEMASS_BOUNDS = { (unitless) : [0.005, 0.5, 30] } as RealBoundSpec;
+export const FRC_SHAPEFACTOR_BOUNDS = { (unitless) : [0.05, 0.4, 1] } as RealBoundSpec;
+export const FRC_SPEEDRATIO_BOUNDS = { (unitless) : [0.05, 1, 10] } as RealBoundSpec;
+export const FRC_ADDEDINERTIA_BOUNDS = { (unitless) : [0, 0, 2000] } as RealBoundSpec;
+export const FRC_MOTORCOUNT_BOUNDS = { (unitless) : [1, 2, 8] } as IntegerBoundSpec;
+export const FRC_MOTORFREE_BOUNDS = { (unitless) : [100, 6000, 30000] } as RealBoundSpec;
+export const FRC_MOTORTORQUE_BOUNDS = { (unitless) : [0.01, 0.5, 50] } as RealBoundSpec;
+
+export enum FRCShooterStyle
+{
+    annotation { "Name" : "One wheel against a hood" } SINGLE_HOOD,
+    annotation { "Name" : "Two opposed wheels" }       DUAL_OPPOSED
+}
+
+export enum FRCShooterSolve
+{
+    annotation { "Name" : "From the wheel speed" }   FROM_WHEEL_SPEED,
+    annotation { "Name" : "From the exit speed" }    FROM_EXIT_SPEED,
+    annotation { "Name" : "From a target to reach" } FROM_TARGET
+}
+
+export enum FRCPieceShape
+{
+    annotation { "Name" : "Solid ball" }        SOLID_BALL,
+    annotation { "Name" : "Hollow ball" }       HOLLOW_BALL,
+    annotation { "Name" : "Solid disc" }        SOLID_DISC,
+    annotation { "Name" : "Ring or hoop" }      RING,
+    annotation { "Name" : "Something else" }    CUSTOM
+}
+
+/**
+ * The shape factor k in I = k m r squared. Only the four textbook bodies are
+ * listed, because a game piece that is none of them needs measuring, not
+ * guessing, and CUSTOM is there for the measured number.
+ */
+export function frcShapeFactor(s is FRCPieceShape, custom is number) returns number
+{
+    if (s == FRCPieceShape.SOLID_BALL)
+        return 0.4;
+    if (s == FRCPieceShape.HOLLOW_BALL)
+        return 2.0 / 3.0;
+    if (s == FRCPieceShape.SOLID_DISC)
+        return 0.5;
+    if (s == FRCPieceShape.RING)
+        return 1.0;
+    return custom;
+}
+
+/** One set of shooter wheels on an axis, as solid annuli. */
+function frcShooterWheels(context is Context, id is Id, pl is Plane, at is Vector,
+    od is ValueWithUnits, width is ValueWithUnits, pitch is ValueWithUnits,
+    count is number, bore is ValueWithUnits, label is string) returns array
+{
+    var out = [];
+    for (var i = 0; i < count; i += 1)
+    {
+        const wid = id + ("w" ~ i);
+        const base = plane(pl.origin + pl.normal * (i * pitch), pl.normal, pl.x);
+        const sk = newSketchOnPlane(context, wid + "s", { "sketchPlane" : base });
+        skCircle(sk, "o", { "center" : at, "radius" : od / 2 });
+        if (bore > 0 * inch)
+            skCircle(sk, "b", { "center" : at, "radius" : bore / 2 });
+        skSolve(sk);
+        // filterInnerLoops drops the disc inside the bore, so the bore comes out
+        // as a hole rather than being filled back in. The bore is drawn in this
+        // same sketch, so passing false here extruded both regions and every
+        // wheel came out solid, against a dialog that calls the bore part of
+        // the inertia.
+        opExtrude(context, wid + "x", { "entities" : qSketchRegion(wid + "s", true),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : width });
+        const body = qCreatedBy(wid + "x", EntityType.BODY);
+        setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                    "value" : label ~ " " ~ (i + 1) });
+        try silent
+        {
+            opFillet(context, wid + "f", { "entities" : qOwnedByBody(body, EntityType.EDGE),
+                        "radius" : 0.06 * inch });
+        }
+        out = append(out, body);
+    }
+    return out;
+}
+
+/**
+ * A flywheel shooter, and the four numbers that decide whether it scores.
+ *
+ * Exit speed. A piece leaving a hooded shooter rolls on the wheel at one side
+ * and on the hood at the other, so its middle travels at the average of the
+ * wheel surface speed and zero: half the surface speed. That is the ceiling,
+ * approached as flywheel inertia grows, and every published treatment agrees
+ * on it. Two opposed wheels replace the stationary hood with a second moving
+ * surface, so the exit speed is the average of the two surface speeds and the
+ * backspin comes from their difference.
+ *
+ * What the shot costs the wheel. Momentum, not energy, sets it. The wheel
+ * leaves the shot slower than it entered by
+ *
+ *     wheel speed before / wheel speed after = 1 + ((1 + kp) / (4 kw)) (mp / mw)
+ *
+ * which is Brettle's result, with k the shape factor in I = k m r squared for
+ * the piece and the wheel. The maximum kinetic energy that can reach the piece
+ * is under half of what the flywheel holds, so any calculator that conserves
+ * energy across the shot underestimates the recovery time. Pedersen's FRC 449
+ * paper is the current published correction and gives the two-wheel case.
+ *
+ * Where it lands. Drag free, a piece launched at speed u and angle theta
+ * passes through the point (x, y) when
+ *
+ *     u squared = g x squared / (2 cos squared theta (x tan theta - y))
+ *
+ * which is what the target mode solves. Light game pieces do not fly drag
+ * free, and nobody publishes a drag coefficient for one, so treat the number
+ * as the starting point for tuning rather than as an answer.
+ *
+ * The wheel inertia used here is the inertia of the wheels this feature draws,
+ * as solid annuli of the material set. Pulleys, hubs, shafts and real wheels
+ * with spokes are not drawn, so add what they contribute in the added inertia
+ * field.
+ */
+export function frcShooterBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face or mate connector at one end of the shooter axis.", ["location"]);
+
+    // Pattern and mirror support. The picked face or mate connector is what
+    // puts the shooter axis in space, so it is the reference the pattern
+    // transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    const od = definition.wheelOuter;
+    const width = definition.wheelWidth;
+    const count = definition.wheelCount;
+    const pitch = definition.wheelPitch;
+    const bore = definition.boreDiameter;
+    const dual = definition.style == FRCShooterStyle.DUAL_OPPOSED;
+    const pieceDia = definition.pieceDiameter;
+    const comp = definition.compression;
+
+    if (bore >= od)
+        throw regenError("The bore is as big as the wheel. Reduce it.", ["boreDiameter"]);
+    if (count > 1 && pitch < width)
+        throw regenError("The wheels are spaced closer than they are wide, so they would overlap. Increase the spacing.", ["wheelPitch"]);
+    if (comp >= pieceDia)
+        throw regenError("The compression is the whole game piece. Reduce it.", ["compression"]);
+
+    const center = vector(0, 0) * inch;
+    const driven = frcShooterWheels(context, id + "a", pl, center, od, width, pitch, count, bore,
+            dual ? "Shooter Wheel" : "Flywheel");
+    frcApplyPart(context, qUnion(driven), definition.material, FRCPartClass.WHEEL);
+    var bodies = driven;
+
+    const r1 = od / 2;
+    const r2 = dual ? definition.secondOuter / 2 : 0 * inch;
+    const spacing = r1 + r2 + pieceDia - comp;
+    var oppVol = 0 * meter ^ 3;
+    if (dual)
+    {
+        const ey = vector(0 * inch, spacing);
+        const opp = frcShooterWheels(context, id + "b", pl, ey, definition.secondOuter, width,
+                pitch, count, bore, "Opposing Wheel");
+        frcApplyPart(context, qUnion(opp), definition.material, FRCPartClass.WHEEL);
+        bodies = concatenateArrays([bodies, opp]);
+        // The opposed wheel is spun by the same shot, so its inertia belongs in
+        // the sum below. Measure it here, while the query is still in scope.
+        oppVol = evVolume(context, { "entities" : qUnion(opp) });
+    }
+
+    const span = (count - 1) * pitch + width;
+    const hoodInner = r1 + pieceDia - comp;
+    if (!dual && definition.buildHood)
+    {
+        const a0 = definition.hoodStart;
+        const a1 = a0 + definition.hoodWrap;
+        const ro = hoodInner + definition.hoodThickness;
+        const segs = [{ "kind" : "line", "start" : frcPolar(hoodInner, a0), "end" : frcPolar(ro, a0) },
+                      frcArcFromAngles(center, ro, a0, a1),
+                      { "kind" : "line", "start" : frcPolar(ro, a1), "end" : frcPolar(hoodInner, a1) },
+                      frcArcFromAngles(center, hoodInner, a1, a0)];
+        const sk = newSketchOnPlane(context, id + "h", { "sketchPlane" : pl });
+        frcDrawProfile(sk, "h", segs);
+        skSolve(sk);
+        opExtrude(context, id + "hx", { "entities" : qSketchRegion(id + "h", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : span });
+        const hood = qCreatedBy(id + "hx", EntityType.BODY);
+        setProperty(context, { "entities" : hood, "propertyType" : PropertyType.NAME,
+                    "value" : "Hood" });
+        // The hood is see-through on purpose, so the team color arrives at the
+        // alpha this call already drew with rather than opaque.
+        frcApplyNamed(context, hood, "Polycarbonate", 1200 * kilogram / meter ^ 3,
+            frcTeamColorA(context, FRCPartClass.GAMEPIECE,
+                    color(0.88, 0.92, 0.95, 0.35), 0.35));
+        bodies = append(bodies, hood);
+    }
+
+    // No boolean ends this feature, so every body it made is still here to
+    // move. Every measurement below is a volume or a parameter, so it reads
+    // the same either side of the move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    // Everything below is numbers, in SI, taken from the geometry above.
+    const wheelVol = evVolume(context, { "entities" : qUnion(driven) });
+    const mw = wheelVol * frcDensity(definition.material) / kilogram;
+    const rw = r1 / meter;
+    const ri = bore / (2 * meter);
+    const lbInSq = 0.45359237 * 0.0254 * 0.0254;
+    const iw = 0.5 * mw * (rw * rw + ri * ri) + definition.addedInertia * lbInSq;
+    if (mw <= 0 || iw <= 0)
+        throw regenError("The wheels have no mass, so there is nothing to compute. Check the wheel size and material.", ["wheelOuter"]);
+    const kw = iw / (mw * rw * rw);
+
+    const mp = definition.pieceMass * 0.45359237;
+    const rp = pieceDia / (2 * meter);
+    const kp = frcShapeFactor(definition.pieceShape, definition.shapeFactor);
+    const g = 9.80665;
+
+    // Speed carried per radian of wheel, and the price of the shot in wheel speed.
+    const gearG = dual ? definition.speedRatio : 0;
+    const sum = rw + gearG * r2 / meter;
+    const dif = rw - gearG * r2 / meter;
+    const perRad = dual ? sum / 2 : rw / 2;
+    // Both wheels are slowed by the shot, and a wheel geared to run at G times
+    // the first refers its inertia through as G squared. Leaving the opposed
+    // wheel out understated the flywheel, which overstated the speed the shot
+    // costs: on the shipped dual defaults it put the exit speed 31 per cent low,
+    // 36.4 ft/s against 47.8, and the drop 47.9 per cent against 31.5.
+    const oppMass = oppVol * frcDensity(definition.material) / kilogram;
+    const r2m = r2 / meter;
+    const iOpp = 0.5 * oppMass * (r2m * r2m + ri * ri);
+    const iEff = dual ? iw + gearG * gearG * iOpp : iw;
+    const ratio = dual
+        ? 1 + (dif * dif * kp * mp + sum * sum * mp) / (4 * iEff)
+        : 1 + ((1 + kp) / (4 * kw)) * (mp / mw);
+    if (perRad <= 0)
+        throw regenError("At that speed ratio the two wheels cancel each other out. Change the ratio.", ["speedRatio"]);
+
+    var exit = 0;
+    var flight = 0;
+    var apex = 0;
+    if (definition.solveMode == FRCShooterSolve.FROM_WHEEL_SPEED)
+    {
+        exit = perRad * (definition.wheelRPM * 2 * PI / 60) / ratio;
+    }
+    else if (definition.solveMode == FRCShooterSolve.FROM_EXIT_SPEED)
+    {
+        exit = definition.exitSpeed * 0.3048;
+    }
+    else
+    {
+        const x = definition.targetDistance / meter;
+        const y = definition.targetRise / meter;
+        const th = definition.launchAngle;
+        if (x * tan(th) <= y)
+            throw regenError("At that angle the shot is still climbing to the target when it arrives, so no speed reaches it. Raise the angle.", ["launchAngle"]);
+        const c = cos(th);
+        exit = sqrt(g * x * x / (2 * c * c * (x * tan(th) - y)));
+        flight = x / (exit * c);
+        const up = exit * sin(th);
+        apex = up * up / (2 * g);
+    }
+
+    const wAfter = exit / perRad;
+    const wBefore = wAfter * ratio;
+    const rpmBefore = wBefore * 60 / (2 * PI);
+    const rpmAfter = wAfter * 60 / (2 * PI);
+    const surface = wBefore * rw / 0.3048;
+    const spin = dual ? dif / (2 * rp) * wAfter : exit / rp;
+
+    var recovery = -1.0;
+    if (definition.reportRecovery)
+    {
+        const wFree = definition.motorFree * 2 * PI / 60;
+        if (wFree > wBefore)
+        {
+            // log is the natural logarithm in FeatureScript. There is no ln.
+            recovery = -(iw * wFree / (definition.motorCount * definition.motorTorque))
+                * log((wFree - wBefore) / (wFree - wAfter));
+        }
+    }
+
+    var lines = "Spin the wheels to " ~ roundToPrecision(rpmBefore, 0)
+        ~ " rpm; the shot pulls them to " ~ roundToPrecision(rpmAfter, 0) ~ " rpm, a "
+        ~ roundToPrecision((1 - rpmAfter / rpmBefore) * 100, 1) ~ " percent drop. ";
+    lines ~= "The piece leaves at " ~ roundToPrecision(exit / 0.3048, 1) ~ " ft/s with "
+        ~ roundToPrecision(spin * 60 / (2 * PI), 0) ~ " rpm of spin. ";
+    if (definition.solveMode == FRCShooterSolve.FROM_TARGET)
+        lines ~= "Flight " ~ roundToPrecision(flight, 2) ~ " s to the target, apex "
+            ~ frcInches(apex * meter) ~ ", drag free. ";
+    lines ~= "Flywheel " ~ roundToPrecision(mw * kilogram / FRC_POUND, 2) ~ " lb. ";
+    if (definition.reportRecovery)
+        lines ~= (recovery < 0
+                ? "It never recovers: free speed is under the shot speed. "
+                : ("Recovery " ~ roundToPrecision(recovery, 3) ~ " s on "
+                    ~ definition.motorCount ~ " motor"
+                    ~ (definition.motorCount == 1 ? "" : "s") ~ ". "));
+    // A hood is a stationary surface, so the piece center leaves at the mean
+    // of the wheel surface speed and zero. Two opposed wheels replace the hood
+    // with a second moving surface, so the ceiling is the mean of the two
+    // surface speeds, which at a 1x ratio is the whole of one of them. The
+    // doc comment above has always said so; the footer said half regardless.
+    if (dual)
+        lines ~= "Exit tops out at the mean of the two surface speeds, the driven wheel "
+            ~ "running " ~ roundToPrecision(surface, 1) ~ " ft/s; compression and drag "
+            ~ "are unpublished, and real shooters beat this.";
+    else
+        lines ~= "Exit tops out at half the " ~ roundToPrecision(surface, 1)
+            ~ " ft/s surface speed; compression, hood wrap and drag are unpublished, "
+            ~ "and real shooters beat this.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################# TURRET #################################
+
+export const FRC_TURRETID_BOUNDS = { (meter) : [0.0254, 0.1778, 0.3], (centimeter) : 17.78,
+    (millimeter) : 177.8, (inch) : 7, (foot) : 0.58333, (yard) : 0.19444 } as LengthBoundSpec;
+export const FRC_TURRETOD_BOUNDS = { (meter) : [0.03, 0.254, 0.8], (centimeter) : 25.4,
+    (millimeter) : 254, (inch) : 10, (foot) : 0.83333, (yard) : 0.27778 } as LengthBoundSpec;
+export const FRC_TURRETW_BOUNDS = { (meter) : [0.001, 0.00635, 0.05], (centimeter) : 0.635,
+    (millimeter) : 6.35, (inch) : 0.25, (foot) : 0.020833, (yard) : 0.006944 } as LengthBoundSpec;
+export const FRC_RINGTEETH_BOUNDS = { (unitless) : [40, 140, 300] } as IntegerBoundSpec;
+export const FRC_PINION_BOUNDS = { (unitless) : [8, 10, 60] } as IntegerBoundSpec;
+export const FRC_UPSTREAM_BOUNDS = { (unitless) : [1, 3, 400] } as RealBoundSpec;
+export const FRC_ROTRANGE_BOUNDS = { (degree) : [30, 270, 360], (radian) : 4.712 } as AngleBoundSpec;
+export const FRC_MOUNTCOUNT_BOUNDS = { (unitless) : [2, 8, 36] } as IntegerBoundSpec;
+
+export enum FRCTurretBearing
+{
+    annotation { "Name" : "X-contact thin section" } XCONTACT,
+    annotation { "Name" : "AndyMark am-5039" }       AM_TURNTABLE,
+    annotation { "Name" : "Custom bearing" }         CUSTOM
+}
+
+export enum FRCTurretPitch
+{
+    annotation { "Name" : "10 DP" } DP10,
+    annotation { "Name" : "20 DP" } DP20
+}
+
+/**
+ * A turret: the rotating plate, its ring gear, the bearing it rides and the
+ * pinion that drives it.
+ *
+ * The bearing is the load-bearing decision. X-contact thin-section bearings
+ * are what FRC turrets are actually built on: WCP and ThriftyBot both sell a
+ * ladder where the outside diameter is the bore plus 0.5 in and the width is
+ * 0.25 in, from about 2.5 in up to 10 in. Neither vendor publishes any load
+ * rating for any size, and none publishes a mounting bolt pattern, so race
+ * retention is left to your design and the report says so. The AndyMark
+ * am-5039 turntable is the one FRC turret bearing with a published load
+ * rating, 65 lb, and published bolt circles.
+ *
+ * The ring gear convention is 10 DP: the WCP GreyT turret drives a 140 tooth
+ * ring with a 10 tooth 10 DP pinion, and AndyMark's 6.875 in turret uses a
+ * 200 tooth 20 DP ring on a 20 tooth pinion. Teeth here are cut with the same
+ * involute generator as FRC Gear, so the mesh is real.
+ */
+export function frcTurretBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face or mate connector to build the turret on.", ["location"]);
+
+    // Pattern and mirror support. The picked face or mate connector is what
+    // puts the turret in space, so it is the reference the pattern transform
+    // is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+    const center = vector(0, 0) * inch;
+
+    // The bearing, from the vendor ladders.
+    var bid = definition.bearingInner;
+    var bod = bid + 0.5 * inch;
+    var bw = 0.25 * inch;
+    var bearingName = "X-contact, " ~ frcInches(bid) ~ " bore x " ~ frcInches(bod) ~ " x 0.25 in";
+    if (definition.turretBearing == FRCTurretBearing.AM_TURNTABLE)
+    {
+        bid = 145 * millimeter;
+        bod = 203.2 * millimeter;
+        bw = 12 * millimeter;
+        bearingName = "AndyMark am-5039 turntable, 145 mm bore x 203.2 mm x 12 mm, 65 lb rating";
+    }
+    else if (definition.turretBearing == FRCTurretBearing.CUSTOM)
+    {
+        bod = definition.bearingOuter;
+        bw = definition.bearingWidth;
+        bearingName = "custom, " ~ frcInches(bid) ~ " bore x " ~ frcInches(bod)
+            ~ " x " ~ frcInches(bw);
+    }
+    if (bod <= bid)
+        throw regenError("The bearing outside diameter is not larger than its bore. Check the bearing sizes.", ["bearingOuter"]);
+
+    const DP = (definition.ringPitch == FRCTurretPitch.DP10) ? 10 / inch : 20 / inch;
+    const dpLabel = (definition.ringPitch == FRCTurretPitch.DP10) ? "10 DP" : "20 DP";
+    const PA = 20 * degree;
+    const N = definition.ringTeeth;
+    const ringPD = N / DP;
+    const ringRoot = (N - 2.5) / (2 * DP);
+
+    var plateR = definition.plateOuter / 2;
+    if (definition.makeRing)
+    {
+        // The pitch and the tooth count are separate fields, so changing the
+        // pitch alone leaves a count that was chosen for the other one: 140
+        // teeth is the WCP 10 DP ring, and at 20 DP the same 140 teeth halve
+        // the root circle and stop clearing the bearing. The message names
+        // the count that would build, worked back from this same guard.
+        // FRC_RINGTEETH_BOUNDS tops out at 300, so past that the bearing is
+        // the thing that has to change.
+        const needRoot = bod + 0.5 * inch;
+        const minTeeth = floor(needRoot * DP + 2.5) + 1;
+        if (2 * ringRoot <= needRoot)
+            throw regenError("That ring gear is too small for this bearing: at "
+                ~ dpLabel ~ " its " ~ N ~ " teeth give a " ~ frcInches(2 * ringRoot)
+                ~ " root circle, which has to clear " ~ frcInches(needRoot)
+                ~ " with room for fasteners. "
+                ~ ((minTeeth <= 300)
+                    ? ("Raise the ring teeth to " ~ minTeeth ~ ", or pick a smaller bearing.")
+                    : "No tooth count in range clears it, so pick a smaller bearing."),
+                ["ringTeeth"]);
+        plateR = ringRoot;
+    }
+    if (plateR <= bid / 2 + 0.1 * inch)
+        throw regenError("The plate is not larger than the bearing bore. Increase the plate diameter.", ["plateOuter"]);
+
+    // The rotating plate, with the ring teeth as its own rim when asked for.
+    const sk = newSketchOnPlane(context, id + "p", { "sketchPlane" : pl });
+    if (definition.makeRing)
+    {
+        const pts = frcGearOutline(N, DP, PA, center);
+        skPolyline(sk, "ring", { "points" : append(pts, pts[0]) });
+    }
+    else
+        skCircle(sk, "o", { "center" : center, "radius" : plateR });
+    skCircle(sk, "b", { "center" : center, "radius" : bid / 2 });
+    skSolve(sk);
+    opExtrude(context, id + "px", { "entities" : qSketchRegion(id + "p", true),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : definition.plateThickness });
+    const plate = qCreatedBy(id + "px", EntityType.BODY);
+    setProperty(context, { "entities" : plate, "propertyType" : PropertyType.NAME,
+                "value" : "Turret Plate" });
+
+    // The AndyMark turntable publishes its two bolt circles, so those holes
+    // are real; the count is not on the page, so it is a field.
+    if (definition.turretBearing == FRCTurretBearing.AM_TURNTABLE)
+    {
+        const nB = definition.mountHoleCount;
+        const skh = newSketchOnPlane(context, id + "amh",
+            { "sketchPlane" : plane(pl.origin - pl.normal * (0.05 * inch), pl.normal, pl.x) });
+        for (var i = 0; i < nB; i += 1)
+            skCircle(skh, "h" ~ i, { "center" : center + frcPolar(158 * millimeter / 2,
+                            (360 * degree) * i / nB), "radius" : 0.201 * inch / 2 });
+        skSolve(skh);
+        opExtrude(context, id + "amx", { "entities" : qSketchRegion(id + "amh", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.plateThickness + 0.1 * inch });
+        // A bolt circle that runs off the rim of a small plate cuts nothing,
+        // and a swallowed failure used to leave the cutters standing in the
+        // model as unnamed bodies with no material. A failed cut takes its
+        // own tools with it.
+        var plateCut = false;
+        try silent
+        {
+            opBoolean(context, id + "amb", { "tools" : qCreatedBy(id + "amx", EntityType.BODY),
+                        "targets" : plate, "operationType" : BooleanOperationType.SUBTRACTION });
+            plateCut = true;
+        }
+        if (!plateCut)
+        {
+            try silent
+            {
+                opDeleteBodies(context, id + "amd",
+                    { "entities" : qCreatedBy(id + "amx", EntityType.BODY) });
+            }
+        }
+    }
+
+    // The stationary base ring, under the bearing, keeping the pass-through.
+    var baseMade = false;
+    if (definition.baseRing)
+    {
+        if (definition.baseOuter <= bod)
+            throw regenError("The base ring is not larger than the bearing. Increase its diameter.", ["baseOuter"]);
+        const skb = newSketchOnPlane(context, id + "bs",
+            { "sketchPlane" : plane(pl.origin - pl.normal * bw, pl.normal, pl.x) });
+        skCircle(skb, "o", { "center" : center, "radius" : definition.baseOuter / 2 });
+        skCircle(skb, "i", { "center" : center, "radius" : bid / 2 });
+        skSolve(skb);
+        opExtrude(context, id + "bx", { "entities" : qSketchRegion(id + "bs", true),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.baseThickness });
+        const base = qCreatedBy(id + "bx", EntityType.BODY);
+        setProperty(context, { "entities" : base, "propertyType" : PropertyType.NAME,
+                    "value" : "Turret Base" });
+        if (definition.turretBearing == FRCTurretBearing.AM_TURNTABLE)
+        {
+            const nB = definition.mountHoleCount;
+            const skh = newSketchOnPlane(context, id + "amg",
+                { "sketchPlane" : plane(pl.origin - pl.normal * (bw + definition.baseThickness
+                                + 0.05 * inch), pl.normal, pl.x) });
+            for (var i = 0; i < nB; i += 1)
+                skCircle(skh, "h" ~ i, { "center" : center + frcPolar(189.5 * millimeter / 2,
+                                (360 * degree) * i / nB), "radius" : 0.201 * inch / 2 });
+            skSolve(skh);
+            opExtrude(context, id + "amy", { "entities" : qSketchRegion(id + "amg", false),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : definition.baseThickness + 0.1 * inch });
+            var baseCut = false;
+            try silent
+            {
+                opBoolean(context, id + "amc", { "tools" : qCreatedBy(id + "amy", EntityType.BODY),
+                            "targets" : base, "operationType" : BooleanOperationType.SUBTRACTION });
+                baseCut = true;
+            }
+            if (!baseCut)
+            {
+                try silent
+                {
+                    opDeleteBodies(context, id + "ame",
+                        { "entities" : qCreatedBy(id + "amy", EntityType.BODY) });
+                }
+            }
+        }
+        baseMade = true;
+    }
+
+    // The drive pinion, meshed at the exact center distance.
+    var pinionMade = false;
+    const centerDist = (N + definition.pinionTeeth) / (2 * DP);
+    if (definition.makeRing && definition.drawPinion)
+    {
+        const pc = center + vector(centerDist, 0 * inch);
+        // The ring presents a tooth on the line of centers, so an even-count
+        // pinion is turned half a tooth to present a valley there.
+        const Np = definition.pinionTeeth;
+        const phase = (Np % 2 == 0) ? (180 / Np) * degree : 0 * degree;
+        var pts = [];
+        for (var p0 in frcGearOutline(Np, DP, PA, vector(0, 0) * inch))
+            pts = append(pts, pc + frcRotatePoint(p0, phase));
+        const skp = newSketchOnPlane(context, id + "pn", { "sketchPlane" : pl });
+        skPolyline(skp, "g", { "points" : append(pts, pts[0]) });
+        frcDrawProfile(skp, "hx", frcSharpPolyArcs(6, 0.502 * inch, pc, 0 * inch));
+        skSolve(skp);
+        opExtrude(context, id + "pnx", { "entities" : qSketchRegion(id + "pn", true),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.plateThickness });
+        setProperty(context, { "entities" : qCreatedBy(id + "pnx", EntityType.BODY),
+                    "propertyType" : PropertyType.NAME, "value" : "Turret Pinion" });
+        pinionMade = true;
+    }
+
+    frcBreakEdges(context, id + "pch", qGeometry(qOwnedByBody(plate, EntityType.EDGE),
+            GeometryType.CIRCLE), 0.02 * inch);
+    frcApplyPart(context, plate, definition.material, FRCPartClass.PLATE);
+    if (baseMade)
+    {
+        const baseB = qCreatedBy(id + "bx", EntityType.BODY);
+        frcBreakEdges(context, id + "bch", qGeometry(qOwnedByBody(baseB, EntityType.EDGE),
+                GeometryType.CIRCLE), 0.02 * inch);
+        frcApplyPart(context, baseB, definition.material, FRCPartClass.PLATE);
+    }
+    if (pinionMade)
+        frcApplyPart(context, qCreatedBy(id + "pnx", EntityType.BODY), definition.material,
+            FRCPartClass.DRIVE);
+
+    // The bolt-circle cuts are already subtracted into this feature's own
+    // plate and base, so nothing is left to cut. Every measurement below is a
+    // volume or a parameter, so it reads the same either side of the move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const ringRatio = N / definition.pinionTeeth;
+    const total = ringRatio * definition.upstreamRatio;
+    const vol = evVolume(context, { "entities" : plate });
+
+    var lines = "";
+    if (definition.makeRing)
+    {
+        lines ~= "Put the pinion at " ~ frcInches(centerDist) ~ " centers: " ~ N
+            ~ " teeth at " ~ dpLabel ~ " gives a " ~ frcInches(ringPD) ~ " pitch diameter"
+            ~ (pinionMade ? " and a 1/2 hex pinion" : "") ~ ". ";
+        lines ~= "Reduction " ~ roundToPrecision(ringRatio, 3) ~ " to 1 at the ring, "
+            ~ roundToPrecision(total, 2) ~ " to 1 overall. ";
+    }
+    lines ~= "Pass-through " ~ frcInches(bid) ~ " clear, plate "
+        ~ frcInches(definition.plateOuter) ~ " across at "
+        ~ roundToPrecision(vol * frcDensity(definition.material) / FRC_POUND, 2) ~ " lb. ";
+    lines ~= "Rotation " ~ roundToPrecision(definition.rotationRange / degree, 0)
+        ~ " deg planned; 200 to 270 is usual. ";
+    if (definition.turretBearing == FRCTurretBearing.XCONTACT && bid < 2.5 * inch)
+        lines ~= "NOTE Below 2.5 in bore the ladder is not bore + 0.5 in. ";
+    if (definition.turretBearing == FRCTurretBearing.AM_TURNTABLE)
+        lines ~= "Bearing " ~ bearingName ~ ". The 158 and 189.5 mm bolt circles come "
+            ~ "from that drawing, the hole count is yours, and 10 DP is the FRC "
+            ~ "turret pitch. ";
+    else
+        lines ~= "WCP and ThriftyBot sell the X-contact rings, but neither publishes "
+            ~ "ratings or mounting, so clamp each race. ";
+    lines ~= "React overhung loads across two bearing planes, never a lazy susan, "
+        ~ "and fit a hard stop and an absolute sensor.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################ ARM PIVOT ################################
+
+export const FRC_ARMLEN_BOUNDS = { (meter) : [0.05, 0.762, 3], (centimeter) : 76.2,
+    (millimeter) : 762, (inch) : 30, (foot) : 2.5, (yard) : 0.83333 } as LengthBoundSpec;
+export const FRC_ARMANGLE_BOUNDS = { (degree) : [-90, 0, 90], (radian) : 0 } as AngleBoundSpec;
+export const FRC_ARMLOAD_BOUNDS = { (unitless) : [0, 5, 100] } as RealBoundSpec;
+export const FRC_ARMSTALL_BOUNDS = { (unitless) : [0.05, 2.6, 20] } as RealBoundSpec;
+export const FRC_ARMRATIO_BOUNDS = { (unitless) : [1, 100, 1000] } as RealBoundSpec;
+export const FRC_EXTLIMIT_BOUNDS = { (meter) : [0.05, 0.3048, 3], (centimeter) : 30.48,
+    (millimeter) : 304.8, (inch) : 12, (foot) : 1, (yard) : 0.33333 } as LengthBoundSpec;
+
+/**
+ * A pivoting arm: the tube, the pivot it swings on, and the gravity torque
+ * arithmetic that sizes the drive.
+ *
+ * The pivot follows the published practice: a dead axle fixed to the side
+ * plates, with the bearings in the arm, because a dead axle carries no torque
+ * and clamps rigid. The 1.125 in flanged bearing is the de facto standard
+ * bore across every FRC vendor, with 0.875 in as the small option, and the
+ * community guides run them on 3/4 or 7/8 in round tube axles.
+ *
+ * Gravity torque about the pivot is weight times the horizontal distance to
+ * the center of mass, largest with the arm horizontal and falling off as the
+ * cosine, which is exactly the Kg cos(theta) term in WPILib's arm
+ * feedforward. No vendor publishes a stall derating for arms; the community
+ * rule is that holding torque through the gearing should be two to three
+ * times the gravity torque, and that is a rule of thumb, not a spec.
+ */
+export function frcArmPivotBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face or mate connector at the pivot. Its normal is the pivot axis.", ["location"]);
+
+    // Pattern and mirror support. The picked face or mate connector is the
+    // pivot, so it is the reference the pattern transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+    const yAxis = cross(pl.normal, pl.x);
+    const dir = pl.x * cos(definition.armAngle) + yAxis * sin(definition.armAngle);
+    const up = -pl.x * sin(definition.armAngle) + yAxis * cos(definition.armAngle);
+
+    const L = definition.armLength;
+    const w = definition.armWidth;
+    const h = definition.armHeight;
+    const wall = definition.armWall;
+    const tail = definition.pivotInset;
+    if (2 * wall >= min(w, h) && wall > 0 * inch)
+        throw regenError("The wall is half the section or more, so there is no tube left. Reduce it.", ["armWall"]);
+
+    const nominal = frcBearingOD(definition.bearingOD);
+    // frcBoreAllowance is RADIAL and nominal is a diameter, so it takes twice.
+    const seat = nominal + 2 * frcBoreAllowance(FRCDriveBore.BEARING, definition.fit);
+    if (seat >= h - 0.1 * inch)
+        throw regenError("The bearing seat is as tall as the arm section. Use a taller section or a smaller bearing.", ["bearingOD"]);
+
+    // The arm tube, sketched as a section at the tail end and extruded along
+    // the arm, so it is a real tube along its own axis.
+    const sectionPlane = plane(pl.origin - dir * tail, dir, up);
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : sectionPlane });
+    skRectangle(sk, "o", { "firstCorner" : vector(-h / 2, -w / 2),
+                "secondCorner" : vector(h / 2, w / 2) });
+    if (wall > 0 * inch)
+        skRectangle(sk, "i", { "firstCorner" : vector(-h / 2 + wall, -w / 2 + wall),
+                    "secondCorner" : vector(h / 2 - wall, w / 2 - wall) });
+    skSolve(sk);
+    opExtrude(context, id + "x", { "entities" : qSketchRegion(id + "s", true),
+                "direction" : dir, "endBound" : BoundingType.BLIND, "endDepth" : L + tail });
+    const arm = qCreatedBy(id + "x", EntityType.BODY);
+    setProperty(context, { "entities" : arm, "propertyType" : PropertyType.NAME,
+                "value" : "Arm Tube" });
+
+    // The bearing seats, bored through both walls at the pivot.
+    const skb = newSketchOnPlane(context, id + "b",
+        { "sketchPlane" : plane(pl.origin - pl.normal * (w / 2 + 0.1 * inch + w), pl.normal, pl.x) });
+    skCircle(skb, "b", { "center" : vector(0, 0) * inch, "radius" : seat / 2 });
+    skSolve(skb);
+    opExtrude(context, id + "bx", { "entities" : qSketchRegion(id + "b", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : 3 * w });
+    try
+    {
+        opBoolean(context, id + "bsub", { "tools" : qCreatedBy(id + "bx", EntityType.BODY),
+                    "targets" : arm, "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    catch
+    {
+        throw regenError("The bearing seat did not land on the arm. Increase the pivot inset so the bore falls inside the tube.", ["pivotInset"]);
+    }
+
+    // Real arm tube stock has radiused corners; round the outer four long edges.
+    var armEdges = [];
+    for (var e in evaluateQuery(context, qGeometry(qOwnedByBody(arm, EntityType.EDGE), GeometryType.LINE)))
+    {
+        try silent
+        {
+            const ln = evEdgeTangentLine(context, { "edge" : e, "parameter" : 0.5 });
+            if (abs(dot(ln.direction, dir)) > 0.999)
+            {
+                const rel = ln.origin - pl.origin;
+                if (abs(dot(rel, up)) > h / 2 - 0.01 * inch
+                    && abs(dot(rel, pl.normal)) > w / 2 - 0.01 * inch)
+                    armEdges = append(armEdges, e);
+            }
+        }
+    }
+    if (size(armEdges) > 0)
+    {
+        try silent
+        {
+            opFillet(context, id + "rnd", { "entities" : qUnion(armEdges), "radius" : 0.062 * inch });
+        }
+    }
+
+    // Side plates and the dead axle they clamp. They are kept apart because
+    // they are not the same kind of part: the two plates are flat plate and
+    // the axle is a shaft, and the color scheme sorts them that way.
+    var pivotPlates = [];
+    if (definition.sidePlates)
+    {
+        if (definition.sideRadius <= seat / 2)
+            throw regenError("The side plates are smaller than the bearing seat. Increase their radius.", ["sideRadius"]);
+        for (var s in [-1, 1])
+        {
+            const at = pl.origin + pl.normal * (s * (w / 2 + definition.plateGap)
+                    + (s < 0 ? -definition.sideThickness : 0 * inch));
+            const sid = id + ("sp" ~ (s < 0 ? 0 : 1));
+            const skp = newSketchOnPlane(context, sid, { "sketchPlane" : plane(at, pl.normal, pl.x) });
+            skCircle(skp, "o", { "center" : vector(0, 0) * inch, "radius" : definition.sideRadius });
+            skCircle(skp, "i", { "center" : vector(0, 0) * inch,
+                        "radius" : definition.deadAxle ? definition.axleOuter / 2 : seat / 2 });
+            skSolve(skp);
+            opExtrude(context, sid + "x", { "entities" : qSketchRegion(sid, true),
+                        "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : definition.sideThickness });
+            setProperty(context, { "entities" : qCreatedBy(sid + "x", EntityType.BODY),
+                        "propertyType" : PropertyType.NAME,
+                        "value" : (s < 0) ? "Pivot Plate, Near" : "Pivot Plate, Far" });
+            pivotPlates = append(pivotPlates, qCreatedBy(sid + "x", EntityType.BODY));
+        }
+    }
+    if (definition.deadAxle)
+    {
+        const span = w + 2 * (definition.plateGap + definition.sideThickness) + 0.5 * inch;
+        const ska = newSketchOnPlane(context, id + "a",
+            { "sketchPlane" : plane(pl.origin - pl.normal * (span / 2), pl.normal, pl.x) });
+        skCircle(ska, "o", { "center" : vector(0, 0) * inch, "radius" : definition.axleOuter / 2 });
+        skSolve(ska);
+        opExtrude(context, id + "ax", { "entities" : qSketchRegion(id + "a", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND, "endDepth" : span });
+        setProperty(context, { "entities" : qCreatedBy(id + "ax", EntityType.BODY),
+                    "propertyType" : PropertyType.NAME, "value" : "Dead Axle" });
+    }
+
+    frcApplyPart(context, arm, definition.material, FRCPartClass.STRUCTURE);
+    if (size(pivotPlates) > 0)
+        frcApplyPart(context, qUnion(pivotPlates), definition.material, FRCPartClass.PLATE);
+    if (definition.deadAxle)
+    {
+        frcApplyPart(context, qCreatedBy(id + "ax", EntityType.BODY), definition.material,
+            FRCPartClass.SHAFT);
+        frcBreakEdges(context, id + "ach", qCreatedBy(id + "ax", EntityType.EDGE), 0.03 * inch);
+    }
+
+    // After the fillet pass, which reads edge directions against the arm's own
+    // axis and has to see them unmoved, and before the numbers, every one of
+    // which is a volume or a parameter.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    // The numbers. Tube mass from the geometry; the payload from the field.
+    const armVol = evVolume(context, { "entities" : arm });
+    const mArm = armVol * frcDensity(definition.material);
+    const mLoad = definition.loadLb * FRC_POUND;
+    const gAcc = 9.80665 * meter / second ^ 2;
+    // Tube center of mass sits at mid-length, measured from the pivot.
+    const dArm = (L - tail) / 2;
+    const torqueH = (mArm * dArm + mLoad * L) * gAcc;
+    const nmH = torqueH / (newton * meter);
+    const atPose = nmH * cos(definition.armAngle);
+    const holding = definition.motorCount * definition.motorStall * definition.gearRatio;
+    const margin = (nmH > 1e-9) ? holding / nmH : 0;
+
+    // The extension rule limits how far the arm reaches PAST the frame
+    // reference, and the dialog defines the setback as how far the pivot
+    // sits INSIDE that reference, so the setback subtracts; adding it
+    // charged the arm for the pivot-to-reference distance twice over. The
+    // limit is checked against the arm's worst case, which is level. The
+    // drawn pose foreshortens it by the cosine, and that is reported beside
+    // it whenever the two differ, the way the gravity torque line reports
+    // level and as drawn. A negative figure means the tip stays inside the
+    // reference.
+    const reachH = L - definition.pivotSetback;
+    const reachDrawn = L * cos(definition.armAngle) - definition.pivotSetback;
+
+    var lines = "Gravity torque " ~ roundToPrecision(nmH, 2) ~ " N m level, "
+        ~ roundToPrecision(abs(atPose), 2) ~ " N m as drawn. ";
+    lines ~= "The drive holds " ~ roundToPrecision(holding, 1) ~ " N m, margin "
+        ~ roundToPrecision(margin, 2) ~ "x, and folklore wants 2 to 3x. ";
+    lines ~= "Extension past the frame reference " ~ frcInches(reachH)
+        ~ " level against your " ~ frcInches(definition.extensionLimit) ~ " limit, "
+        ~ ((reachH <= definition.extensionLimit) ? "inside it" : "over it")
+        ~ ((abs(reachDrawn - reachH) > 0.05 * inch)
+            ? (", " ~ frcInches(reachDrawn) ~ " as drawn") : "")
+        ~ ". ";
+    lines ~= "Arm tube " ~ roundToPrecision(mArm / FRC_POUND, 2) ~ " lb, pivot bore "
+        ~ frcInches(seat) ~ " at " ~ frcThou(2 * frcBoreAllowance(FRCDriveBore.BEARING,
+                    definition.fit)) ~ " on the diameter. ";
+    lines ~= "Published practice is 60 to 75 percent counterbalance, and shelf springs "
+        ~ "are 3.29, 10.60 and 40.90 lbf. ";
+    lines ~= "Fit hard stops and an absolute sensor; software dies in a brownout.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ################################ CLIMBER ################################
+
+export const FRC_CLIMBSTAGE_BOUNDS = { (unitless) : [1, 2, 4] } as IntegerBoundSpec;
+export const FRC_CLIMBTRAVEL_BOUNDS = { (meter) : [0.05, 0.6223, 1.5], (centimeter) : 62.23,
+    (millimeter) : 622.3, (inch) : 24.5, (foot) : 2.04167, (yard) : 0.68056 } as LengthBoundSpec;
+export const FRC_CLIMBTUBE_BOUNDS = { (meter) : [0.0127, 0.0508, 0.08], (centimeter) : 5.08,
+    (millimeter) : 50.8, (inch) : 2, (foot) : 0.16667, (yard) : 0.05556 } as LengthBoundSpec;
+export const FRC_CLIMBSTEP_BOUNDS = { (meter) : [0.006, 0.0127, 0.03], (centimeter) : 1.27,
+    (millimeter) : 12.7, (inch) : 0.5, (foot) : 0.04167, (yard) : 0.01389 } as LengthBoundSpec;
+export const FRC_CLIMBLOAD_BOUNDS = { (unitless) : [0, 130, 250] } as RealBoundSpec;
+export const FRC_ROPES_BOUNDS = { (unitless) : [1, 1, 4] } as IntegerBoundSpec;
+export const FRC_DRUM_BOUNDS = { (meter) : [0.0127, 0.0254, 0.08], (centimeter) : 2.54,
+    (millimeter) : 25.4, (inch) : 1, (foot) : 0.08333, (yard) : 0.02778 } as LengthBoundSpec;
+export const FRC_BAR_BOUNDS = { (meter) : [0.012, 0.0422, 0.08], (centimeter) : 4.22,
+    (millimeter) : 42.2, (inch) : 1.66, (foot) : 0.13833, (yard) : 0.04611 } as LengthBoundSpec;
+export const FRC_SPRINGF_BOUNDS = { (unitless) : [0, 3.5, 50] } as RealBoundSpec;
+export const FRC_SPRINGN_BOUNDS = { (unitless) : [0, 2, 8] } as IntegerBoundSpec;
+
+/**
+ * A telescoping climber, drawn at whatever pose you want to look at, on the
+ * kit standard both vendors sell.
+ *
+ * AndyMark's Climber in a Box and the ThriftyBot Telescoping Tube Kit are
+ * built on the same ladder: 2 in square tube into 1.5 in into 1 in, all at
+ * 1/16 in wall, in one and two stage forms. AndyMark publishes 24.5 in of
+ * travel per stage, a spring-out winch-back powertrain on constant force
+ * springs and 3 mm Dyneema rope, and a winch that mounts any planetary with a
+ * 2 in bolt circle. ThriftyBot runs its rope inside the tube and ships 39 in
+ * springs. Neither vendor publishes hole coordinates for the bearing blocks;
+ * the plates are their own drill guides, and the report says so.
+ *
+ * The winch arithmetic is the whole sizing problem: rope tension is the load
+ * over the rope count, drum torque is tension times drum radius, and the
+ * motor sees that through the gearbox. Springs only have to lift the empty
+ * stages, and the report checks both directions.
+ */
+export function frcClimberBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face or mate connector at the bottom of the climber.", ["location"]);
+
+    // Pattern and mirror support. The picked face or mate connector is what
+    // puts the climber in space, so it is the reference the pattern transform
+    // is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    const n = definition.stageCount;
+    const travel = definition.stageTravel;
+    const len = definition.tubeLength;
+    const pose = definition.pose;
+    var baseSize = definition.baseSquare;
+    var step = definition.sizeStep;
+    var wall = definition.wallThickness;
+    if (definition.vendorKit)
+    {
+        baseSize = 2.0 * inch;
+        step = 0.5 * inch;
+        wall = 0.0625 * inch;
+        if (n > 2)
+            throw regenError("The vendor kits stop at two stages, because the ladder runs out at 1 in tube. Use the custom sizes for more.", ["stageCount"]);
+    }
+    if (baseSize - n * step < 2 * wall + 0.1 * inch)
+        throw regenError("The ladder runs out of tube: the last stage has no section left. Use fewer stages, a larger base, or a smaller step.", ["stageCount"]);
+    if (travel > len - 3 * inch)
+        throw regenError("That travel leaves under 3 in of overlap engaged at full extension. Shorten the travel or lengthen the tubes.", ["stageTravel"]);
+
+    var bodies = [];
+    var movingMass = 0 * kilogram;
+    for (var k = 0; k < n + 1; k += 1)
+    {
+        const s = baseSize - k * step;
+        const bottom = travel * k * pose;
+        const b = frcElevatorTube(context, id + ("s" ~ k), pl, s, s, wall, 0 * inch, bottom, len);
+        setProperty(context, { "entities" : b, "propertyType" : PropertyType.NAME,
+                    "value" : k == 0 ? "Climber Base Tube" : ("Climber Stage " ~ k) });
+        bodies = append(bodies, b);
+        if (k > 0)
+            movingMass = movingMass + evVolume(context, { "entities" : b })
+                * frcDensity(definition.material);
+    }
+
+    // The hook, a plain open hook over the bar, attached to the top of the
+    // last stage. The 2026 kit ships two hook styles but dimensions neither,
+    // so this one is generic and parametric on the bar it has to catch.
+    var hookMade = false;
+    if (definition.makeHook)
+    {
+        const arm = 0.75 * inch;
+        const rb = (definition.barDiameter + 0.25 * inch) / 2;
+        const ro = rb + arm;
+        const topZ = n * travel * pose + len;
+        const px = pl.x;
+        const xDir = cross(pl.normal, px);
+        const skh = newSketchOnPlane(context, id + "hk",
+            { "sketchPlane" : plane(pl.origin - px * (definition.hookThickness / 2), px, xDir) });
+        const bc = vector(0 * inch, topZ + ro);
+        const a0 = -90 * degree;
+        const a1 = 180 * degree;
+        frcDrawProfile(skh, "h", [
+                    frcArcFromAngles(bc, ro, a0, a1),
+                    { "kind" : "line", "start" : bc + frcPolar(ro, a1), "end" : bc + frcPolar(rb, a1) },
+                    frcArcFromAngles(bc, rb, a1, a0),
+                    { "kind" : "line", "start" : bc + frcPolar(rb, a0), "end" : bc + frcPolar(ro, a0) }]);
+        skSolve(skh);
+        opExtrude(context, id + "hkx", { "entities" : qSketchRegion(id + "hk", false),
+                    "direction" : px, "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.hookThickness });
+        const hook = qCreatedBy(id + "hkx", EntityType.BODY);
+        setProperty(context, { "entities" : hook, "propertyType" : PropertyType.NAME,
+                    "value" : "Climber Hook" });
+        frcRoundAlong(context, id + "hkr", hook, px, 0.08 * inch);
+        // The one part of the climber that touches the field element it
+        // hangs from, so it takes the contact class rather than structure.
+        frcApplyPart(context, hook, definition.material, FRCPartClass.GAMEPIECE);
+        hookMade = true;
+    }
+
+    frcApplyPart(context, qUnion(bodies), definition.material, FRCPartClass.STRUCTURE);
+
+    // After the moving mass was summed stage by stage above, and before the
+    // numbers, every one of which is a mass or a parameter.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    const extended = n * travel + len;
+    const springLift = definition.springCount * definition.springForce;
+    const movingLb = movingMass / FRC_POUND;
+    const tension = definition.climbLoad / definition.ropes;
+    const drumTorqueNm = definition.climbLoad * 4.44822 * (definition.drumDiameter / 2 / meter);
+    const motorTorqueNeed = drumTorqueNm / definition.gearRatio;
+    const available = definition.motorCount * definition.motorStall;
+    const margin = (motorTorqueNeed > 1e-9) ? available / motorTorqueNeed : 0;
+
+    var lines = "Reaches " ~ frcInches(extended) ~ ", "
+        ~ ((extended <= definition.heightLimit)
+            ? (frcInches(definition.heightLimit - extended) ~ " inside your height limit")
+            : ("over your height limit by " ~ frcInches(extended - definition.heightLimit)))
+        ~ ". ";
+    lines ~= "Springs lift " ~ roundToPrecision(springLift, 1) ~ " lb against "
+        ~ roundToPrecision(movingLb, 2) ~ " lb of moving tube, so it "
+        ~ ((springLift > movingLb) ? "self-deploys" : "will not deploy") ~ ". ";
+    lines ~= "Winching " ~ roundToPrecision(definition.climbLoad, 0) ~ " lb puts "
+        ~ roundToPrecision(tension, 1) ~ " lb in each of " ~ definition.ropes ~ " rope"
+        ~ (definition.ropes == 1 ? "" : "s") ~ " and " ~ roundToPrecision(drumTorqueNm, 1)
+        ~ " N m on the drum, margin " ~ roundToPrecision(margin, 2) ~ "x. ";
+    // The kit toggle overrides the three typed sizes, and the shipped typed
+    // defaults are the kit sizes, so the toggle changes no geometry at the
+    // defaults. Naming the sizes in force is the only place the panel shows
+    // which of the two the tubes came from.
+    lines ~= "Ladder of " ~ (n + 1) ~ " tubes, " ~ frcInches(baseSize) ~ " down to "
+        ~ frcInches(baseSize - n * step) ~ ", "
+        ~ (definition.vendorKit ? "kit sizes" : "your sizes") ~ ". ";
+    if (hookMade)
+        lines ~= "The hook is generic for a " ~ frcInches(definition.barDiameter)
+            ~ " bar, not a kit. ";
+    lines ~= "AndyMark publishes 24.5 in of travel; kits run 3 mm Dyneema and any "
+        ~ "2 in bolt circle planetary, so land on stops.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################ PNEUMATIC CYLINDER ############################
+
+export const FRC_STROKE_BOUNDS = { (meter) : [0.0127, 0.1016, 0.4572], (centimeter) : 10.16,
+    (millimeter) : 101.6, (inch) : 4, (foot) : 0.33333, (yard) : 0.11111 } as LengthBoundSpec;
+export const FRC_PSI_BOUNDS = { (unitless) : [1, 60, 250] } as RealBoundSpec;
+export const FRC_CYLADDER_BOUNDS = { (meter) : [0, 0, 0.25], (centimeter) : 0,
+    (millimeter) : 0, (inch) : 0, (foot) : 0, (yard) : 0 } as LengthBoundSpec;
+export const FRC_CYLBORE_BOUNDS = { (meter) : [0.008, 0.0381, 0.065], (centimeter) : 3.81,
+    (millimeter) : 38.1, (inch) : 1.5, (foot) : 0.125, (yard) : 0.041667 } as LengthBoundSpec;
+export const FRC_CYLROD_BOUNDS = { (meter) : [0.003, 0.011113, 0.02], (centimeter) : 1.1113,
+    (millimeter) : 11.113, (inch) : 0.4375, (foot) : 0.036458, (yard) : 0.012153 } as LengthBoundSpec;
+
+export enum FRCCylBore
+{
+    annotation { "Name" : "3/4 in (NITRA A12)" }     B34,
+    annotation { "Name" : "1-1/16 in (NITRA A17)" }  B1116,
+    annotation { "Name" : "1-1/4 in (NITRA A20)" }   B114,
+    annotation { "Name" : "1-1/2 in (NITRA A24)" }   B112,
+    annotation { "Name" : "2 in (NITRA A32)" }       B200,
+    annotation { "Name" : "Custom" }                 CUSTOM
+}
+
+export enum FRCCylMount
+{
+    annotation { "Name" : "Front nose mount" } NOSE,
+    annotation { "Name" : "Rear pivot mount" } PIVOT,
+    annotation { "Name" : "Double end mount" } DOUBLE_END
+}
+
+/**
+ * What AutomationDirect publishes for each NITRA A-series bore: the piston
+ * area, the extend and retract forces at 100 psi, the rod, the mounting
+ * threads and hardware, and the overall retracted length as stroke plus a
+ * constant, taken from the double-acting catalog tables. An adder of -1 marks
+ * a bore and mount whose length table was not captured, and the 1-1/2 in bore
+ * carries the vendor's own note that it cannot be double end mounted.
+ */
+export function frcCylinderData(b is FRCCylBore) returns map
+{
+    if (b == FRCCylBore.B34)
+        return { "label" : "3/4 in", "prefix" : "A12", "bore" : 0.75 * inch,
+                 "area" : 0.40, "ext100" : 40.0,
+                 "ret100" : 35.1, "rod" : 0.250 * inch, "noseThread" : "5/8-18",
+                 "clevis" : "ARC-14-28 (1/4-28)", "ports" : "1/8 NPT",
+                 "adderNose" : -1, "adderPivot" : 3.75, "adderDE" : -1,
+                 "springNote" : "" };
+    if (b == FRCCylBore.B1116)
+        return { "label" : "1-1/16 in", "prefix" : "A17", "bore" : 1.0625 * inch,
+                 "area" : 0.90, "ext100" : 90.0,
+                 "ret100" : 82.3, "rod" : 0.3125 * inch, "noseThread" : "5/8-18",
+                 "clevis" : "ARC-516-24 (5/16-24)", "ports" : "1/8 NPT",
+                 "adderNose" : -1, "adderPivot" : 3.84, "adderDE" : -1,
+                 "springNote" : "" };
+    if (b == FRCCylBore.B114)
+        return { "label" : "1-1/4 in", "prefix" : "A20", "bore" : 1.25 * inch,
+                 "area" : 1.2, "ext100" : 120.0,
+                 "ret100" : 105.0, "rod" : 0.4375 * inch, "noseThread" : "3/4-16",
+                 "clevis" : "ARC-716-20 (7/16-20)", "ports" : "1/8 NPT",
+                 "adderNose" : 4.00, "adderPivot" : -1, "adderDE" : 4.72,
+                 "springNote" : "7.5 lb relaxed to 15 lb compressed" };
+    if (b == FRCCylBore.B112)
+        return { "label" : "1-1/2 in", "prefix" : "A24", "bore" : 1.5 * inch,
+                 "area" : 1.7, "ext100" : 170.0,
+                 "ret100" : 155.0, "rod" : 0.4375 * inch, "noseThread" : "3/4-16",
+                 "clevis" : "ARC-716-20 (7/16-20)", "ports" : "1/8 NPT",
+                 "adderNose" : 3.69, "adderPivot" : 4.38, "adderDE" : -2,
+                 "springNote" : "7.5 lb relaxed to 14 lb compressed" };
+    if (b == FRCCylBore.B200)
+        return { "label" : "2 in", "prefix" : "A32", "bore" : 2.0 * inch,
+                 "area" : 3.1, "ext100" : 310.0,
+                 "ret100" : 279.3, "rod" : 0.625 * inch, "noseThread" : "1-1/4-12",
+                 "clevis" : "ARC-12-20 (1/2-20)", "ports" : "1/4 NPT",
+                 "adderNose" : 4.69, "adderPivot" : -1, "adderDE" : 6.62,
+                 "springNote" : "15 lb relaxed to 30 lb compressed" };
+    return { "label" : "custom", "prefix" : "", "bore" : 0 * inch, "area" : 0, "ext100" : 0,
+             "ret100" : 0, "rod" : 0 * inch, "noseThread" : "as the cylinder requires",
+             "clevis" : "as the cylinder requires", "ports" : "",
+             "adderNose" : -1, "adderPivot" : -1, "adderDE" : -1, "springNote" : "" };
+}
+
+/** The three-digit stroke code in a NITRA part number: 4 in is 040. */
+function frcCylStrokeCode(strokeIn is number) returns string
+{
+    const code = round(strokeIn * 10);
+    var s = "" ~ code;
+    if (code < 10)
+        s = "00" ~ code;
+    else if (code < 100)
+        s = "0" ~ code;
+    return s;
+}
+
+/**
+ * A pneumatic cylinder drawn at whatever pose you want to look at, on the
+ * NITRA A-series data AutomationDirect actually publishes.
+ *
+ * The catalog gives, per bore: the effective piston area, extend and retract
+ * force at 100 psi, and overall retracted length as stroke plus a constant
+ * per mounting style. Forces here scale those published figures to your
+ * working pressure rather than recomputing them from the bore, so they match
+ * the catalog. The overall lengths are exact where the table was captured;
+ * how that length splits between body and rod stick-out is not published as
+ * text, so the split drawn here is representative and the body diameter is a
+ * stand-in at bore plus 1/8 in.
+ *
+ * The 2026 rules cap working pressure at 60 psi and stored pressure at 120
+ * psi (R807), with a relieving regulator supplying all working pressure
+ * (R811). The pressure is a field, checked against 60.
+ */
+export function frcPneumaticBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face or mate connector at the rear of the cylinder.", ["location"]);
+
+    // Pattern and mirror support. The picked face or mate connector is the
+    // rear of the cylinder, so it is the reference the pattern transform is
+    // measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+
+    const d = frcCylinderData(definition.cylBore);
+    const custom = definition.cylBore == FRCCylBore.CUSTOM;
+    const stroke = definition.strokeLength;
+    const strokeIn = stroke / inch;
+    const pose = definition.pose;
+    const P = definition.workingPressure;
+
+    const boreDia = custom ? definition.customBore : 0 * inch;
+    var rod = custom ? definition.customRod : d.rod;
+    const area = custom ? (PI / 4) * (definition.customBore / inch) ^ 2 : d.area;
+    const rodArea = (PI / 4) * (rod / inch) ^ 2;
+
+    // Overall retracted length: stroke plus the published constant for this
+    // bore and mount, or the one you type when the table has no entry.
+    var adder = d.adderPivot;
+    var mountName = "rear pivot mount";
+    if (definition.mountStyle == FRCCylMount.NOSE)
+    {
+        adder = d.adderNose;
+        mountName = "front nose mount";
+    }
+    else if (definition.mountStyle == FRCCylMount.DOUBLE_END)
+    {
+        adder = d.adderDE;
+        mountName = "double end mount";
+    }
+    if (adder == -2)
+        throw regenError("NITRA's own catalog says the 1-1/2 in bore cannot be double end mounted. Pick another mount or another bore.", ["mountStyle"]);
+    var adderLen = definition.customAdder;
+    var adderPublished = false;
+    if (!custom && adder > 0)
+    {
+        adderLen = adder * inch;
+        adderPublished = true;
+    }
+    if (adderLen <= 0 * inch)
+        throw regenError("The captured NITRA tables have no overall length for that bore and mount. Set the length adder (overall retracted length minus stroke) from the vendor page, or pick a combination with a published table.", ["customAdder"]);
+
+    const retracted = stroke + adderLen;
+    const extended = retracted + stroke;
+    const ext = stroke * pose;
+
+    // The body, drawn as a plain solid barrel rather than a shell, because
+    // nothing here needs its inside. The outside diameter is a stand-in at
+    // bore plus 1/8 in; the vendor drawing has the real one.
+    const visBore = custom ? boreDia : d.bore;
+    const bodyOD = visBore + 0.125 * inch;
+    const stickout = 1.0 * inch;
+    if (adderLen <= stickout + 0.5 * inch)
+        throw regenError("That length adder leaves no barrel behind the rod. Check the number against the vendor table.", ["customAdder"]);
+
+    const center = vector(0, 0) * inch;
+    const skb = newSketchOnPlane(context, id + "b", { "sketchPlane" : pl });
+    skCircle(skb, "o", { "center" : center, "radius" : bodyOD / 2 });
+    skSolve(skb);
+    opExtrude(context, id + "bx", { "entities" : qSketchRegion(id + "b", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : retracted - stickout });
+    const body = qCreatedBy(id + "bx", EntityType.BODY);
+    setProperty(context, { "entities" : body, "propertyType" : PropertyType.NAME,
+                "value" : "Cylinder Body" });
+    frcBreakEdges(context, id + "bch", qOwnedByBody(body, EntityType.EDGE), 0.02 * inch);
+    frcApplyNamed(context, body, "Stainless steel", 7900 * kilogram / meter ^ 3,
+        frcTeamColorA(context, FRCPartClass.PNEUMATIC, color(0.79, 0.80, 0.82), 1));
+
+    // The rod, from inside the front cap to the drawn extension.
+    const skr = newSketchOnPlane(context, id + "r",
+        { "sketchPlane" : plane(pl.origin + pl.normal * (retracted - stickout - 0.5 * inch),
+                        pl.normal, pl.x) });
+    skCircle(skr, "o", { "center" : center, "radius" : rod / 2 });
+    skSolve(skr);
+    opExtrude(context, id + "rx", { "entities" : qSketchRegion(id + "r", false),
+                "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : stickout + 0.5 * inch + ext });
+    const rodB = qCreatedBy(id + "rx", EntityType.BODY);
+    setProperty(context, { "entities" : rodB, "propertyType" : PropertyType.NAME,
+                "value" : "Piston Rod" });
+    frcBreakEdges(context, id + "rch", qOwnedByBody(rodB, EntityType.EDGE), 0.03 * inch);
+    frcApplyNamed(context, rodB, "Chromed steel", 7850 * kilogram / meter ^ 3,
+        frcTeamColorA(context, FRCPartClass.PNEUMATIC, color(0.85, 0.86, 0.89), 1));
+
+    // No boolean ends this feature, so both bodies are still here to move.
+    // Every number below is a force or a length from the catalog.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    // Forces: the vendor's published figures scaled to the working pressure,
+    // or plain P times area for a custom bore.
+    const extForce = custom ? area * P : d.ext100 * P / 100;
+    const retForce = custom ? (area - rodArea) * P : d.ret100 * P / 100;
+    const airPerExtend = area * strokeIn;
+
+    var lines = "";
+    if (!custom)
+    {
+        const code = frcCylStrokeCode(strokeIn);
+        const act = definition.doubleActing ? "D" : "S";
+        const mnt = definition.mountStyle == FRCCylMount.NOSE ? "N"
+            : (definition.mountStyle == FRCCylMount.PIVOT ? "P" : "D");
+        lines ~= "Order NITRA " ~ d.prefix ~ code ~ act ~ mnt
+            ~ ", or -M for a magnet. ";
+        if (abs(strokeIn - round(strokeIn)) > 0.01)
+            lines ~= "NOTE That stroke is not in the catalog. ";
+    }
+    else
+        lines ~= "Custom " ~ frcInches(definition.customBore) ~ " bore, "
+            ~ roundToPrecision(area, 2) ~ " sq in of piston. ";
+    lines ~= "Force " ~ roundToPrecision(extForce, 1) ~ " lb out"
+        ~ (definition.doubleActing
+            ? (" and " ~ roundToPrecision(retForce, 1) ~ " lb back")
+            : (" on spring return"
+                ~ (d.springNote == "" ? "" : ", " ~ d.springNote)))
+        ~ " at " ~ roundToPrecision(P, 0) ~ " psi"
+        ~ ((P <= 60) ? "" : ", over the 60 psi limit") ~ ". ";
+    lines ~= "Length " ~ frcInches(retracted) ~ " retracted to " ~ frcInches(extended)
+        ~ " out, " ~ roundToPrecision(airPerExtend, 1) ~ " cu in of air per extend. ";
+    if (!adderPublished)
+        lines ~= "NOTE Retracted length is your adder, not the catalog's. ";
+    if (!custom)
+        lines ~= "It is a " ~ mountName ~ " with nose " ~ d.noseThread ~ ", ports "
+            ~ d.ports ~ " and clevis " ~ d.clevis ~ ". ";
+    if (!definition.doubleActing)
+        lines ~= "NOTE Single-acting bodies run longer than these. ";
+    lines ~= "Body OD and the body/rod split are stand-ins; the lengths are the "
+        ~ "vendor's. Size at 60 psi (R807, 2026), not 100.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################### DRIVETRAIN ###############################
+
+export const FRC_AMPS_BOUNDS = { (unitless) : [5, 105, 1000] } as RealBoundSpec;
+export const FRC_EFF_BOUNDS = { (unitless) : [50, 85, 100] } as RealBoundSpec;
+export const FRC_SPRINT_BOUNDS = { (meter) : [0.3, 4.572, 15], (centimeter) : 457.2,
+    (millimeter) : 4572, (inch) : 180, (foot) : 15, (yard) : 5 } as LengthBoundSpec;
+
+/**
+ * The four numbers a drivetrain gearing decision comes down to, from the
+ * standard permanent magnet motor model and a point mass robot.
+ *
+ * A DC motor's torque falls linearly from stall to zero at free speed, and
+ * its current falls the same way, so a current limit is a torque cap at
+ * stall torque times limit over stall current. Force at the carpet is motor
+ * torque through the ratio and efficiency over the wheel radius, and it can
+ * never beat the traction ceiling of mu times weight. The sprint integrates
+ * exactly that: force capped by the motor curve, the current limit and
+ * traction, nothing else.
+ *
+ * What the model leaves out is what every simple model leaves out: battery
+ * sag under load, wheel scrub in turns, drivetrain windup and the driver.
+ * The ILITE drivetrain simulator is the published fuller treatment; this is
+ * the honest first pass that gets the ratio close enough to buy gears.
+ */
+export function frcDrivetrainBuild(context is Context, id is Id, definition is map)
+{
+    const g = 9.80665;
+    const m = definition.robotWeight * 0.45359237;
+    const W = m * g;
+    const r = (definition.wheelOuter / 2) / meter;
+    const G = definition.gearRatio;
+    const eff = definition.driveEff / 100;
+    const n = definition.motorCount;
+
+    if (r <= 0 || G <= 0 || m <= 0)
+        throw regenError("The wheel diameter, the ratio and the robot weight all have to be above zero.", ["wheelOuter", "gearRatio", "robotWeight"]);
+
+    const vFree = definition.freeSpeed * 2 * PI / 60 / G * r;
+    const fStall = n * definition.motorStall * G * eff / r;
+    const capFrac = definition.currentLimit / definition.stallCurrent;
+    const fCap = fStall * (capFrac > 1 ? 1 : capFrac);
+    const fTrac = definition.mu * W;
+
+    const fPush = (fCap < fTrac) ? fCap : fTrac;
+    const pushLimit = (fCap < fTrac) ? "the current limit" : "traction";
+    const a0 = fPush / m;
+
+    // The sprint, integrated with the motor curve, the current cap and the
+    // traction ceiling. A fixed step is plenty at this scale.
+    const X = definition.sprintDist / meter;
+    const dt = 0.002;
+    var t = 0;
+    var v = 0;
+    var x = 0;
+    var steps = 0;
+    while (x < X && steps < 5000)
+    {
+        var f = fStall * (1 - v / vFree);
+        if (f > fCap)
+            f = fCap;
+        if (f > fTrac)
+            f = fTrac;
+        if (f < 0)
+            f = 0;
+        v = v + (f / m) * dt;
+        x = x + v * dt;
+        t = t + dt;
+        steps += 1;
+    }
+    const finished = x >= X;
+
+    const fps = 3.28084;
+    var lines = "";
+    if (finished)
+        lines ~= "Sprint " ~ frcInches(definition.sprintDist) ~ " takes "
+            ~ roundToPrecision(t, 2) ~ " s, crossing at " ~ roundToPrecision(v * fps, 1)
+            ~ " ft/s. ";
+    else
+        lines ~= "Sprint " ~ frcInches(definition.sprintDist)
+            ~ " is not reached within 10 s; check the ratio. ";
+    lines ~= "Free speed " ~ roundToPrecision(vFree * fps, 1) ~ " ft/s at the wheel, "
+        ~ "launch " ~ roundToPrecision(a0 / g, 2) ~ " g. ";
+    lines ~= "Pushes " ~ roundToPrecision(fPush / 4.44822, 0) ~ " lb, set by " ~ pushLimit
+        ~ ", and asks " ~ roundToPrecision(n * definition.stallCurrent, 0)
+        ~ " A at stall; the breakers answer. ";
+    lines ~= "Robots cruise near 80 percent of free speed. NEO is 5880 rpm, 2.6 N m, "
+        ~ "105 A; Kraken X60 is 6000 rpm, 7.09 N m, 366 A. ";
+    lines ~= "Linear curve on a point mass; ILITE is fuller.";
+    reportFeatureInfo(context, id, lines);
+}

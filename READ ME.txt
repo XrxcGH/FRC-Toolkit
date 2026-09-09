@@ -1,0 +1,311 @@
+FeatureScript 3044;
+
+// ================================================================================================
+// FRC Toolkit
+// ================================================================================================
+//
+// A custom feature library for Onshape, written for FIRST Robotics Competition teams.
+//
+//
+// What this is
+// ============
+//
+// This document holds 46 Onshape custom features for building a competition robot. Each one
+// already knows something a team would otherwise have to look up or re-derive: the vendor's
+// published dimensions, the bearing fit that actually holds, the hole pattern the tube comes
+// drilled on, the rule the part has to pass. A build season should not start by rebuilding the
+// same reference geometry. It is aimed at teams who cut parts on a CNC router, a waterjet or
+// laser, a 3D printer or by hand, and Hole, Lighten and Fillet Edges each ask which of those you
+// use and change their numbers accordingly.
+//
+//
+// How to use it
+// =============
+//
+// If you have never added a custom feature to a Part Studio before, start here.
+//
+// 1. Nothing to install
+// ---------------------
+//
+// You are already looking at the library. A custom feature library is an Onshape document that
+// other documents link to, and you do not have to own it to link to it. If you want a copy no one
+// else can change, copy the document first and link to your copy. Only one tab matters: FRC
+// Toolkit. Every feature is declared there, and that one tab brings all 46.
+//
+// 2. Add it to your Part Studio
+// -----------------------------
+//
+// Open the Part Studio you want to build in. At the right-hand end of the feature toolbar, past
+// the standard features, there is a button for custom features. Open its menu and look for the
+// entry that adds custom features from another document. The exact wording of these buttons
+// changes between Onshape releases. In the window that opens:
+//
+//   - Find this document by name, or by its link if a mentor has given you one. If you made your
+//     own copy, look under your own documents.
+//   - Choose the FRC Toolkit tab from the list of Feature Studios in it.
+//   - Before you confirm, set which version you are linking to. See below.
+//
+// 3. Choose a version, not the workspace
+// --------------------------------------
+//
+// Onshape will let you link either to a released version, which is frozen, or to the live
+// workspace. Link to the workspace and your robot can change shape overnight because someone
+// edited a feature you were using. Link to a version and your models stay as you left them. When
+// you want a newer one, change the linked version, regenerate, and see what moved.
+//
+// 4. Where the features show up
+// -----------------------------
+//
+// They appear in that same custom features menu, listed under the library. Click one and it
+// inserts like any built-in feature. Onshape lets you pin the ones you use most onto the toolbar.
+//
+// 5. A reasonable first hour
+// --------------------------
+//
+//   - Put Design Constants at the top of a new Part Studio. It publishes the handful of numbers a
+//     whole robot is dimensioned from as Part Studio variables, so a sketch below it can be
+//     dimensioned to #frcHoleSpacing instead of to a typed 0.5 in.
+//   - Sketch the frame outline and run Frame on it, then Bumper on the result.
+//   - Extrude a plate, run Hole on it, then Lighten.
+//   - Run Weight Budget on everything you have and see where you stand.
+//
+// Every feature prints a report into its dialog when it regenerates, showing what it did and the
+// numbers it used. Read those. They are where the library explains itself.
+//
+//
+// The features
+// ============
+//
+// Forty-six features, grouped by what you are doing when you reach for one.
+//
+// Making plates, tube and frame
+// -----------------------------
+//
+//   Tube                Turns a solid extrusion into real tube at a chosen wall, punched with the
+//                       vendor hole pattern or splined. Each tube is named for the section, wall
+//                       and length it was measured at, so a cut list reads.
+//   Frame               Builds a tube frame along the lines you sketch, mitering two-member
+//                       corners and butting the rest. Each member is named for the stock it
+//                       comes out of and the length it is cut to.
+//   Lighten             Pockets a plate in a chosen pattern, sized from thickness, process and how
+//                       the plate is loaded, with cable tie retention on the ribs.
+//   Hole                Drills or resizes holes at a press, slip or clearance fit for bearings,
+//                       shafts and fasteners, with the allowance set by the manufacturing process.
+//   Gusset              Builds a gusset from the bolt holes it has to reach: a boss at each hole,
+//                       arms joining them, and an optional truss cut out of the rest.
+//   Slot                Cuts a slotted hole sized by the travel a bolt actually needs, which is
+//                       what a tensioner or an adjustable motor mount is really specified by.
+//   Bolt Pattern        Places the grid, single row and bolt circle that FRC reuses everywhere,
+//                       from one picked point.
+//   COTS Pattern        Drills mounting patterns for off-the-shelf parts. Swerve and bearing plate
+//                       patterns are vendor drawings. Motor and gearbox faces are community data,
+//                       because no vendor dimensions them, and the report says so.
+//   Bearing Block       Builds a plate or block with a bearing seat at a real fit, and reports the
+//                       wall left around it, because a thin wall splits when the bearing goes in.
+//   Finger Joint        Interlocks two flat parts where they cross, sizing the fingers from the
+//                       joint line, both thicknesses, the kerf and the cutter radius.
+//   Insert Pocket       Cuts holes for heat-set or machined threaded inserts at the diameter and
+//                       depth the insert maker publishes.
+//   Teardrop Hole       Reshapes a hole into a teardrop or keyhole so a 3D printer can build
+//                       its top without bridging. Converts existing holes or cuts new ones.
+//   Bumper              Grows bumper bands off the frame outline so they follow every corner and
+//                       arc the real robot has, and checks them against the manual.
+//
+// Power transmission
+// ------------------
+//
+//   Gear                Cuts a true involute spur gear or rack, root fillet to tip, rather than a
+//                       trapezoidal approximation.
+//   Pulley              Cuts a timing pulley in GT2, HTD, RT25 or T series, or for round cord.
+//   Sprocket            Cuts an ANSI B29.1 roller chain sprocket.
+//   Shaft               Makes hex, rounded hex, spline and keyed shaft stock at the profiles taken
+//                       from vendor drawings.
+//   Spacer              Makes spacers, tapped standoffs and bearing hats.
+//   Belt and Chain      Finds the belt or chain that fits two pulleys, using the exact wrap
+//                       expression. Belt teeth round up to a stockable multiple of five, so the
+//                       report gives the center distance you asked for beside the one you get.
+//   Belt Path           Runs a belt or chain over any number of pulleys, working out wraps, idlers
+//                       and tangents itself, and reports the teeth in mesh at each pulley.
+//   Gearbox             Searches the tooth counts a team can buy for pairs that reach a target
+//                       ratio, then lays the shafts out at those centers and cuts the bores.
+//   Wheel               Builds a traction wheel, plain wheel or bare hub cut to the bolt circles
+//                       the vendors publish, with tread thickness taken off the rolling diameter.
+//
+// Drivetrain and mechanisms
+// -------------------------
+//
+//   Drivetrain          Reports free speed, stall and pushing force, current draw and sprint time
+//                       for a gearing choice, capped by the motor curve, current limit and grip.
+//   Swerve Chassis      Builds a swerve frame placed off the steering axes, with per-corner module
+//                       choices, drilling the vendor rail and plate patterns where published. It
+//                       builds the top mount, and says so in the report when the bottom mount was
+//                       picked, because no vendor publishes what a bottom mount needs.
+//   Elevator            Solves telescoping stage lengths from the travel you need, or reports the
+//                       travel a stage length gives, drawn at whatever pose you want.
+//   Arm Pivot           Builds a pivoting arm on a dead axle with side plates, and works the
+//                       gravity torque that sizes the drive.
+//   Turret              Builds a turret on the thin-section bearings and turntables FRC turrets
+//                       are built on, with a ring gear cut by the same involute generator as Gear.
+//   Climber             Builds a telescoping climber on the tube ladder both kit vendors sell,
+//                       with the spring-out and winch-back arithmetic.
+//   Roller              Builds an intake or indexer roller with its wheels, and gives the axis
+//                       height for the compression you want and the speed it has to turn at.
+//   Shooter             Builds flywheel geometry and reports exit speed, what the shot costs the
+//                       wheel, recovery time, and the speed a chosen target needs.
+//   Pneumatic Cylinder  Draws a NITRA A-series cylinder at any pose from the published catalog
+//                       tables, with forces scaled to your working pressure.
+//
+// Electrical
+// ----------
+//
+//   Electronics         Places mounting patterns and keep-out envelopes for FRC electronics, every
+//                       one from a vendor drawing or CAD, with tie slots for parts with no holes.
+//   Battery Mount       Builds a battery tray sized from the rule that defines the battery, with
+//                       strap slots, a lead opening and floor mounting tabs.
+//   Wire Path           Routes a wire run that stays on material, taking the shortest path across
+//                       what the plate still has, and cuts a pair of tie slots at every station.
+//                       The bundle carries a wire material, so Weight Budget counts the harness.
+//
+// Shop and manufacturing
+// ----------------------
+//
+//   Parts               Sets material, names the parts and writes a cut list in one pass, with
+//                       mass from measured volume so every pocket and hole is already counted.
+//   Sheet Layout        Nests every flat part onto stock ready to cut, grouped by thickness,
+//                       copying rather than moving so the design is untouched.
+//   Extrude Individual  Makes one part per sketch region even where regions touch, which a single
+//                       extrude would merge.
+//   Fillet Edges        Breaks every edge on a part in one step at a radius the process can hold,
+//                       filleting awkward edges one at a time rather than failing the feature.
+//   Dogbone Corners     Adds the corner relief a routed pocket needs so a square part will seat in
+//                       it, finding the inside corners itself.
+//   Design Constants    Publishes the numbers a whole robot is dimensioned from as Part Studio
+//                       variables, in one place at the top of the tree.
+//   Measure             Measures live geometry into a Part Studio variable, so a belt run or a
+//                       clearance drives the features below it instead of being retyped.
+//   Mate Connectors     Places mate connectors on every hole, face and vertex picked, in one step,
+//                       so the part arrives in the assembly ready to bolt down.
+//   Origin Cube         Puts a cube at the origin for scale and orientation, notched at one corner
+//                       so it reads the same way up from every view.
+//
+// Checking the robot
+// ------------------
+//
+//   Weight Budget       Reports what the robot weighs against the limits and lists the heaviest
+//                       parts with their centers of mass. Each part is weighed at its own assigned
+//                       material, at the group material only where it has none, and at a density
+//                       reduced from your infill and wall count where it is printed.
+//   Center of Gravity   Reports where the robot balances, the ramp angle it falls over at, the
+//                       acceleration that lifts a pair of wheels, and whether it tips or slips
+//                       first. It weighs parts the way Weight Budget does.
+//   Inspection          Checks frame perimeter with bumpers, height and weight against the limits
+//                       you set, which is what an inspector checks at the table.
+//
+//
+// How it is built
+// ===============
+//
+// Twelve Feature Studio tabs, and this read me is one. FRC Toolkit holds every feature
+// declaration: the dialog, the parameters, the defaults. The other ten hold the code and the
+// vendor data behind it. FRC Core holds the materials, standards and maths the rest are built on,
+// and imports nothing from the library. The other nine each import FRC Core, and two of those also
+// read the tables in FRC Motion Geometry. If a number looks wrong, the comment beside it says
+// where it came from.
+//
+//   Tab                         What is in it
+//   --------------------------  ------------------------------------------------------------------
+//   READ ME                     This.
+//   FRC Toolkit                 Every feature declaration. The only tab you link to.
+//   FRC Core                    Materials, processes, fits, bearings, ties, maths and profiles.
+//   FRC Plate Geometry          Pocketing, hole fits, punched and splined tube, gussets.
+//   FRC Motion Geometry         Gears, pulleys, sprockets, shafts and spacers.
+//   FRC Structure Geometry      Slots, bumpers, wheels, frames and gearboxes.
+//   FRC Mechanism Geometry      Elevators, rollers, swerve, shooters, turret, arm, climber,
+//                               cylinders and the drivetrain model.
+//   FRC Hardware Geometry       Bearing blocks, the battery tray, weight, balance and inspection.
+//   FRC Electrical Geometry     Electronics footprints and wire routing.
+//   FRC Manufacturing Geometry  Belt and chain solving, measuring, edge breaking and dogbones.
+//   FRC Shop Geometry           Part setup, cut lists, bolt and COTS patterns, studio utilities.
+//   FRC Fabrication Geometry    Interlocking joints, insert pockets and sheet nesting.
+//
+//
+// The rules this library follows
+// ==============================
+//
+// Vendor data, and the source is named.
+//     Dimensions come from the vendor's own published drawing or catalog, and where a vendor does
+//     not publish something, the library does not guess it. Most swerve module makers give an
+//     envelope and a fastener list but never locate the chassis holes, so those modules are absent
+//     from the drilled patterns rather than approximated. The exception is the motor and gearbox
+//     faces in COTS Pattern, taken from a community library, and the report says so.
+//
+// A rule of thumb is labeled as one.
+//     Some numbers in FRC are community practice, not published specification: holding torque at
+//     two to three times an arm's gravity torque, a quarter inch to an inch of roller compression,
+//     a fifth of the stage length as elevator overlap, 85 to 90 percent drivetrain efficiency. The
+//     library uses them and says, in the field and in the report, that they are folklore.
+//
+// Season limits are input fields, not constants.
+//     Weight, frame perimeter, height, extension and working pressure all move with the game
+//     manual, so every one is a field on the feature, with the current season's number as the
+//     default and the rule cited in the description. A feature that hard-codes this year's limit
+//     is worth one build season. Frame perimeter is two measurements and two fields: Bumper
+//     checks the bare frame outline it can see, and Inspection checks the footprint over the
+//     bumpers, which is what gets measured at the table.
+//
+// Fits are a choice, not a guess.
+//     Arm Pivot, Bearing Block, COTS Pattern, Gearbox and Hole each take a press, slip or
+//     clearance fit. Hole sets the allowance behind that choice from the process cutting the part,
+//     because a CNC router and a waterjet do not hold the same tolerance and a printer needs a
+//     compensation the team calibrates once. The other four set it from the bore family instead.
+//
+// A patterned or mirrored feature lands where the pattern puts it.
+//     Every feature that builds a body of its own reads the pattern transform and moves what it
+//     made to the instance position, so patterning or mirroring the feature gives real bodies in
+//     the right places rather than the seed back again. Tube is the one to watch: it converts
+//     bodies you already have rather than building its own, so pattern the extrude with it.
+//
+// Every feature reports.
+//     All 46 print a report into the feature dialog when they regenerate: what was built, the
+//     numbers behind it, the checks that passed or failed, and where a figure came from.
+//
+//
+// What this does not do
+// =====================
+//
+// It is not stress analysis.
+//     Nothing in here is FEA. The sizing help in Lighten, Arm Pivot, Gearbox and the rest is
+//     arithmetic and rules of thumb, meant to get a first design close enough to build and test.
+//     It will not tell you a part survives.
+//
+// The sizing models are first passes.
+//     The drivetrain model is a point mass on a linear motor curve, and it leaves out battery sag,
+//     wheel scrub in turns, drivetrain windup and the driver. Use it to get the gear ratio close
+//     enough to order gears, not to predict a match.
+//
+// Hole coordinates that vendors keep in CAD are not guessed.
+//     Where a vendor publishes only a STEP file, the feature asks you to type the pattern and says
+//     so in the report. Where a shape is needed for the model but nobody publishes it, the report
+//     calls it a stand-in, as it does for the pneumatic cylinder body diameter.
+//
+// The rules figures are from the 2026 season.
+//     Weight limits, frame perimeter, height, bumper figures and pressure limits are the 2026
+//     values, cited by rule number where they appear. Check them against the current game manual
+//     and change the input fields to match. The manual is the authority, not this document.
+//
+//
+// Licence and contributions
+// =========================
+//
+//     This section still needs a decision from the document owner. It is a placeholder. To be
+//     filled in:
+//
+//   - Licence. What other teams may do: use it, copy the document, modify it, redistribute a
+//     modified copy, use it in something they sell.
+//   - Attribution. Whether use or a derivative should credit the original, and how.
+//   - Contributions. Whether the owner accepts fixes and new features from other teams, and how to
+//     send one.
+//   - Contact. Where to report a wrong number. Wrong vendor data is worth encouraging above all,
+//     because it is the one thing that would undermine everything above.
+//   - Warranty. That the library is provided as is, and that a team is responsible for checking
+//     its own robot against the current game manual.

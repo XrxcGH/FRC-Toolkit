@@ -1,0 +1,1281 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+
+// ===========================================================================
+//  FRC ELECTRICAL GEOMETRY: electronics footprints and wire routing
+// ---------------------------------------------------------------------------
+//  FRC Electronics and FRC Wire Path are declared in the FRC Toolkit tab and
+//  do their work here.
+// ===========================================================================
+
+export const FRC_OFFSET_BOUNDS = { (meter) : [-5, 0, 5], (centimeter) : 0,
+    (millimeter) : 0, (inch) : 0, (foot) : 0, (yard) : 0 } as LengthBoundSpec;
+export const FRC_WIRECOUNT_BOUNDS = { (unitless) : [1, 2, 60] } as IntegerBoundSpec;
+
+// ############################## COMPONENTS ##############################
+
+export enum FRCComponent
+{
+    annotation { "Name" : "roboRIO 1.0 or 2.0" }       ROBORIO,
+    annotation { "Name" : "Limelight SystemCore" }     SYSTEMCORE,
+    annotation { "Name" : "CTRE PDP" }                 PDP,
+    annotation { "Name" : "CTRE PDP 2.0" }             PDP2,
+    annotation { "Name" : "REV PDH" }                  PDH,
+    annotation { "Name" : "CTRE VRM" }                 VRM,
+    annotation { "Name" : "CTRE PCM" }                 PCM,
+    annotation { "Name" : "REV Radio Power Module" }   RPM,
+    annotation { "Name" : "REV Pneumatic Hub" }        PH,
+    annotation { "Name" : "VH-109 radio" }             RADIO,
+    annotation { "Name" : "Limelight 3 or 4" }         LIMELIGHT,
+    annotation { "Name" : "CTRE CANivore" }            CANIVORE,
+    annotation { "Name" : "CTRE CANdle" }              CANDLE,
+    annotation { "Name" : "CTRE Pigeon 2.0" }          PIGEON2,
+    annotation { "Name" : "REV SPARK MAX" }            SPARK_MAX,
+    annotation { "Name" : "CTRE Talon FXS" }           TALON_FXS,
+    annotation { "Name" : "CTRE Talon SRX" }           TALON_SRX,
+    annotation { "Name" : "CTRE Victor SPX" }          VICTOR_SPX,
+    annotation { "Name" : "Falcon 500 or NEO Vortex" } FALCON,
+    annotation { "Name" : "Kraken X60 or Minion" }     KRAKEN_X60,
+    annotation { "Name" : "Kraken X44" }               KRAKEN_X44,
+    annotation { "Name" : "NEO" }                      NEO,
+    annotation { "Name" : "NEO 550" }                  NEO_550,
+    annotation { "Name" : "12 V battery" }             BATTERY,
+    annotation { "Name" : "120 A main breaker" }       BREAKER,
+    annotation { "Name" : "Custom footprint" }         CUSTOM
+}
+
+/**
+ * Footprints and mounting patterns, taken from vendor drawings or measured out
+ * of the vendor's own STEP files. The sources are listed below, and where a
+ * number is not vendor data the entry's note says so. Sizes are length by
+ * width by height with the part lying on the plate. `holes` are hole centers
+ * in the plate, `circle` describes a bolt circle instead, `ties` are cable tie
+ * stations for parts the vendor ships with no holes at all. The two numbers
+ * in the list below are the mounting hole spacings, not the envelope.
+ *
+ *   roboRIO 4.000 x 5.000 in ....... NI manual figure 21, both 1.0 and 2.0
+ *   PDP 7.176 x 4.110 in ........... CTRE PDP_CAD STEP and DXF
+ *   PDP 2.0 8.750 x 3.620 in ....... CTRE PDP 2.0 drawing and STEP
+ *   PDH 8.500 x 4.000 in ........... REV-11-1850 drawing
+ *   VRM 1.880 x 1.695 in ........... CTRE VRM drawing, hole dia 0.150 called out
+ *   PCM 2.403 x 1.923 in ........... CTRE PCM drawing, hole dia from CAD
+ *   Radio Power Module 3.000 in .... REV-11-1856 drawing, two holes, not four
+ *   Pneumatic Hub 4.000 x 1.500 in . REV-11-1852 drawing
+ *   VH-109 tie notches 3.031 in .... Vivid-Hosting public drawing
+ *   Limelight 2.835 x 1.575 in ..... Limelight 3 and 4 STEP files, identical
+ *   CANivore 1.600 x 0.900 in ...... CTRE user guide and STEP, two holes diagonal
+ *   CANdle 2.500 in ................ CTRE user guide, two open slots
+ *   Pigeon 2.0 1.140 x 1.140 in .... CTRE user guide, two holes diagonal
+ *   SPARK MAX ties 1.732 in ........ REV-11-2158 drawing, no mounting holes
+ *   Talon FXS 2.000 in ............. CTRE user guide, two 10-32 on the back
+ *   Falcon and Vortex 2.000 in BC .. vendor drawings, six 10-32
+ *   Kraken X60 2.000 in BC ......... WCP physical specifications, eleven at 30 deg
+ *   Kraken X44 1.375 in BC ......... WCP physical specifications
+ *   NEO 550 25.0 mm BC ............. REV-21-1651-DR and REV-21-1651-DS, four M3
+ *   Main breaker 2.230 x 1.050 in .. measured from the vendor CAD, two diagonal
+ *   SystemCore 128.0 x 64.0 mm ..... FIRST drawing of the alpha unit
+ *
+ * The Talon SRX and Victor SPX are not in that list. CTRE publishes no
+ * mounting spacing for either, and the source of their envelopes is not
+ * recorded here, so their notes say to measure the case before cutting.
+ * The NEO is not in it either, for the reason its own note gives. The
+ * battery envelope is R601 rather than vendor data, and the custom
+ * footprint is whatever the user types, so neither is listed.
+ */
+export function frcComponentData(c is FRCComponent) returns map
+{
+    const none = [];
+    if (c == FRCComponent.ROBORIO)
+        return { "name" : "roboRIO", "size" : vector(5.753, 5.636, 1.355) * inch,
+                 "holes" : [vector(2.000, 2.500) * inch, vector(2.000, -2.500) * inch,
+                            vector(-2.000, 2.500) * inch, vector(-2.000, -2.500) * inch],
+                 "holeDia" : 0.116 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.75 * inch,
+                 "fastener" : "4-40 into the four threaded inserts underneath",
+                 "note" : "The 0 to 40 C ambient limit is tighter than most FRC electronics carry. NI also approves cable ties through perfboard, which is gentler on the plastic inserts." };
+    if (c == FRCComponent.SYSTEMCORE)
+        return { "name" : "Limelight SystemCore", "size" : vector(135.50, 71.50, 28.13) * millimeter,
+                 "holes" : [vector(64.00, 32.00) * millimeter, vector(64.00, -32.00) * millimeter,
+                            vector(-64.00, 32.00) * millimeter, vector(-64.00, -32.00) * millimeter],
+                 "holeDia" : 4.50 * millimeter, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.75 * inch,
+                 "fastener" : "M4 through the four corner ears; Limelight gives the 4.5 mm hole but no fastener size",
+                 "note" : "SystemCore replaces the roboRIO in the 2027 season, not 2026, so a robot built to the 2026 manual still needs a roboRIO (R701). These figures come from the alpha specification sheet and the dimensioned drawing FIRST published. Limelight has released no STEP file and no operating temperature range, and the power connector already changed between alpha and beta units, so check the dimensions against production hardware before cutting a plate. The built-in radio is not legal for FRC competition, so a VH-109 is still needed." };
+    if (c == FRCComponent.PDP)
+        return { "name" : "Power Distribution Panel", "size" : vector(7.586, 4.748, 1.422) * inch,
+                 "holes" : [vector(3.588, 2.055) * inch, vector(3.588, -2.055) * inch,
+                            vector(-3.588, 2.055) * inch, vector(-3.588, -2.055) * inch],
+                 "holeDia" : 0.196 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.5 * inch,
+                 "fastener" : "10-32 through the four corner holes",
+                 "note" : "R613 requires the distribution board, its wiring and every breaker to be visible for inspection." };
+    if (c == FRCComponent.PDP2)
+        return { "name" : "PDP 2.0", "size" : vector(9.249, 4.113, 1.700) * inch,
+                 "holes" : [vector(4.375, 1.810) * inch, vector(4.375, -1.810) * inch,
+                            vector(-4.375, 1.810) * inch, vector(-4.375, -1.810) * inch],
+                 "holeDia" : 0.196 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.5 * inch,
+                 "fastener" : "10-32 through the four corner holes",
+                 "note" : "The 1.70 in height already includes snap-action breakers; the bare board is 1.40 in." };
+    if (c == FRCComponent.PDH)
+        return { "name" : "Power Distribution Hub", "size" : vector(8.874, 4.374, 1.563) * inch,
+                 "holes" : [vector(4.250, 2.000) * inch, vector(4.250, -2.000) * inch,
+                            vector(-4.250, 2.000) * inch, vector(-4.250, -2.000) * inch],
+                 "holeDia" : 0.200 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.5 * inch,
+                 "fastener" : "10-32 through the four corner holes",
+                 "note" : "The case is ABS. REV warns against thread locker on the mounting hardware." };
+    if (c == FRCComponent.VRM)
+        return { "name" : "Voltage Regulator Module", "size" : vector(2.220, 2.030, 0.784) * inch,
+                 "holes" : [vector(0.940, 0.8475) * inch, vector(0.940, -0.8475) * inch,
+                            vector(-0.940, 0.8475) * inch, vector(-0.940, -0.8475) * inch],
+                 "holeDia" : 0.150 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.375 * inch,
+                 "fastener" : "#6 through the four corner holes",
+                 "note" : "" };
+    if (c == FRCComponent.PCM)
+        return { "name" : "Pneumatics Control Module", "size" : vector(2.720, 2.240, 0.774) * inch,
+                 "holes" : [vector(1.2015, 0.9615) * inch, vector(1.2015, -0.9615) * inch,
+                            vector(-1.2015, 0.9615) * inch, vector(-1.2015, -0.9615) * inch],
+                 "holeDia" : 0.150 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.375 * inch,
+                 "fastener" : "#6 through the four corner holes",
+                 "note" : "The PCM hole pattern is not the same as the VRM's, though the two modules look alike." };
+    if (c == FRCComponent.RPM)
+        return { "name" : "Radio Power Module", "size" : vector(3.374, 1.252, 2.750) * inch,
+                 "holes" : [vector(1.500, 0.437) * inch, vector(-1.500, 0.437) * inch],
+                 "holeDia" : 0.200 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.375 * inch,
+                 "fastener" : "10-32 through the two holes on the mounting tab",
+                 "note" : "REV's drawing note says four holes but only two are drawn, and only two exist. The enclosure sits on the far side of the tab." };
+    if (c == FRCComponent.PH)
+        return { "name" : "Pneumatic Hub", "size" : vector(4.374, 1.874, 0.732) * inch,
+                 "holes" : [vector(2.000, 0.750) * inch, vector(2.000, -0.750) * inch,
+                            vector(-2.000, 0.750) * inch, vector(-2.000, -0.750) * inch],
+                 "holeDia" : 0.200 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.375 * inch,
+                 "fastener" : "10-32 through the four corner holes",
+                 "note" : "The case is ABS. REV warns against thread locker on the mounting hardware." };
+    if (c == FRCComponent.RADIO)
+        return { "name" : "VH-109 radio", "size" : vector(4.525, 2.126, 1.181) * inch,
+                 "holes" : none, "holeDia" : 0.196 * inch, "circle" : 0 * inch, "count" : 0,
+                 "start" : 0 * degree, "pilot" : 0 * inch,
+                 "ties" : [-1.5155 * inch, 1.5155 * inch], "clear" : 0.5 * inch,
+                 "fastener" : "two 1/4 in cable ties through the notches, 3.031 in apart",
+                 // Vivid-Hosting size the notches for a 1/4 in strap. Carried
+                 // numerically so the slot can be checked against the tie the
+                 // dialog selected; only entries whose vendor names a width
+                 // carry this, and the read below tolerates its absence.
+                 "tieMin" : 0.25 * inch,
+                 "note" : "Vivid-Hosting: do not enclose the radio, mount it against metal to carry heat away, keep objects 12 in clear of the antenna end, and leave the status lights visible to field staff (R708)." };
+    if (c == FRCComponent.LIMELIGHT)
+        return { "name" : "Limelight 3 or 4", "size" : vector(3.174, 1.930, 1.160) * inch,
+                 "holes" : [vector(1.4175, 0.7875) * inch, vector(1.4175, -0.7875) * inch,
+                            vector(-1.4175, 0.7875) * inch, vector(-1.4175, -0.7875) * inch],
+                 "holeDia" : 0.201 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.5 * inch,
+                 "fastener" : "1-1/4 in 10-32 or 10-24 with nylock nuts",
+                 "note" : "Limelight 3 and 4 share the same 72 x 40 mm hole pattern. Plastic washers keep the bolts from marking the anodizing." };
+    if (c == FRCComponent.CANIVORE)
+        return { "name" : "CANivore", "size" : vector(2.170, 1.550, 0.760) * inch,
+                 "holes" : [vector(0.800, -0.450) * inch, vector(-0.800, 0.450) * inch],
+                 "holeDia" : 0.129 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.375 * inch,
+                 "fastener" : "#4 through the two diagonal holes",
+                 "note" : "Only two of the four corners are open, and they sit diagonally opposite." };
+    if (c == FRCComponent.CANDLE)
+        return { "name" : "CANdle", "size" : vector(2.700, 1.000, 0.330) * inch,
+                 "holes" : [vector(1.250, 0) * inch, vector(-1.250, 0) * inch],
+                 "holeDia" : 0.200 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.375 * inch,
+                 "fastener" : "10-32 through the two open slots",
+                 "note" : "At 5 A continuous CTRE measured 75 C bare and 55 C on the supplied spacers against a heat sink, so a metal mount is worth 20 C." };
+    if (c == FRCComponent.PIGEON2)
+        return { "name" : "Pigeon 2.0", "size" : vector(1.770, 1.770, 0.510) * inch,
+                 "holes" : [vector(0.570, -0.570) * inch, vector(-0.570, 0.570) * inch],
+                 "holeDia" : 0.129 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.25 * inch,
+                 "fastener" : "#4 through the two diagonal holes",
+                 "note" : "Any orientation is fine; the mount pose is set in software." };
+    if (c == FRCComponent.SPARK_MAX)
+        return { "name" : "SPARK MAX", "size" : vector(2.730, 1.360, 0.980) * inch,
+                 "holes" : none, "holeDia" : 0.196 * inch, "circle" : 0 * inch, "count" : 0,
+                 "start" : 0 * degree, "pilot" : 0 * inch,
+                 "ties" : [-0.866 * inch, 0.866 * inch], "clear" : 0.5 * inch,
+                 "fastener" : "two cable ties through the side notches, 1.732 in apart",
+                 "note" : "The SPARK MAX has no mounting holes and its underside is the heat sink, so do not bond the whole bottom face down. REV notes that 60 A continuous makes that face hot." };
+    if (c == FRCComponent.TALON_FXS)
+        return { "name" : "Talon FXS", "size" : vector(3.060, 1.430, 1.160) * inch,
+                 "holes" : [vector(1.000, 0) * inch, vector(-1.000, 0) * inch],
+                 "holeDia" : 0.196 * inch, "circle" : 0 * inch, "count" : 0, "start" : 0 * degree,
+                 "pilot" : 0 * inch, "ties" : none, "clear" : 0.5 * inch,
+                 "fastener" : "10-32 into the two tapped holes on the back, 2 in apart",
+                 "note" : "The 2 in spacing lands on the 0.5 in hole grid of 1 in and 2 in tube. The aluminum plate version spaces its clearance holes 4 in apart instead." };
+    if (c == FRCComponent.TALON_SRX)
+        return { "name" : "Talon SRX", "size" : vector(2.750, 1.185, 0.960) * inch,
+                 "holes" : none, "holeDia" : 0.177 * inch, "circle" : 0 * inch, "count" : 0,
+                 "start" : 0 * degree, "pilot" : 0 * inch,
+                 "ties" : [-0.900 * inch, 0.900 * inch], "clear" : 0.5 * inch,
+                 "fastener" : "two #8-32 screws or cable ties",
+                 "note" : "CTRE calls for two #8-32 screws but publishes no spacing, so this places cable tie slots instead. Those slot positions are not vendor data; measure the case before cutting. The case is electrically isolated, so bolting it straight to the frame is safe and helps it run cooler." };
+    if (c == FRCComponent.VICTOR_SPX)
+        return { "name" : "Victor SPX", "size" : vector(2.500, 1.160, 0.770) * inch,
+                 "holes" : none, "holeDia" : 0.177 * inch, "circle" : 0 * inch, "count" : 0,
+                 "start" : 0 * degree, "pilot" : 0 * inch,
+                 "ties" : [-0.800 * inch, 0.800 * inch], "clear" : 0.5 * inch,
+                 "fastener" : "two #8-32 screws or cable ties",
+                 "note" : "CTRE publishes no screw spacing, so the tie slots here are not vendor data; measure the case before cutting. CTRE's own testing shows the worst heat comes at about half duty cycle, not full, and calls for drivetrain controllers to be mounted singly rather than stacked." };
+    if (c == FRCComponent.FALCON)
+        return { "name" : "Falcon 500 or NEO Vortex", "size" : vector(2.362, 2.362, 3.540) * inch,
+                 "holes" : none, "holeDia" : 0.196 * inch, "circle" : 2.000 * inch,
+                 "count" : 6, "start" : 0 * degree, "pilot" : 0.755 * inch,
+                 "ties" : none, "clear" : 0.75 * inch,
+                 "fastener" : "six 10-32 on a 2 in bolt circle",
+                 "note" : "Leave axial room for the 10-32 push-to-connect cooling port; CTRE measured up to 29 C of cooling from it. On a Vortex do not run a fastener deeper than 0.25 in." };
+    if (c == FRCComponent.KRAKEN_X60)
+        return { "name" : "Kraken X60 or Minion", "size" : vector(2.500, 2.500, 2.953) * inch,
+                 "holes" : none, "holeDia" : 0.196 * inch, "circle" : 2.000 * inch,
+                 "count" : 11, "start" : 30 * degree, "pilot" : 0.755 * inch,
+                 "ties" : none, "clear" : 0.75 * inch,
+                 "fastener" : "10-32 on a 2 in bolt circle, eleven positions at 30 deg",
+                 "note" : "The twelfth position is taken by the stator wire bump, which is also why the envelope is 2.50 in rather than the 60 mm body." };
+    if (c == FRCComponent.KRAKEN_X44)
+        return { "name" : "Kraken X44", "size" : vector(1.866, 1.866, 2.953) * inch,
+                 "holes" : none, "holeDia" : 0.196 * inch, "circle" : 1.375 * inch,
+                 "count" : 11, "start" : 30 * degree, "pilot" : 0.755 * inch,
+                 "ties" : none, "clear" : 0.625 * inch,
+                 "fastener" : "10-32 on a 1.375 in bolt circle, eleven positions at 30 deg",
+                 "note" : "" };
+    // The NEO and the NEO 550 were one entry until this split. They are two
+    // different REV motors with two different faces, so one label could not
+    // describe both: the NEO is a 60 mm can on a 2.000 in circle with 10-32
+    // hardware, the NEO 550 is a 35 mm can on a 25.0 mm circle with M3. A team
+    // that picked the old combined entry for a NEO 550 got 10-32 holes two
+    // inches apart on a motor that is only 1.378 in across.
+    //
+    // The NEO's own hole count is left exactly as it was, because it cannot be
+    // settled from what REV publishes. See the note on the entry.
+    if (c == FRCComponent.NEO)
+        return { "name" : "NEO", "size" : vector(2.362, 2.362, 3.760) * inch,
+                 "holes" : none, "holeDia" : 0.196 * inch, "circle" : 2.000 * inch,
+                 "count" : 6, "start" : 0 * degree, "pilot" : 0.755 * inch,
+                 "ties" : none, "clear" : 0.75 * inch,
+                 "fastener" : "six 10-32 on a 2 in bolt circle",
+                 "note" : "UNRESOLVED. This entry cuts six evenly spaced holes, but REV's own drawing REV-21-1650-DR calls out four 10-32 on the 2.000 in circle together with an 89.00 deg angle, so neither the count nor the spacing here matches it. Four holes at an 89 deg step is not a pattern this feature can cut, and REV publishes no table of hole positions, so the entry was left alone rather than guessing where the holes go. Lay the plate against the motor before you cut it." };
+    // NEO 550. REV-21-1651-DS states four M3 holes on the face. REV-21-1651-DR
+    // gives the 25.0 mm circle, the M3 x 0.5 tap 4.75 mm deep, the 13.0 mm pilot
+    // boss, and the 35.0 x 44.5 mm can. The 0.517 in pilot bore is that 13.0 mm
+    // plus the 0.005 in clearance this library puts on the NEO's 0.750 in pilot,
+    // and the hole is the library's own M3 clearance because the motor is tapped
+    // rather than drilled through.
+    if (c == FRCComponent.NEO_550)
+        return { "name" : "NEO 550", "size" : vector(1.378, 1.378, 2.019) * inch,
+                 "holes" : none, "holeDia" : frcHoleDiameter(FRCHoleSize.M3_CLEAR),
+                 "circle" : 25.0 * millimeter,
+                 "count" : 4, "start" : 0 * degree, "pilot" : 0.517 * inch,
+                 "ties" : none, "clear" : 0.5 * inch,
+                 "fastener" : "four M3 on a 25.0 mm bolt circle, tapped 4.75 mm deep in the motor",
+                 "note" : "REV publishes the four holes and the 25.0 mm circle but not where they sit around it, so they are cut at 90 deg apart starting from the rotation you set. Check that against the motor. The 2.019 in height is REV's 1.752 in body plus its 0.267 in output shaft; REV publishes no overall length. Screws bottom out at 4.75 mm of thread, so measure the plate before picking a length." };
+    if (c == FRCComponent.BATTERY)
+        return { "name" : "12 V battery", "size" : vector(7.1, 3.0, 6.6) * inch,
+                 "holes" : none, "holeDia" : 0.196 * inch, "circle" : 0 * inch, "count" : 0,
+                 "start" : 0 * degree, "pilot" : 0 * inch, "ties" : none, "clear" : 0.25 * inch,
+                 "fastener" : "a strap or tray, not bolts",
+                 "note" : "R601 fixes the envelope at 7.1 x 3.0 x 6.6 in plus or minus 0.1, and R606 requires it to stay put with the robot upside down. Every terminal must be insulated at all times (R607)." };
+    if (c == FRCComponent.BREAKER)
+        return { "name" : "120 A main breaker", "size" : vector(2.900, 1.900, 1.500) * inch,
+                 "holes" : [vector(1.115, 0.525) * inch, vector(-1.115, -0.525) * inch],
+                 "holeDia" : 0.260 * inch, "circle" : 0 * inch, "count" : 0,
+                 "start" : 0 * degree, "pilot" : 0 * inch, "ties" : none, "clear" : 1.0 * inch,
+                 "fastener" : "#10 or 1/4 in through the two diagonal holes",
+                 "note" : "R612 requires the breaker to be quickly and safely reachable from outside the robot, not behind a panel and not next to anything that moves. The two legal families differ: CB185 is 1.90 in tall with 1/4-28 studs, CB285 is 1.50 in with M6. The footprint here uses the CB285 height. Only two corners are mounting holes and they sit diagonally opposite; the other two carry the terminals. Eaton does not publish the spacing, so the 2.230 by 1.050 in diagonal and the 0.260 in holes are measured off the vendor CAD model." };
+    return { "name" : "Custom footprint", "size" : vector(3, 2, 1) * inch,
+             "holes" : none, "holeDia" : 0.196 * inch, "circle" : 0 * inch, "count" : 0,
+             "start" : 0 * degree, "pilot" : 0 * inch, "ties" : none, "clear" : 0.5 * inch,
+             "fastener" : "as entered", "note" : "" };
+}
+
+export enum FRCElecOutput
+{
+    annotation { "Name" : "Mounting holes only" }     HOLES,
+    annotation { "Name" : "Holes and keep-out body" } BOTH,
+    annotation { "Name" : "Keep-out body only" }      KEEPOUT
+}
+
+/** A pair of slots a cable tie loops through, straddling the footprint. */
+export function frcTieSlotPoints(at is Vector, along is Vector, across is Vector,
+    reach is ValueWithUnits, slotW is ValueWithUnits, slotL is ValueWithUnits) returns array
+{
+    var out = [];
+    for (var side in [-1, 1])
+    {
+        const c = at + across * (side * reach);
+        const quad = [c + along * (slotW / 2) + across * (side * slotL / 2),
+                      c - along * (slotW / 2) + across * (side * slotL / 2),
+                      c - along * (slotW / 2) - across * (side * slotL / 2),
+                      c + along * (slotW / 2) - across * (side * slotL / 2)];
+        out = append(out, quad);
+    }
+    return out;
+}
+
+export function frcElectronicsBuild(context is Context, id is Id, definition is map)
+{
+    const loc = evaluateQuery(context, definition.location);
+    if (size(loc) == 0)
+        throw regenError("Select a flat face, a hole, a vertex or a mate connector to place the component on.", ["location"]);
+
+    // Pattern and mirror support. The picked face, hole, vertex or mate
+    // connector is what places the component, so it is the reference the
+    // pattern transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.location });
+
+    const pl = frcPickFrame(context, definition.location, XY_PLANE);
+    // Holes can only be cut when the pick is a flat face on a part.
+    var isFace = false;
+    try silent
+    {
+        evPlane(context, { "face" : loc[0] });
+        isFace = true;
+    }
+
+    var d = frcComponentData(definition.component);
+    if (definition.component == FRCComponent.CUSTOM)
+    {
+        d.size = vector(definition.customLength, definition.customWidth, definition.customHeight);
+        d.holeDia = frcHoleDiameter(definition.customHole);
+        d.clear = definition.clearance;
+        if (definition.customPattern)
+            d.holes = [vector(definition.customX / 2, definition.customY / 2),
+                       vector(definition.customX / 2, -definition.customY / 2),
+                       vector(-definition.customX / 2, definition.customY / 2),
+                       vector(-definition.customX / 2, -definition.customY / 2)];
+    }
+
+    const a = definition.angle;
+    const u = vector(cos(a), sin(a));
+    const v = vector(-sin(a), cos(a));
+    const org = vector(definition.offsetX, definition.offsetY);
+    const place = function(p is Vector) returns Vector
+        {
+            return org + u * p[0] + v * p[1];
+        };
+
+    // The keep-out body is built before the holes are cut so that one move
+    // covers both of them. The hole cutters have to move before the
+    // subtraction consumes them, and anything built after that move would be
+    // left standing where it was.
+    var madeKeepout = false;
+    if (definition.output != FRCElecOutput.HOLES)
+    {
+        const clr = definition.useVendorClearance ? d.clear : definition.clearance;
+        const halfL = d.size[0] / 2 + clr;
+        const halfW = d.size[1] / 2 + clr;
+        const sko = newSketchOnPlane(context, id + "ko", { "sketchPlane" : pl });
+        const corners = [place(vector(halfL, halfW)), place(vector(-halfL, halfW)),
+                         place(vector(-halfL, -halfW)), place(vector(halfL, -halfW))];
+        skPolyline(sko, "k", { "points" : append(corners, corners[0]) });
+        skSolve(sko);
+        opExtrude(context, id + "kox", { "entities" : qSketchRegion(id + "ko", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : d.size[2] + clr });
+        madeKeepout = true;
+        setProperty(context, { "entities" : qCreatedBy(id + "kox", EntityType.BODY),
+                    "propertyType" : PropertyType.NAME, "value" : d.name ~ " Keep-Out" });
+        // REFERENCE and not ELECTRICAL, although this is the electrical tab.
+        // The class says what a body is, and this body is not the roboRIO: it
+        // is the air around it that has to stay empty for a hand and a wire.
+        // Nobody cuts it, buys it, bolts it down or weighs it, and the report
+        // below tells the team to delete it before release, which is not a
+        // thing said about a part. Coloring it ELECTRICAL would also defeat
+        // it, since it would then come out the same color as the components it
+        // is drawn around and warns about. It belongs with the inspection
+        // envelope, and it is here for the same reason: "Envelopes and
+        // reference" is the class the enum wrote for exactly these two.
+        //
+        // Alpha and material for the reasons the envelope carries them: every
+        // team paint is opaque and a keep-out has to be seen through, and a
+        // body with no material is weighed at whatever the next reader typed
+        // into a dialog, which for a PDH keep-out was around ten pounds of
+        // imaginary aluminum. Onshape has no zero-density material, so this is
+        // the smallest density that still reads as assigned rather than
+        // missing.
+        frcApplyNamed(context, qCreatedBy(id + "kox", EntityType.BODY),
+            "Keep-out volume (no mass)", 1e-5 * kilogram / meter ^ 3,
+            frcTeamColorA(context, FRCPartClass.REFERENCE,
+                    color(0.90, 0.45, 0.15, 0.35), 0.35));
+    }
+
+    const cutHoles = definition.output != FRCElecOutput.KEEPOUT;
+    var holeCount = 0;
+    var tieCount = 0;
+    var moved = false;
+
+    if (cutHoles && isFace)
+    {
+        const bodyQ = qOwnerBody(loc[0]);
+        const cSys = frcFaceCSys(pl);
+        const thickness = frcMaterialDepth(context, bodyQ, cSys);
+        const skPlane = plane(pl.origin + pl.normal * (0.02 * inch), pl.normal, pl.x);
+        const sk = newSketchOnPlane(context, id + "hsk", { "sketchPlane" : skPlane });
+
+        for (var i = 0; i < size(d.holes); i += 1)
+        {
+            skCircle(sk, "h" ~ i, { "center" : place(d.holes[i]), "radius" : d.holeDia / 2 });
+            holeCount += 1;
+        }
+        if (d.circle > 0 * inch && d.count > 0)
+        {
+            for (var i = 0; i < d.count; i += 1)
+            {
+                const th = d.start + (360 * degree) * i / (d.count == 11 ? 12 : d.count);
+                skCircle(sk, "c" ~ i, { "center" : place(frcPolar(d.circle / 2, th)),
+                            "radius" : d.holeDia / 2 });
+                holeCount += 1;
+            }
+        }
+        if (d.pilot > 0 * inch && definition.pilotBore)
+            skCircle(sk, "pilot", { "center" : place(vector(0, 0) * inch),
+                        "radius" : d.pilot / 2 });
+
+        if (size(d.ties) > 0 && definition.tieSlots)
+        {
+            const tieW = frcTieWidth(definition.tieSize) + 0.020 * inch;
+            const slotL = tieW * 2.2;
+            // `reach` is the slot centre, and the slot runs slotL along the
+            // same axis, so clearing the footprint by the 0.10 in gap alone
+            // left half the slot under the part: 0.131 in of it with the
+            // default 0.190 in tie and 0.252 in with a heavy duty one. Half
+            // the slot length is added so the whole slot, and not its centre,
+            // sits outside the footprint.
+            const reach = d.size[1] / 2 + 0.10 * inch + slotL / 2;
+            for (var i = 0; i < size(d.ties); i += 1)
+            {
+                const quads = frcTieSlotPoints(place(vector(d.ties[i], 0 * inch)), u, v,
+                        reach, tieW, slotL);
+                for (var k = 0; k < size(quads); k += 1)
+                {
+                    skPolyline(sk, "t" ~ i ~ "_" ~ k, { "points" : append(quads[k], quads[k][0]) });
+                    tieCount += 1;
+                }
+            }
+        }
+        skSolve(sk);
+        const regions = qSketchRegion(id + "hsk", false);
+        if (size(evaluateQuery(context, regions)) > 0)
+        {
+            opExtrude(context, id + "hx", { "entities" : regions, "direction" : -pl.normal,
+                        "endBound" : BoundingType.BLIND, "endDepth" : thickness + 0.1 * inch });
+
+            // The move goes on before the subtraction, not after it. A
+            // subtraction consumes the cutters, so a transform at the end of
+            // the feature would find none of them left to move.
+            transformResultIfNecessary(context, id, remainderTransform);
+            moved = true;
+
+            opBoolean(context, id + "hsub", { "tools" : qCreatedBy(id + "hx", EntityType.BODY),
+                        "targets" : bodyQ, "operationType" : BooleanOperationType.SUBTRACTION });
+        }
+    }
+
+    // The keep-out body still has to move when no holes were cut.
+    if (!moved && madeKeepout)
+        transformResultIfNecessary(context, id, remainderTransform);
+
+    // A hole whose outer edge reaches the footprint edge leaves no material
+    // outboard of it, so a plate trimmed to the envelope breaks out through
+    // it. The CANdle is the entry that does: two 0.200 in holes at plus and
+    // minus 1.250 in reach exactly its 1.350 in half length, which is the
+    // entry's own "two open slots" drawn as closed circles. That is worth a
+    // reader knowing, and it rides the holes sentence rather than taking one
+    // of its own.
+    var tangent = false;
+    for (var h in d.holes)
+    {
+        if (abs(h[0]) + d.holeDia / 2 >= d.size[0] / 2 - 1e-6 * inch
+            || abs(h[1]) + d.holeDia / 2 >= d.size[1] / 2 - 1e-6 * inch)
+            tangent = true;
+    }
+
+    // Onshape renders this panel as one flowing paragraph, so it is written
+    // as prose and no fact leans on a newline to stay apart from the next.
+    // The vendor note is carried whole, UNRESOLVED marker and all, because it
+    // is the one thing here a reader cannot get from the geometry.
+    var lines = d.name ~ ", " ~ frcInches(d.size[0]) ~ " x "
+        ~ frcInches(d.size[1]) ~ ", " ~ frcInches(d.size[2]) ~ " tall. ";
+    if (holeCount > 0)
+    {
+        lines ~= "" ~ holeCount ~ " holes cut at " ~ frcInches(d.holeDia)
+            ~ (tangent ? ", tangent to the edge of the footprint" : "");
+        // The pilot bore is the widest cut this feature makes, on the motor
+        // faces it is the one that has to line up, and it was reported
+        // nowhere. It rides this sentence rather than taking one of its own,
+        // and it stays out of the count, which is one diameter.
+        if (d.pilot > 0 * inch && definition.pilotBore)
+            lines ~= ", plus a " ~ frcInches(d.pilot) ~ " pilot bore";
+        lines ~= ". ";
+    }
+    if (tieCount > 0)
+        lines ~= "" ~ tieCount ~ " tie slots cut. ";
+    // One sentence either way, but it has to name the thing the user can
+    // change. The old wording told every reader to turn on tie slots and pick
+    // a flat face. On the battery both were already right and the part simply
+    // has nothing to bolt through, so the advice was impossible to follow.
+    if (holeCount == 0 && tieCount == 0 && definition.output != FRCElecOutput.KEEPOUT)
+    {
+        if (!isFace)
+            lines ~= "Nothing was cut; pick a flat face to mount on. ";
+        else if (size(d.ties) > 0)
+            lines ~= "Nothing was cut; turn on Cable tie slots. ";
+        else if (definition.component == FRCComponent.CUSTOM)
+            lines ~= "Nothing was cut; turn on Four corner holes. ";
+        else
+            lines ~= "Nothing was cut; this part mounts without holes. ";
+    }
+    lines ~= "Mounting is " ~ d.fastener ~ ". ";
+    // Where the vendor sizes the notches for a particular strap, check the
+    // tie the dialog selected against it. The tie ladder has no 1/4 in entry,
+    // so a part that wants one needs the heavy duty 0.300 in; the 0.190 in
+    // default cuts a 0.210 in slot that a 1/4 in strap will not pass. Only
+    // entries whose vendor names a width carry tieMin.
+    if (definition.tieSlots && d.tieMin is ValueWithUnits
+        && frcTieWidth(definition.tieSize) < d.tieMin)
+        lines ~= "NOTE This part takes a " ~ frcInches(d.tieMin)
+            ~ " strap and the tie you picked is " ~ frcInches(frcTieWidth(definition.tieSize))
+            ~ ", so the slot comes out too narrow for it. Pick the heavy duty tie. ";
+    if (madeKeepout)
+        lines ~= "A keep-out body was made; delete or hide it before release. ";
+    if (d.note != "")
+        lines ~= "NOTE: " ~ d.note ~ " ";
+    lines ~= "Vendor data unless the note says otherwise; the keep-out"
+        ~ " margin is for service and wiring, not heat.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################## WIRE PATH ###############################
+
+export enum FRCWireMode
+{
+    annotation { "Name" : "Straight between points" } STRAIGHT,
+    annotation { "Name" : "Routed across the plate" } ROUTED,
+    annotation { "Name" : "Follow a sketch" }         SKETCH
+}
+
+export enum FRCWireGauge
+{
+    annotation { "Name" : "6 AWG (battery, breaker)" } AWG6,
+    annotation { "Name" : "10 AWG (40 A)" }            AWG10,
+    annotation { "Name" : "12 AWG (30 to 40 A)" }      AWG12,
+    annotation { "Name" : "14 AWG (21 to 30 A)" }      AWG14,
+    annotation { "Name" : "18 AWG (6 to 20 A)" }       AWG18,
+    annotation { "Name" : "22 AWG (signal)" }          AWG22,
+    annotation { "Name" : "CAN or PWM harness" }       HARNESS
+}
+
+/** Insulated outside diameter, from the SAE and MTW wire tables. */
+export function frcWireDiameter(g is FRCWireGauge) returns ValueWithUnits
+{
+    return {
+            FRCWireGauge.AWG6 : 0.330 * inch, FRCWireGauge.AWG10 : 0.200 * inch,
+            FRCWireGauge.AWG12 : 0.170 * inch, FRCWireGauge.AWG14 : 0.140 * inch,
+            FRCWireGauge.AWG18 : 0.100 * inch, FRCWireGauge.AWG22 : 0.070 * inch,
+            FRCWireGauge.HARNESS : 0.190 * inch
+        }[g];
+}
+
+/**
+ * The circle a bundle of round wires fits inside.
+ *
+ * This used to be sqrt(n) times one wire diameter times 1.12. That is an
+ * asymptotic packing law, and at the counts a robot actually carries it is
+ * not approximate but impossible: two wires of diameter d need a circle of
+ * 2d, and sqrt(2) * 1.12 = 1.58d will not hold them. The bundle body is used
+ * for clearance, so a bundle smaller than the wires in it reads as room that
+ * is not there.
+ *
+ * The published optimal ratios for n circles packed in a circle are used up
+ * to twelve, which covers any bundle on a robot, and beyond that the
+ * hexagonal packing density 0.9069 gives d sqrt(n / 0.9069). A hand-built
+ * harness does not achieve optimal packing, so the 1.12 allowance the old
+ * form carried is kept on top and the answer stays on the generous side.
+ */
+export function frcBundleDiameter(g is FRCWireGauge, n is number) returns ValueWithUnits
+{
+    const k = floor(max(n, 1));
+    const packed = [1, 2, 2.1547, 2.4142, 2.7013, 3, 3, 3.3048, 3.6131,
+                    3.8130, 3.9238, 4.0296];
+    const ratio = (k <= 12) ? packed[k - 1] : sqrt(k / 0.9069);
+    return frcWireDiameter(g) * ratio * 1.12;
+}
+
+/**
+ * Chords a curved edge is cut into by `frcFaceSegments2d`.
+ *
+ * Forty eight holds the chord sagitta on a full circle to
+ * r (1 - cos(180 / 48 deg)), which is 0.00214 r: four thousandths of an inch
+ * on the largest pocket these plates carry and one thousandth on a half inch
+ * one. That is well under one cell of the routing grid, which is the span of
+ * the plate over at most fifty five, so the grid and not the chords is what
+ * limits a route. The count is also low enough that the even-odd test stays
+ * cheap over a grid of a few thousand points, which is why this is not
+ * simply set to a few hundred.
+ */
+export const FRC_ARC_CHORDS = 48;
+
+/**
+ * Every edge of a face, flattened into 2D segments in the face coordinates.
+ *
+ * `perEdge` is a floor rather than the count. A straight edge is one chord
+ * whatever is asked for, because more chords describe the same line, and a
+ * curved edge is cut into `FRC_ARC_CHORDS` of them however few the caller
+ * asked for. The chords of a convex curve fall inside it, and everything
+ * built on these segments reads what falls inside as material, so the count
+ * on a curve is a safety figure and not a caller's preference.
+ *
+ * At the six chords the callers used to ask for, a round pocket became a
+ * hexagon inscribed in it, and an inscribed hexagon reads solid up to
+ * r (1 - cos 30 deg), which is 0.134 r, inside the real pocket: a quarter of
+ * an inch on a 1.9 in one. Wire Path chooses its route on these segments and
+ * then verifies the finished route on the same ones, so a route through that
+ * quarter inch of air passed the feature's own clearance check.
+ */
+export function frcFaceSegments2d(context is Context, face is Query, cSys is CoordSystem,
+    perEdge is number) returns array
+{
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    var segs = [];
+    for (var e in evaluateQuery(context, qLoopEdges(face)))
+    {
+        // Anything the curve query cannot answer is treated as curved. That
+        // costs sample points on an edge that did not need them and never
+        // costs accuracy on one that did.
+        var straight = false;
+        try silent
+        {
+            straight = evCurveDefinition(context, { "edge" : e }) is Line;
+        }
+        const count = straight ? 1 : max(perEdge, FRC_ARC_CHORDS);
+        var pts = [];
+        for (var i = 0; i <= count; i += 1)
+        {
+            try silent
+            {
+                const p3 = evEdgeTangentLine(context, { "edge" : e, "parameter" : i / count,
+                            "arcLengthParameterization" : true }).origin;
+                const rel = p3 - cSys.origin;
+                pts = append(pts, vector(dot(rel, cSys.xAxis), dot(rel, yAxis)));
+            }
+        }
+        for (var i = 0; i < size(pts) - 1; i += 1)
+        {
+            if (norm(pts[i + 1] - pts[i]) > 1e-6 * inch)
+                segs = append(segs, [pts[i], pts[i + 1]]);
+        }
+    }
+    return segs;
+}
+
+/** Even-odd crossing test, which handles the outer loop and every hole at once. */
+export function frcPointInside(segs is array, p is Vector) returns boolean
+{
+    var crossings = 0;
+    for (var s in segs)
+    {
+        const a = s[0];
+        const b = s[1];
+        if ((a[1] > p[1]) == (b[1] > p[1]))
+            continue;
+        const t = (p[1] - a[1]) / (b[1] - a[1]);
+        if (a[0] + (b[0] - a[0]) * t > p[0])
+            crossings += 1;
+    }
+    return crossings % 2 == 1;
+}
+
+/**
+ * Shortest path across whatever material the plate still has, on a grid whose
+ * cells are only walkable when all four corners sit on solid metal and the
+ * whole bundle fits. That is what makes the route follow the ribs of a
+ * lightened plate instead of flying across a pocket.
+ */
+export function frcRouteGrid(segs is array, lo is Vector, hi is Vector, n is number,
+    half is ValueWithUnits, from is Vector, to is Vector) returns array
+{
+    const dx = (hi[0] - lo[0]) / n;
+    const dy = (hi[1] - lo[1]) / n;
+    var solid = [];
+    for (var i = 0; i <= n; i += 1)
+    {
+        var row = [];
+        for (var j = 0; j <= n; j += 1)
+            row = append(row, frcPointInside(segs, vector(lo[0] + i * dx, lo[1] + j * dy)));
+        solid = append(solid, row);
+    }
+    var raw = [];
+    for (var i = 0; i < n; i += 1)
+    {
+        var row = [];
+        for (var j = 0; j < n; j += 1)
+            row = append(row, solid[i][j] && solid[i + 1][j] && solid[i][j + 1] && solid[i + 1][j + 1]);
+        raw = append(raw, row);
+    }
+
+    // Pull the walkable area back by half the bundle width, so the route has
+    // room for the whole bundle and not only for a line.
+    const k = max(1, ceil(half / min(dx, dy)));
+    var free = [];
+    for (var i = 0; i < n; i += 1)
+    {
+        var row = [];
+        for (var j = 0; j < n; j += 1)
+        {
+            var ok = true;
+            for (var a = -k; a <= k && ok; a += 1)
+            {
+                for (var b = -k; b <= k && ok; b += 1)
+                {
+                    const ii = i + a;
+                    const jj = j + b;
+                    if (ii < 0 || jj < 0 || ii >= n || jj >= n || !raw[ii][jj])
+                        ok = false;
+                }
+            }
+            row = append(row, ok);
+        }
+        free = append(free, row);
+    }
+
+    // Label the connected pieces of walkable material, then route inside the
+    // one piece that is closest to both ends. Picking the nearest free cell on
+    // its own can land on an island the route can never leave.
+    var comp = makeArray(n * n, -1);
+    var nComp = 0;
+    for (var i = 0; i < n; i += 1)
+    {
+        for (var j = 0; j < n; j += 1)
+        {
+            if (!free[i][j] || comp[i * n + j] >= 0)
+                continue;
+            comp[i * n + j] = nComp;
+            var stack = [[i, j]];
+            while (size(stack) > 0)
+            {
+                const c = stack[size(stack) - 1];
+                stack = resize(stack, size(stack) - 1);
+                for (var d in [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]])
+                {
+                    const a = c[0] + d[0];
+                    const b = c[1] + d[1];
+                    if (a < 0 || b < 0 || a >= n || b >= n)
+                        continue;
+                    if (!free[a][b] || comp[a * n + b] >= 0)
+                        continue;
+                    comp[a * n + b] = nComp;
+                    stack = append(stack, [a, b]);
+                }
+            }
+            nComp += 1;
+        }
+    }
+    if (nComp == 0)
+        return [];
+
+    var bestFrom = makeArray(nComp, -1);
+    var bestTo = makeArray(nComp, -1);
+    var dFrom = makeArray(nComp, 1e9 * inch);
+    var dTo = makeArray(nComp, 1e9 * inch);
+    for (var i = 0; i < n; i += 1)
+    {
+        for (var j = 0; j < n; j += 1)
+        {
+            const g = comp[i * n + j];
+            if (g < 0)
+                continue;
+            const p = vector(lo[0] + (i + 0.5) * dx, lo[1] + (j + 0.5) * dy);
+            const d1 = norm(p - from);
+            const d2 = norm(p - to);
+            if (d1 < dFrom[g])
+            {
+                dFrom[g] = d1;
+                bestFrom[g] = i * n + j;
+            }
+            if (d2 < dTo[g])
+            {
+                dTo[g] = d2;
+                bestTo[g] = i * n + j;
+            }
+        }
+    }
+    var pick = 0;
+    for (var g = 1; g < nComp; g += 1)
+    {
+        if (dFrom[g] + dTo[g] < dFrom[pick] + dTo[pick])
+            pick = g;
+    }
+    const start = [floor(bestFrom[pick] / n), bestFrom[pick] % n];
+    const goal = [floor(bestTo[pick] / n), bestTo[pick] % n];
+
+    var pathCells = [start];
+    if (!(start[0] == goal[0] && start[1] == goal[1]))
+    {
+        // Flat arrays: FeatureScript will not assign into a nested array in place.
+        var dist = makeArray(n * n, -1);
+        var prev = makeArray(n * n, -1);
+        dist[start[0] * n + start[1]] = 0;
+        var frontier = [start];
+        var found = false;
+        while (size(frontier) > 0 && !found)
+        {
+            var next = [];
+            for (var c in frontier)
+            {
+                for (var d in [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]])
+                {
+                    const i = c[0] + d[0];
+                    const j = c[1] + d[1];
+                    if (i < 0 || j < 0 || i >= n || j >= n)
+                        continue;
+                    if (!free[i][j] || dist[i * n + j] >= 0)
+                        continue;
+                    dist[i * n + j] = dist[c[0] * n + c[1]] + 1;
+                    prev[i * n + j] = c[0] * n + c[1];
+                    next = append(next, [i, j]);
+                    if (i == goal[0] && j == goal[1])
+                        found = true;
+                }
+            }
+            frontier = next;
+        }
+        if (!found)
+            return [];
+        var chain = [goal];
+        var cur = goal;
+        while (!(cur[0] == start[0] && cur[1] == start[1]))
+        {
+            const p = prev[cur[0] * n + cur[1]];
+            if (p < 0)
+                return [];
+            cur = [floor(p / n), p % n];
+            chain = append(chain, cur);
+        }
+        pathCells = [];
+        for (var k2 = size(chain) - 1; k2 >= 0; k2 -= 1)
+            pathCells = append(pathCells, chain[k2]);
+    }
+
+    var pts = [from];
+    for (var c in pathCells)
+        pts = append(pts, vector(lo[0] + (c[0] + 0.5) * dx, lo[1] + (c[1] + 0.5) * dy));
+    pts = append(pts, to);
+    return pts;
+}
+
+/**
+ * Drop points the path can see past, which straightens the grid staircase.
+ * Sight lines are checked at the bundle's own half width on both sides, so a
+ * shortcut is only taken when the whole bundle still fits on material.
+ */
+export function frcSimplifyPath(segs is array, pts is array, half is ValueWithUnits,
+    step is ValueWithUnits) returns array
+{
+    if (size(pts) < 3)
+        return pts;
+    const clear = function(a is Vector, b is Vector) returns boolean
+        {
+            const L = norm(b - a);
+            if (L < 1e-9 * inch)
+                return true;
+            const u = (b - a) / L;
+            const v = vector(-u[1], u[0]) * half;
+            const nSteps = max(ceil(L / step), 2);
+            for (var i = 0; i <= nSteps; i += 1)
+            {
+                const p = a + (b - a) * (i / nSteps);
+                if (!frcPointInside(segs, p) || !frcPointInside(segs, p + v)
+                    || !frcPointInside(segs, p - v))
+                    return false;
+            }
+            return true;
+        };
+    var out = [pts[0]];
+    var i = 0;
+    while (i < size(pts) - 1)
+    {
+        var best = i + 1;
+        for (var j = size(pts) - 1; j > i + 1; j -= 1)
+        {
+            if (clear(pts[i], pts[j]))
+            {
+                best = j;
+                break;
+            }
+        }
+        out = append(out, pts[best]);
+        i = best;
+    }
+    return out;
+}
+
+/**
+ * True when the whole bundle stays on material along the path. The first and
+ * last legs are skipped, since a run normally starts at a connector that sits
+ * over a hole rather than over metal.
+ */
+export function frcPathClear(segs is array, pts is array, half is ValueWithUnits,
+    step is ValueWithUnits) returns boolean
+{
+    for (var i = 1; i < size(pts) - 2; i += 1)
+    {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const L = norm(b - a);
+        if (L < 1e-9 * inch)
+            continue;
+        const u = (b - a) / L;
+        const v = vector(-u[1], u[0]) * half;
+        const nSteps = max(ceil(L / step), 2);
+        for (var k = 0; k <= nSteps; k += 1)
+        {
+            const p = a + (b - a) * (k / nSteps);
+            if (!frcPointInside(segs, p) || !frcPointInside(segs, p + v)
+                || !frcPointInside(segs, p - v))
+                return false;
+        }
+    }
+    return true;
+}
+
+/** Evenly spaced stations along a polyline, in path order. */
+export function frcPathStations(pts is array, spacing is ValueWithUnits,
+    margin is ValueWithUnits) returns array
+{
+    var total = 0 * inch;
+    for (var i = 0; i < size(pts) - 1; i += 1)
+        total = total + norm(pts[i + 1] - pts[i]);
+    if (total <= 2 * margin)
+        return [];
+    const usable = total - 2 * margin;
+    const n = max(floor(usable / spacing), 1);
+    var out = [];
+    for (var k = 0; k <= n; k += 1)
+    {
+        var want = margin + usable * k / n;
+        var run = 0 * inch;
+        for (var i = 0; i < size(pts) - 1; i += 1)
+        {
+            const L = norm(pts[i + 1] - pts[i]);
+            if (run + L >= want || i == size(pts) - 2)
+            {
+                const t = (L > 0 * inch) ? (want - run) / L : 0;
+                const u = (pts[i + 1] - pts[i]) / max(L, 1e-9 * inch);
+                out = append(out, [pts[i] + (pts[i + 1] - pts[i]) * min(max(t, 0), 1), u]);
+                break;
+            }
+            run = run + L;
+        }
+    }
+    return out;
+}
+
+/** Chain selected edges end to end into one ordered polyline in face coordinates. */
+export function frcChainEdges2d(context is Context, edges is array, cSys is CoordSystem,
+    perEdge is number) returns array
+{
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    var strands = [];
+    for (var e in edges)
+    {
+        var pts = [];
+        for (var i = 0; i <= perEdge; i += 1)
+        {
+            try silent
+            {
+                const p3 = evEdgeTangentLine(context, { "edge" : e, "parameter" : i / perEdge,
+                            "arcLengthParameterization" : true }).origin;
+                const rel = p3 - cSys.origin;
+                pts = append(pts, vector(dot(rel, cSys.xAxis), dot(rel, yAxis)));
+            }
+        }
+        if (size(pts) > 1)
+            strands = append(strands, pts);
+    }
+    if (size(strands) == 0)
+        return [];
+
+    var used = makeArray(size(strands), false);
+    var chain = strands[0];
+    used[0] = true;
+    var joined = 1;
+    while (joined < size(strands))
+    {
+        var bestI = -1;
+        var bestD = 0.25 * inch;
+        var bestFlip = false;
+        var atEnd = true;
+        for (var i = 0; i < size(strands); i += 1)
+        {
+            if (used[i])
+                continue;
+            const s = strands[i];
+            for (var pair in [[norm(s[0] - chain[size(chain) - 1]), false, true],
+                        [norm(s[size(s) - 1] - chain[size(chain) - 1]), true, true],
+                        [norm(s[size(s) - 1] - chain[0]), false, false],
+                        [norm(s[0] - chain[0]), true, false]])
+            {
+                if (pair[0] < bestD)
+                {
+                    bestD = pair[0];
+                    bestI = i;
+                    bestFlip = pair[1];
+                    atEnd = pair[2];
+                }
+            }
+        }
+        if (bestI < 0)
+            break;
+        var s = strands[bestI];
+        if (bestFlip)
+        {
+            var r = [];
+            for (var k = size(s) - 1; k >= 0; k -= 1)
+                r = append(r, s[k]);
+            s = r;
+        }
+        if (atEnd)
+        {
+            for (var k = 1; k < size(s); k += 1)
+                chain = append(chain, s[k]);
+        }
+        else
+        {
+            var head = [];
+            for (var k = 0; k < size(s) - 1; k += 1)
+                head = append(head, s[k]);
+            for (var k = 0; k < size(chain); k += 1)
+                head = append(head, chain[k]);
+            chain = head;
+        }
+        used[bestI] = true;
+        joined += 1;
+    }
+    return chain;
+}
+
+export function frcWirePathBuild(context is Context, id is Id, definition is map)
+{
+    const tf = evaluateQuery(context, definition.plate);
+    if (size(tf) == 0)
+        throw regenError("Select the flat face of the plate the wires run across.", ["plate"]);
+
+    // Pattern and mirror support. The picked plate face is what the whole run
+    // is laid out on, so it is the reference the pattern transform is measured
+    // against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.plate });
+
+    const pl = evPlane(context, { "face" : tf[0] });
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    const bodyQ = qOwnerBody(tf[0]);
+    const thickness = frcMaterialDepth(context, bodyQ, cSys);
+
+    const to2d = function(p3 is Vector) returns Vector
+        {
+            const rel = p3 - cSys.origin;
+            return vector(dot(rel, cSys.xAxis), dot(rel, yAxis));
+        };
+
+    const bundle = definition.autoBundle
+        ? frcBundleDiameter(definition.gauge, definition.wireCount) : definition.bundleDia;
+    const bundleHalf = bundle / 2;
+
+    var pts = [];
+    if (definition.mode == FRCWireMode.SKETCH)
+    {
+        const edges = evaluateQuery(context, definition.pathEdges);
+        if (size(edges) == 0)
+            throw regenError("Select the sketch edges the wires follow.", ["pathEdges"]);
+        if (size(edges) > 200)
+            throw regenError("That is a lot of edges for one run. Split it into shorter runs.", ["pathEdges"], definition.pathEdges);
+        pts = frcChainEdges2d(context, edges, cSys, 8);
+    }
+    else
+    {
+        const ends = evaluateQuery(context, definition.endPoints);
+        if (size(ends) < 2)
+            throw regenError("Pick the two points the run goes between.", ["endPoints"], definition.endPoints);
+        var a = vector(0, 0) * inch;
+        var b = vector(0, 0) * inch;
+        try
+        {
+            a = to2d(evVertexPoint(context, { "vertex" : ends[0] }));
+            b = to2d(evVertexPoint(context, { "vertex" : ends[size(ends) - 1] }));
+        }
+        catch
+        {
+            throw regenError("Those points could not be read. Pick vertices or sketch points.", ["endPoints"], definition.endPoints);
+        }
+        if (definition.mode == FRCWireMode.STRAIGHT)
+            pts = [a, b];
+        else
+        {
+            const segs = frcFaceSegments2d(context, tf[0], cSys, 6);
+            // Tight, because this box sets the extent of the routing grid.
+            // Onshape's loose box may reach past a face with curved edges,
+            // and every cell of grid outside the plate is a cell the route
+            // search walks and throws away.
+            const bb = evBox3d(context, { "topology" : tf[0], "cSys" : cSys,
+                        "tight" : true });
+            const lo = vector(bb.minCorner[0], bb.minCorner[1]);
+            const hi = vector(bb.maxCorner[0], bb.maxCorner[1]);
+            const span = max(hi[0] - lo[0], hi[1] - lo[1]);
+            const n = max(min(round(span / definition.routeStep), 55), 8);
+            const raw = frcRouteGrid(segs, lo, hi, n, bundleHalf, a, b);
+            if (size(raw) == 0)
+                throw regenError("No route between those points fits a bundle this wide on solid material. Try a smaller routing step, a thinner bundle, or run the wires around the outside.", ["endPoints"], definition.endPoints);
+            pts = frcSimplifyPath(segs, raw, bundleHalf, min(bundleHalf, span / (3 * n)));
+            if (!frcPathClear(segs, pts, bundleHalf, min(bundleHalf / 2, span / (4 * n))))
+                throw regenError("No route between those points fits a bundle this wide on solid material. Try a smaller routing step, a thinner bundle, or run the wires around the outside.", ["endPoints"], definition.endPoints);
+        }
+    }
+
+    // Which pick is at fault depends on the mode, and both have already been
+    // checked non-empty by the time the path comes back short, so there is
+    // always something for the graphics area to highlight.
+    if (size(pts) < 2)
+        throw regenError("That path came out empty. Check that the points or edges you picked lie on the plate face.", ["mode"], definition.mode == FRCWireMode.SKETCH ? definition.pathEdges : definition.endPoints);
+
+    var length = 0 * inch;
+    for (var i = 0; i < size(pts) - 1; i += 1)
+        length = length + norm(pts[i + 1] - pts[i]);
+
+    const tieW = frcTieWidth(definition.tieSize) + 0.020 * inch;
+    const spacing = definition.autoSpacing ? max(6 * bundle, 2 * inch) : definition.tieSpacing;
+    const stations = definition.tieSlots
+        ? frcPathStations(pts, spacing, max(bundle, 0.5 * inch)) : [];
+
+    // The bundle is built before the tie slots are cut so that one move
+    // covers both of them. The slot cutters have to move before the
+    // subtraction consumes them, and anything built after that move would be
+    // left standing where it was.
+    var madeBundle = false;
+    var bundleMass = 0 * kilogram;
+    if (definition.showBundle)
+    {
+        const skb = newSketchOnPlane(context, id + "b", { "sketchPlane" : pl });
+        for (var i = 0; i < size(pts) - 1; i += 1)
+        {
+            const L = norm(pts[i + 1] - pts[i]);
+            if (L < 1e-6 * inch)
+                continue;
+            const quad = frcBar(pts[i], (pts[i + 1] - pts[i]) / L, L, bundle);
+            skPolyline(skb, "b" ~ i, { "points" : append(quad, quad[0]) });
+        }
+        for (var i = 0; i < size(pts); i += 1)
+            skCircle(skb, "j" ~ i, { "center" : pts[i], "radius" : bundleHalf });
+        skSolve(skb);
+        opExtrude(context, id + "bx", { "entities" : qSketchRegion(id + "b", false),
+                    "direction" : pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : bundle });
+        madeBundle = true;
+        const bundleBody = qCreatedBy(id + "bx", EntityType.BODY);
+        setProperty(context, { "entities" : bundleBody,
+                    "propertyType" : PropertyType.NAME, "value" : "Wire Run" });
+        // Without a material the harness weighed nothing, so a weight budget
+        // silently left several pounds of wire off the robot. WIRE_BUNDLE is an
+        // envelope density, mass of a real bundle over the volume drawn around
+        // it, so it is the right figure for this body and the wrong one for a
+        // solid.
+        frcApplyPart(context, bundleBody, FRCMaterial.WIRE_BUNDLE, FRCPartClass.ELECTRICAL);
+        bundleMass = evVolume(context, { "entities" : bundleBody })
+            * frcDensity(FRCMaterial.WIRE_BUNDLE);
+    }
+
+    var cut = 0;
+    var moved = false;
+    if (size(stations) > 0)
+    {
+        const skPlane = plane(pl.origin + pl.normal * (0.02 * inch), pl.normal, pl.x);
+        const sk = newSketchOnPlane(context, id + "t", { "sketchPlane" : skPlane });
+        const segs = frcFaceSegments2d(context, tf[0], cSys, 6);
+        for (var k = 0; k < size(stations); k += 1)
+        {
+            const p = stations[k][0];
+            const u = stations[k][1];
+            const v = vector(-u[1], u[0]);
+            const reach = bundleHalf + tieW / 2 + 0.03 * inch;
+            var ok = true;
+            for (var side in [-1, 1])
+            {
+                for (var e in [-0.5, 0.5])
+                {
+                    if (!frcPointInside(segs, p + v * (side * reach) + u * (e * tieW * 2.4)))
+                        ok = false;
+                }
+            }
+            if (!ok)
+                continue;
+            for (var side in [-1, 1])
+            {
+                const c = p + v * (side * reach);
+                const quad = [c + u * (tieW * 1.1) + v * (side * tieW / 2),
+                              c - u * (tieW * 1.1) + v * (side * tieW / 2),
+                              c - u * (tieW * 1.1) - v * (side * tieW / 2),
+                              c + u * (tieW * 1.1) - v * (side * tieW / 2)];
+                skPolyline(sk, "s" ~ k ~ "_" ~ side, { "points" : append(quad, quad[0]) });
+            }
+            cut += 1;
+        }
+        skSolve(sk);
+        if (cut > 0)
+        {
+            opExtrude(context, id + "tx", { "entities" : qSketchRegion(id + "t", false),
+                        "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                        "endDepth" : thickness + 0.1 * inch });
+
+            // The move goes on before the subtraction, not after it. A
+            // subtraction consumes the cutters, so a transform at the end of
+            // the feature would find none of them left to move.
+            transformResultIfNecessary(context, id, remainderTransform);
+            moved = true;
+
+            opBoolean(context, id + "tsub", { "tools" : qCreatedBy(id + "tx", EntityType.BODY),
+                        "targets" : bodyQ, "operationType" : BooleanOperationType.SUBTRACTION });
+        }
+    }
+
+    // The bundle body still has to move when no tie slots were cut. Its mass
+    // was read before the move, and a rigid move does not change it.
+    if (!moved && madeBundle)
+        transformResultIfNecessary(context, id, remainderTransform);
+
+    // Prose, because Onshape renders this panel as one paragraph rather than
+    // as the lines it is written in.
+    var lines = "Run " ~ frcInches(length) ~ " over " ~ (size(pts) - 1)
+        ~ " segments, bundle " ~ frcInches(bundle) ~ " across. ";
+    if (definition.tieSlots)
+    {
+        // Report the spacing the stations were actually laid at, not the one
+        // that was asked for. frcPathStations divides the usable run into a
+        // whole number of equal gaps, so the gap it lands on is always at or
+        // above the target, and on a short run it can be well above: the
+        // shipped example asks 2.29 in and builds 2.44. Someone measuring the
+        // part should find the number the panel gave them.
+        const tieMargin = max(bundle, 0.5 * inch);
+        const tieGap = (size(stations) > 1)
+            ? (length - 2 * tieMargin) / (size(stations) - 1) : spacing;
+        lines ~= "" ~ cut ~ " tie stations, a pair of slots each, about "
+            ~ frcInches(tieGap) ~ " apart. ";
+    }
+    if (madeBundle)
+        lines ~= "Bundle mass " ~ frcFormatMass(bundleMass) ~ " on the Wire"
+            ~ " Run body, so Weight Budget counts it; that density is mass over"
+            ~ " the envelope, not a solid. ";
+    if (definition.mode == FRCWireMode.ROUTED)
+        lines ~= "The route crosses solid material, so it follows the ribs. ";
+    lines ~= "Add a tenth for slack. R622 sets gauge by breaker: 12 AWG to"
+        ~ " 40 A, 14 AWG to 30 A, 18 AWG to 20 A.";
+    reportFeatureInfo(context, id, lines);
+}

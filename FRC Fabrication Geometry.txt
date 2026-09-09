@@ -1,0 +1,1418 @@
+FeatureScript 3044;
+import(path : "onshape/std/common.fs", version : "3044.0");
+export import(path : "cb38778324c9d1cffc601ee7", version : "578eb867bbdba7daf29ca549");
+
+// ===========================================================================
+//  FRC FABRICATION GEOMETRY: joints, insert pockets, sheet nesting and
+//  printable holes
+// ---------------------------------------------------------------------------
+//  FRC Finger Joint, FRC Insert Pocket, FRC Sheet Layout and FRC Teardrop
+//  Hole are declared in the FRC Toolkit tab and do their work here.
+// ===========================================================================
+
+export const FRC_FINGERS_BOUNDS = { (unitless) : [1, 5, 99] } as IntegerBoundSpec;
+export const FRC_RATIO_BOUNDS = { (unitless) : [0.5, 2.0, 20.0] } as RealBoundSpec;
+export const FRC_KERF_BOUNDS = { (meter) : [0, 0, 0.003], (centimeter) : 0,
+    (millimeter) : 0, (inch) : 0, (foot) : 0, (yard) : 0 } as LengthBoundSpec;
+export const FRC_FIT_BOUNDS = { (meter) : [-0.002, 0, 0.002], (centimeter) : 0,
+    (millimeter) : 0, (inch) : 0, (foot) : 0, (yard) : 0 } as LengthBoundSpec;
+
+// ############################# FINGER JOINT #############################
+
+export enum FRCFingerCount
+{
+    annotation { "Name" : "Automatic" }               AUTO,
+    annotation { "Name" : "A set number of fingers" } FIXED
+}
+
+export enum FRCPinSense
+{
+    annotation { "Name" : "First part, both ends" }  BASE_OUT,
+    annotation { "Name" : "Second part, both ends" } TAB_OUT
+}
+
+export enum FRCJointRelief
+{
+    annotation { "Name" : "None (laser or waterjet)" } NONE,
+    annotation { "Name" : "T-bone, deepens the slot" } TBONE,
+    annotation { "Name" : "Dogbone, on the diagonal" } DOGBONE
+}
+
+/**
+ * The plate's own normal, taken as the normal of its largest planar face. A
+ * sheet part is overwhelmingly its two big faces, so this stays right even
+ * after the part has been pocketed and drilled.
+ */
+export function frcPlateNormal(context is Context, body is Query) returns Vector
+{
+    var bestArea = 0 * meter * meter;
+    var n = vector(0, 0, 1);
+    for (var f in evaluateQuery(context, qOwnedByBody(body, EntityType.FACE)))
+    {
+        try silent
+        {
+            const p = evPlane(context, { "face" : f });
+            const a = evArea(context, { "entities" : f });
+            if (a > bestArea)
+            {
+                bestArea = a;
+                n = p.normal;
+            }
+        }
+    }
+    return n;
+}
+
+/**
+ * The box the two parts share, measured in the joint's own frame: x along the
+ * joint line, y through the second part, z through the first. Returns
+ * undefined when the parts do not overlap.
+ *
+ * Both parts are copied before they are intersected, so the originals survive
+ * for the caller to cut.
+ */
+export function frcOverlapBox(context is Context, id is Id, a is Query, b is Query,
+    cs is CoordSystem)
+{
+    opPattern(context, id + "ca", { "entities" : a, "transforms" : [identityTransform()],
+                "instanceNames" : ["a"] });
+    opPattern(context, id + "cb", { "entities" : b, "transforms" : [identityTransform()],
+                "instanceNames" : ["b"] });
+    try silent
+    {
+        opBoolean(context, id + "ix", {
+                    "tools" : qUnion([qCreatedBy(id + "ca", EntityType.BODY),
+                            qCreatedBy(id + "cb", EntityType.BODY)]),
+                    "operationType" : BooleanOperationType.INTERSECTION });
+    }
+    // An intersection that lands consumes the second copy, whichever body
+    // the result is attributed to. So the second copy still standing means
+    // the boolean never ran, and it only fails to run when the two parts
+    // share no material at all. Without this test the swallowed failure
+    // left both copies alive, the first one was read as the overlap, and
+    // the caller cut finger slots along the whole length of two parts that
+    // never touched, with nothing said.
+    if (size(evaluateQuery(context, qCreatedBy(id + "cb", EntityType.BODY))) > 0)
+    {
+        try silent
+        {
+            opDeleteBodies(context, id + "dl", { "entities" :
+                        qUnion([qCreatedBy(id + "ca", EntityType.BODY),
+                                qCreatedBy(id + "cb", EntityType.BODY)]) });
+        }
+        return undefined;
+    }
+    var ov = qCreatedBy(id + "ca", EntityType.BODY);
+    if (size(evaluateQuery(context, ov)) == 0)
+        ov = qCreatedBy(id + "ix", EntityType.BODY);
+    if (size(evaluateQuery(context, ov)) == 0)
+    {
+        try silent
+        {
+            opDeleteBodies(context, id + "dl", { "entities" :
+                        qUnion([qCreatedBy(id + "ca", EntityType.BODY),
+                                qCreatedBy(id + "cb", EntityType.BODY)]) });
+        }
+        return undefined;
+    }
+    const bb = evBox3d(context, { "topology" : ov, "cSys" : cs, "tight" : true });
+    // A successful intersection consumes the second copy, so only the result
+    // is left to clean up. A failed one is swallowed above and leaves both
+    // copies standing, so both are named here and neither is stranded in the
+    // part studio.
+    opDeleteBodies(context, id + "dl", { "entities" :
+                qUnion([ov, qCreatedBy(id + "ca", EntityType.BODY),
+                        qCreatedBy(id + "cb", EntityType.BODY)]) });
+    return bb;
+}
+
+/**
+ * How many fingers to split the joint into.
+ *
+ * Odd counts are preferred, because an odd count puts a finger at each end of
+ * the joint on whichever part carries the outer fingers, and that is what
+ * holds the corner square while it is glued or bolted. The width band follows
+ * the two open-source generators the community uses: boxes.py defaults to two
+ * times material thickness, and TabbedBoxMaker calls three
+ * times typical, treats one time as the weak limit, and eight times as the
+ * point past which a finger joint stops earning its keep.
+ */
+export function frcFingerCount(length is ValueWithUnits, thickness is ValueWithUnits,
+    ratio is number, minRatio is number, maxRatio is number) returns number
+{
+    const want = ratio * thickness;
+    var n = max(round(length / want), 1);
+    if (n % 2 == 0)
+    {
+        const lo = max(n - 1, 1);
+        const hi = n + 1;
+        n = (abs(length / lo - want) <= abs(length / hi - want)) ? lo : hi;
+    }
+    while (n > 1 && length / n < minRatio * thickness)
+        n -= 2;
+    while (length / n > maxRatio * thickness)
+        n += 2;
+    return max(n, 1);
+}
+
+/**
+ * One slot: the rectangle, plus a relief at each of its four corners when a
+ * cutter radius was given.
+ *
+ * Which axis is which, because the relief direction turns on it. Both callers
+ * pass u along the joint line, so u is the direction finger width is measured
+ * in and the neighbouring fingers are the material beyond u0 and u1. Both pass
+ * v through the mating plate's thickness, so v is the direction the slot runs
+ * deep in and the slot floor is the material beyond v1.
+ *
+ * A router leaves the cutter radius in every inside corner, so an unrelieved
+ * slot will not accept the square finger that belongs in it. A dogbone sits on
+ * the corner diagonal, which clears the corner completely at the cost of
+ * eating 0.293 of the cutter radius into the finger on either side. A T-bone
+ * centre is offset a full radius along u instead. That leaves the circle
+ * tangent to the u0 or u1 wall and puts the whole overcut out through the v
+ * edges, so it deepens the slot and leaves the finger at full width, which is
+ * what teams routing narrow bumper fingers want. There are two v edges and a
+ * relief circle sits on each, so the slot grows by the cutter radius at both
+ * ends. A slot the thickness of the mating plate comes out that thickness
+ * plus the cutter diameter overall, 0.5 in on 0.25 in stock with a 0.25 in
+ * cutter. Offsetting along v would do the exact reverse and take a full
+ * cutter radius out of each neighbouring finger, which is worse than the
+ * dogbone this is meant to improve on.
+ */
+export function frcSlotRegion(sk is Sketch, tag is string, u0 is ValueWithUnits,
+    u1 is ValueWithUnits, v0 is ValueWithUnits, v1 is ValueWithUnits,
+    r is ValueWithUnits, relief is FRCJointRelief)
+{
+    skRectangle(sk, tag ~ "r", { "firstCorner" : vector(u0, v0),
+                "secondCorner" : vector(u1, v1) });
+    if (relief == FRCJointRelief.NONE || r <= 0 * inch)
+        return;
+    const d = r / sqrt(2);
+    var k = 0;
+    for (var su in [1, -1])
+    {
+        for (var sv in [1, -1])
+        {
+            const cu = (su == 1) ? u0 : u1;
+            const cv = (sv == 1) ? v0 : v1;
+            skCircle(sk, tag ~ "c" ~ k, { "center" : (relief == FRCJointRelief.DOGBONE)
+                        ? vector(cu + su * d, cv + sv * d)
+                        : vector(cu + su * r, cv), "radius" : r });
+            k += 1;
+        }
+    }
+}
+
+export function frcFingerJointBuild(context is Context, id is Id, definition is map)
+{
+    const bases = evaluateQuery(context, definition.baseParts);
+    if (size(bases) != 1)
+        throw regenError("Select exactly one part to carry the first set of fingers.", ["baseParts"], definition.baseParts);
+    const tabs = evaluateQuery(context, definition.tabParts);
+    if (size(tabs) == 0)
+        throw regenError("Select at least one part to joint to it.", ["tabParts"]);
+    if (size(tabs) > 12)
+        throw regenError("That is more parts than one joint feature should handle. Split the selection.", ["tabParts"], definition.tabParts);
+
+    // Pattern and mirror support. Both sets of plates place the joint, since
+    // every cut is laid out in the box the two of them share, so both are the
+    // reference the pattern transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : qUnion([definition.baseParts, definition.tabParts]) });
+
+    const base = bases[0];
+    const nA = frcPlateNormal(context, base);
+    const kerf = definition.kerf;
+    const fit = definition.fit;
+    // A laser takes half its kerf off each side of the line, so a slot comes
+    // out one full kerf wide of the drawing and the finger one kerf narrow.
+    // Model the cut that much tighter and the part fits as asked.
+    const grow = (fit - kerf) / 2;
+    const r = (definition.relief == FRCJointRelief.NONE)
+        ? 0 * inch : definition.toolDiameter / 2;
+
+    var lines = "";
+    var made = 0;
+
+    for (var ti = 0; ti < size(tabs); ti += 1)
+    {
+        const tab = tabs[ti];
+        const label = "Joint " ~ (ti + 1);
+        const nB = frcPlateNormal(context, tab);
+        if (abs(dot(nA, nB)) > 0.05)
+        {
+            lines ~= label ~ " is not at a right angle to part one, skipped. ";
+            continue;
+        }
+        const cr = cross(nA, nB);
+        const axis = cr / norm(cr);
+        const cs = coordSystem(vector(0, 0, 0) * meter, axis, nA);
+        const yAxis = cross(cs.zAxis, cs.xAxis);
+
+        const jid = id + ("j" ~ ti);
+        const bb = frcOverlapBox(context, jid, base, tab, cs);
+        if (bb == undefined)
+        {
+            lines ~= label ~ " does not overlap the first part, skipped. ";
+            continue;
+        }
+
+        const x0 = bb.minCorner[0];
+        const L = bb.maxCorner[0] - x0;
+        const yLo = bb.minCorner[1];
+        const yHi = bb.maxCorner[1];
+        const zLo = bb.minCorner[2];
+        const zHi = bb.maxCorner[2];
+        const tTab = yHi - yLo;                  // the second part's thickness
+        const tBase = zHi - zLo;                 // the first part's thickness
+        const tRef = max(tTab, tBase);
+        if (L < 2 * tRef)
+        {
+            lines ~= label ~ " overlaps only " ~ frcInches(L)
+                ~ ", too short to joint, skipped. ";
+            continue;
+        }
+
+        const n = (definition.countMode == FRCFingerCount.FIXED)
+            ? definition.fingers
+            : frcFingerCount(L, tRef, definition.widthRatio, 1.0, 8.0);
+        const w = L / n;
+        const baseKeepsOuter = definition.sense == FRCPinSense.BASE_OUT;
+        const over = tRef + 0.25 * inch;
+
+        for (var k = 0; k < n; k += 1)
+        {
+            // With an odd count, band 0 and band n-1 are both even, so the
+            // part that keeps the even bands gets a finger at each end.
+            const cutBase = (k % 2 == 0) != baseKeepsOuter;
+            const a0 = x0 + w * k - grow;
+            const a1 = x0 + w * (k + 1) + grow;
+            const tag = cutBase ? "b" : "t";
+            const sid = jid + (tag ~ "s" ~ k);
+            if (cutBase)
+            {
+                // Sketched on the first part's own face, so the slot is cut
+                // straight through it and the relief lands in that face.
+                const sk = newSketchOnPlane(context, sid, { "sketchPlane" :
+                            plane(cs.origin + cs.zAxis * (zLo - over), cs.zAxis, cs.xAxis) });
+                frcSlotRegion(sk, "s", a0, a1, yLo - grow, yHi + grow, r, definition.relief);
+                skSolve(sk);
+                opExtrude(context, jid + (tag ~ "x" ~ k),
+                    { "entities" : qSketchRegion(sid, false), "direction" : cs.zAxis,
+                      "endBound" : BoundingType.BLIND, "endDepth" : tBase + 2 * over });
+            }
+            else
+            {
+                // Sketched on the second part's face. Here the sketch v axis
+                // runs against the joint frame's z, hence the negated bounds.
+                const sk = newSketchOnPlane(context, sid, { "sketchPlane" :
+                            plane(cs.origin + yAxis * (yLo - over), yAxis, cs.xAxis) });
+                frcSlotRegion(sk, "s", a0, a1, -(zHi + grow), -(zLo - grow), r, definition.relief);
+                skSolve(sk);
+                opExtrude(context, jid + (tag ~ "x" ~ k),
+                    { "entities" : qSketchRegion(sid, false), "direction" : yAxis,
+                      "endBound" : BoundingType.BLIND, "endDepth" : tTab + 2 * over });
+            }
+        }
+
+        // The move goes on before the subtractions, not after them. A
+        // subtraction consumes the cutters, so a transform at the end of the
+        // feature would find none of this joint's own bodies left to move. It
+        // goes on under this joint's own id because the feature makes and
+        // spends one set of cutters per joint, and the helper can only be
+        // called once for any one id.
+        transformResultIfNecessary(context, jid, remainderTransform);
+
+        for (var pair in [["b", base], ["t", tab]])
+        {
+            var tools = [];
+            for (var k = 0; k < n; k += 1)
+            {
+                const q = qCreatedBy(jid + (pair[0] ~ "x" ~ k), EntityType.BODY);
+                if (size(evaluateQuery(context, q)) > 0)
+                    tools = append(tools, q);
+            }
+            if (size(tools) == 0)
+                continue;
+            try
+            {
+                opBoolean(context, jid + (pair[0] ~ "sub"), { "tools" : qUnion(tools),
+                            "targets" : pair[1],
+                            "operationType" : BooleanOperationType.SUBTRACTION });
+            }
+            catch
+            {
+                throw regenError("The fingers could not be cut out of one of these parts. Check that both parts are single solid plates.", ["tabParts"], pair[1]);
+            }
+        }
+
+        made += 1;
+        lines ~= label ~ ": " ~ n ~ " fingers at " ~ frcInches(w) ~ " across "
+            ~ frcInches(L) ~ ". ";
+        if (w < tRef)
+            lines ~= "NOTE Fingers thinner than the stock snap, use fewer. ";
+        else if (w > 8 * tRef)
+            lines ~= "NOTE Fingers this wide barely beat a butt joint, use more. ";
+        // A cutter that exactly fills the slot is worth flagging as much as
+        // one that will not fit, since it leaves the router nothing to steer
+        // in, and it is worth flagging with no relief set as well, because a
+        // full width slot is the case where relief would have mattered most.
+        if (definition.toolDiameter != undefined && definition.toolDiameter >= tTab)
+            lines ~= "NOTE The cutter fills the " ~ frcInches(tTab)
+                ~ " slot, use a smaller one. ";
+    }
+
+    if (made == 0)
+        throw regenError("None of those parts interlock with the first one. Check that they overlap and meet at a right angle.", ["tabParts"], definition.tabParts);
+
+    lines ~= "Measure the sheet: nominal 1/4 in polycarbonate runs 0.189 to "
+        ~ "0.250 in, which usually decides the fit.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################ INSERT POCKETS ############################
+
+export enum FRCInsertFamily
+{
+    annotation { "Name" : "Heat-set for 3D prints" }   PRINTED,
+    annotation { "Name" : "Straight hole in plastic" } STRAIGHT,
+    annotation { "Name" : "Tapered hole in plastic" }  TAPERED
+}
+
+export enum FRCInsertThread
+{
+    annotation { "Name" : "#4-40" }  N4,
+    annotation { "Name" : "#6-32" }  N6,
+    annotation { "Name" : "#8-32" }  N8,
+    annotation { "Name" : "#10-32" } N10,
+    annotation { "Name" : "M3" }     M3,
+    annotation { "Name" : "M4" }     M4,
+    annotation { "Name" : "M5" }     M5
+}
+
+export enum FRCInsertLength
+{
+    annotation { "Name" : "Standard" } LONG,
+    annotation { "Name" : "Short" }    SHORT
+}
+
+/**
+ * Insert data by family, thread and length.
+ *
+ * `hole` is the recommended hole diameter, `len` the installed length of the
+ * insert, `wall` the material that must surround it, `mouth` the diameter at
+ * the mouth of a tapered hole, and `over` the depth the hole is taken past the
+ * end of the insert.
+ *
+ *   PRINTED  follows the charts CNC Kitchen and ruthex publish for their own
+ *            knurled brass inserts, the ones teams put in printed parts.
+ *            Both give the same hole diameter within a tenth of a millimeter;
+ *            where they differ the CNC Kitchen value is used, and their
+ *            published minimum wall is carried through. Blind holes go one
+ *            millimeter past the insert.
+ *   STRAIGHT is the Dodge Ultrasert IV and SPIROL series 19 and 29 pattern,
+ *            sold by McMaster as 94459A for brittle plastics. Dodge's
+ *            drawing rule of insert length plus 0.030 in sets the depth.
+ *   TAPERED  is the Dodge Ultrasert II and SPIROL series 14 pattern, McMaster
+ *            93365A. `hole` is the diameter at the bottom of the taper and
+ *            `mouth` at the entrance; both companies specify an 8 degree
+ *            included taper between them.
+ *
+ * The body size does not map the same way between imperial and metric in the
+ * two machined families: straight M3 uses the #4-40 body while tapered M3 uses
+ * the #6-32 body. The tables below are keyed on all three of family, thread
+ * and length for that reason.
+ */
+export function frcInsertData(family is FRCInsertFamily, thread is FRCInsertThread,
+    lengthChoice is FRCInsertLength) returns map
+{
+    const mm = millimeter;
+    const shortOne = lengthChoice == FRCInsertLength.SHORT;
+    if (family == FRCInsertFamily.PRINTED)
+    {
+        const t = {
+                FRCInsertThread.N4 : { "hole" : 4.0 * mm, "od" : 4.6 * mm, "wall" : 1.6 * mm,
+                    "len" : (shortOne ? 3.6 : 5.7) * mm, "name" : "#4-40" },
+                FRCInsertThread.N6 : { "hole" : 4.8 * mm, "od" : 5.4 * mm, "wall" : 1.8 * mm,
+                    "len" : (shortOne ? 3.8 : 7.1) * mm, "name" : "#6-32" },
+                FRCInsertThread.N8 : { "hole" : 5.7 * mm, "od" : 6.3 * mm, "wall" : 2.1 * mm,
+                    "len" : (shortOne ? 4.7 : 8.2) * mm, "name" : "#8-32" },
+                FRCInsertThread.N10 : { "hole" : 6.5 * mm, "od" : 7.1 * mm, "wall" : 2.6 * mm,
+                    "len" : 9.5 * mm, "name" : "#10-32" },
+                FRCInsertThread.M3 : { "hole" : 4.0 * mm, "od" : 4.6 * mm, "wall" : 1.6 * mm,
+                    "len" : (shortOne ? 3.0 : 5.7) * mm, "name" : "M3" },
+                FRCInsertThread.M4 : { "hole" : 5.7 * mm, "od" : 6.3 * mm, "wall" : 2.1 * mm,
+                    "len" : (shortOne ? 4.0 : 8.1) * mm, "name" : "M4" },
+                FRCInsertThread.M5 : { "hole" : 6.5 * mm, "od" : 7.1 * mm, "wall" : 2.6 * mm,
+                    "len" : (shortOne ? 5.8 : 9.5) * mm, "name" : "M5" }
+            }[thread];
+        return mergeMaps(t, { "mouth" : t.hole, "over" : 1.0 * mm, "boss" : t.od + 2 * t.wall,
+                    "source" : "CNC Kitchen and ruthex" });
+    }
+    if (family == FRCInsertFamily.STRAIGHT)
+    {
+        const t = {
+                FRCInsertThread.N4 : { "hole" : 0.158 * inch, "boss" : 0.372 * inch,
+                    "len" : (shortOne ? 0.135 : 0.226) * inch, "name" : "#4-40" },
+                FRCInsertThread.N6 : { "hole" : 0.189 * inch, "boss" : 0.434 * inch,
+                    "len" : (shortOne ? 0.150 : 0.281) * inch, "name" : "#6-32" },
+                FRCInsertThread.N8 : { "hole" : 0.222 * inch, "boss" : 0.498 * inch,
+                    "len" : (shortOne ? 0.185 : 0.321) * inch, "name" : "#8-32" },
+                FRCInsertThread.N10 : { "hole" : 0.253 * inch, "boss" : 0.558 * inch,
+                    "len" : (shortOne ? 0.225 : 0.375) * inch, "name" : "#10-32" },
+                FRCInsertThread.M3 : { "hole" : 4.01 * mm, "boss" : 9.45 * mm,
+                    "len" : (shortOne ? 3.43 : 5.74) * mm, "name" : "M3" },
+                FRCInsertThread.M4 : { "hole" : 5.64 * mm, "boss" : 12.65 * mm,
+                    "len" : (shortOne ? 4.70 : 8.15) * mm, "name" : "M4" },
+                FRCInsertThread.M5 : { "hole" : 6.43 * mm, "boss" : 14.17 * mm,
+                    "len" : (shortOne ? 5.72 : 9.53) * mm, "name" : "M5" }
+            }[thread];
+        return mergeMaps(t, { "mouth" : t.hole, "over" : 0.030 * inch, "od" : t.hole,
+                    "wall" : (t.boss - t.hole) / 2,
+                    "source" : "Dodge Ultrasert IV and SPIROL series 19" });
+    }
+    const t = {
+            FRCInsertThread.N4 : { "hole" : (shortOne ? 0.153 : 0.141) * inch,
+                "mouth" : 0.159 * inch, "boss" : 0.344 * inch,
+                "len" : (shortOne ? 0.135 : 0.219) * inch, "name" : "#4-40" },
+            FRCInsertThread.N6 : { "hole" : (shortOne ? 0.199 : 0.185) * inch,
+                "mouth" : 0.206 * inch, "boss" : 0.438 * inch,
+                "len" : (shortOne ? 0.150 : 0.250) * inch, "name" : "#6-32" },
+            FRCInsertThread.N8 : { "hole" : (shortOne ? 0.226 : 0.208) * inch,
+                "mouth" : 0.234 * inch, "boss" : 0.500 * inch,
+                "len" : (shortOne ? 0.185 : 0.312) * inch, "name" : "#8-32" },
+            FRCInsertThread.N10 : { "hole" : (shortOne ? 0.267 : 0.246) * inch,
+                "mouth" : 0.277 * inch, "boss" : 0.594 * inch,
+                "len" : (shortOne ? 0.225 : 0.375) * inch, "name" : "#10-32" },
+            FRCInsertThread.M3 : { "hole" : (shortOne ? 5.05 : 4.70) * mm,
+                "mouth" : (shortOne ? 5.31 : 5.23) * mm, "boss" : 11.13 * mm,
+                "len" : (shortOne ? 3.80 : 6.35) * mm, "name" : "M3" },
+            FRCInsertThread.M4 : { "hole" : (shortOne ? 5.74 : 5.28) * mm,
+                "mouth" : 5.94 * mm, "boss" : 12.70 * mm,
+                "len" : (shortOne ? 4.70 : 7.92) * mm, "name" : "M4" },
+            FRCInsertThread.M5 : { "hole" : (shortOne ? 7.70 : 7.06) * mm,
+                "mouth" : 8.00 * mm, "boss" : 16.66 * mm,
+                "len" : (shortOne ? 6.73 : 11.13) * mm, "name" : "M5" }
+        }[thread];
+    return mergeMaps(t, { "over" : 0.030 * inch, "od" : t.mouth,
+                "wall" : (t.boss - t.mouth) / 2,
+                "source" : "Dodge Ultrasert II and SPIROL series 14" });
+}
+
+export function frcInsertPocketBuild(context is Context, id is Id, definition is map)
+{
+    const tf = evaluateQuery(context, definition.face);
+    if (size(tf) == 0)
+        throw regenError("Select the flat face the inserts go into.", ["face"]);
+
+    // Pattern and mirror support. The picked face is what anchors the pockets
+    // in space, so it is the reference the pattern transform is measured
+    // against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.face });
+
+    const pl = evPlane(context, { "face" : tf[0] });
+    const cSys = frcFaceCSys(pl);
+    const yAxis = cross(cSys.zAxis, cSys.xAxis);
+    const bodyQ = qOwnerBody(tf[0]);
+    const stock = frcMaterialDepth(context, bodyQ, cSys);
+
+    const spots = evaluateQuery(context, definition.locations);
+    if (size(spots) == 0)
+        throw regenError("Pick the points where the inserts go.", ["locations"]);
+    if (size(spots) > 200)
+        throw regenError("That is more inserts than one feature should place. Split the selection.", ["locations"], definition.locations);
+
+    const d = frcInsertData(definition.family, definition.thread, definition.lengthChoice);
+    const printed = definition.family == FRCInsertFamily.PRINTED;
+    // CNC Kitchen measured their own charts against as-printed holes and found
+    // the datasheet figure two to three tenths of a millimeter tight, because
+    // it assumes the hole was drilled. A drilled hole wants no compensation.
+    const comp = printed ? definition.printerComp : 0 * millimeter;
+    const bore = d.hole + comp;
+    const mouth = d.mouth + comp;
+    const through = definition.through;
+    // The thinnest floor a blind pocket may leave. A pocket that leaves this
+    // much is at the limit rather than past it, which is what lets the cap
+    // below land exactly on it.
+    const floorLeft = 0.2 * millimeter;
+    const room = stock - floorLeft;
+    // Automatic depth is the insert plus overtravel, and the overtravel is
+    // the part of it a thin plate cannot afford. Giving it up costs only the
+    // room a slightly proud insert would have had, so it is given up before
+    // the feature refuses to build. The insert's own length is not
+    // negotiable, since a pocket shorter than the insert will not seat it,
+    // so the cap is only taken when the length alone still fits.
+    const want = definition.autoDepth ? d.len + d.over : definition.pocketDepth;
+    const capped = definition.autoDepth && !through && want > room && d.len <= room;
+    const depth = capped ? room : want;
+
+    if (!through && depth > room)
+        throw regenError("The pocket is as deep as the stock. Use a shorter insert, a thicker part, or let the hole go through.", ["through"]);
+
+    var pts = [];
+    for (var v in spots)
+    {
+        try silent
+        {
+            const rel = evVertexPoint(context, { "vertex" : v }) - cSys.origin;
+            pts = append(pts, vector(dot(rel, cSys.xAxis), dot(rel, yAxis)));
+        }
+    }
+    if (size(pts) == 0)
+        throw regenError("Those points could not be read. Pick vertices or sketch points.", ["locations"], definition.locations);
+
+    // The main hole, sunk from a little above the face so the cut always
+    // starts cleanly in the material.
+    const lift = 0.02 * inch;
+    const skPlane = plane(pl.origin + pl.normal * lift, pl.normal, pl.x);
+    const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : skPlane });
+    for (var i = 0; i < size(pts); i += 1)
+        skCircle(sk, "h" ~ i, { "center" : pts[i], "radius" : bore / 2 });
+    skSolve(sk);
+    opExtrude(context, id + "x", { "entities" : qSketchRegion(id + "s", false),
+                "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                "endDepth" : (through ? stock + 0.1 * inch : depth) + lift });
+    var tools = [qCreatedBy(id + "x", EntityType.BODY)];
+
+    // A tapered insert needs a tapered hole. Both Dodge and SPIROL specify
+    // 8 degrees included between the entrance and the bottom of the taper,
+    // which is what sets the depth of the cone.
+    var taperDepth = 0 * inch;
+    if (definition.family == FRCInsertFamily.TAPERED && mouth > bore)
+    {
+        taperDepth = (mouth - bore) / (2 * tan(4 * degree));
+        if (size(pts) > 60)
+            throw regenError("A tapered pocket is built one cone at a time, so this feature takes at most 60 of them at once. Split the selection.", ["locations"], definition.locations);
+        const lower = plane(pl.origin - pl.normal * taperDepth, pl.normal, pl.x);
+        for (var i = 0; i < size(pts); i += 1)
+        {
+            const ta = id + ("t" ~ i);
+            const tb = id + ("u" ~ i);
+            const skt = newSketchOnPlane(context, ta, { "sketchPlane" : skPlane });
+            skCircle(skt, "m", { "center" : pts[i],
+                        "radius" : (mouth + 2 * lift * tan(4 * degree)) / 2 });
+            skSolve(skt);
+            const skb = newSketchOnPlane(context, tb, { "sketchPlane" : lower });
+            skCircle(skb, "m", { "center" : pts[i], "radius" : bore / 2 });
+            skSolve(skb);
+            opLoft(context, id + ("lf" ~ i), { "profileSubqueries" : [
+                            qSketchRegion(ta, false), qSketchRegion(tb, false)] });
+            tools = append(tools, qCreatedBy(id + ("lf" ~ i), EntityType.BODY));
+        }
+    }
+
+    // The move goes on before the subtraction, not after it. A subtraction
+    // consumes the cutters, so a transform at the end of the feature would
+    // find none of this feature's own bodies left to move.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    try
+    {
+        opBoolean(context, id + "sub", { "tools" : qUnion(tools), "targets" : bodyQ,
+                    "operationType" : BooleanOperationType.SUBTRACTION });
+    }
+    catch
+    {
+        throw regenError("The pockets did not land on the part. Check that the points sit on the face you picked.", ["locations"], definition.locations);
+    }
+
+    var lines = "" ~ size(pts) ~ " pockets cut at " ~ frcInches(bore) ~ " ("
+        ~ roundToPrecision(bore / millimeter, 2) ~ " mm)"
+        ~ (through ? ", right through the part. "
+            : (", " ~ frcInches(stock - depth) ~ " of stock left under them. "));
+    if (capped)
+        lines ~= "Overtravel was dropped to keep the pocket inside the stock. ";
+    if (printed && comp > 0 * millimeter)
+        lines ~= "The bore carries " ~ frcThou(comp)
+            ~ " of print compensation; zero it if you drill or ream. ";
+    lines ~= "Set the insert five thou below flush, since proud jacks the joint "
+        ~ "apart, and cut no counterbore or chamfer; screw off the bottom.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################# SHEET LAYOUT #############################
+
+export const FRC_SHEET_BOUNDS = { (meter) : [0.05, 1.2192, 10], (centimeter) : 121.92,
+    (millimeter) : 1219.2, (inch) : 48, (foot) : 4, (yard) : 1.3333 } as LengthBoundSpec;
+export const FRC_GAP_BOUNDS = { (meter) : [0, 0.00635, 0.2], (centimeter) : 0.635,
+    (millimeter) : 6.35, (inch) : 0.25, (foot) : 0.020833, (yard) : 0.006944 } as LengthBoundSpec;
+
+export enum FRCSheetSize
+{
+    annotation { "Name" : "48 x 96 in (full sheet)" } S48X96,
+    annotation { "Name" : "24 x 48 in (half sheet)" } S24X48,
+    annotation { "Name" : "12 x 24 in (benchtop)" }   S12X24,
+    annotation { "Name" : "600 x 900 mm" }            S600X900,
+    annotation { "Name" : "Custom" }                  CUSTOM
+}
+
+export function frcSheetDims(s is FRCSheetSize) returns array
+{
+    return {
+            FRCSheetSize.S48X96 : [48 * inch, 96 * inch],
+            FRCSheetSize.S24X48 : [24 * inch, 48 * inch],
+            FRCSheetSize.S12X24 : [12 * inch, 24 * inch],
+            FRCSheetSize.S600X900 : [600 * millimeter, 900 * millimeter],
+            FRCSheetSize.CUSTOM : [24 * inch, 48 * inch]
+        }[s];
+}
+
+/**
+ * A plate measured in its own plane: the two in-plane sides of its bounding
+ * box, and its thickness. The in-plane x axis is taken from whichever world
+ * axis is furthest from the plate normal, which keeps the frame stable and
+ * repeatable for parts modeled square to the origin, as almost all are.
+ */
+export function frcPlateExtents(context is Context, body is Query) returns map
+{
+    const n = frcPlateNormal(context, body);
+    var ref = vector(1, 0, 0);
+    if (abs(dot(n, ref)) > 0.9)
+        ref = vector(0, 1, 0);
+    const xd = normalize(cross(ref, n));
+    const cs = coordSystem(vector(0, 0, 0) * meter, xd, n);
+    const bb = evBox3d(context, { "topology" : body, "cSys" : cs, "tight" : true });
+    return { "cSys" : cs, "bounds" : bb,
+             "width" : bb.maxCorner[0] - bb.minCorner[0],
+             "height" : bb.maxCorner[1] - bb.minCorner[1],
+             "thickness" : bb.maxCorner[2] - bb.minCorner[2] };
+}
+
+/**
+ * First-fit decreasing-height shelf packing. Parts are sorted tallest first
+ * and laid along a shelf until the sheet runs out of width, then a new shelf
+ * starts above. It is not the tightest packing there is, but it is the one a
+ * person can read off the screen and check, and it is close enough on the
+ * mixed part sizes an FRC plate order contains.
+ *
+ * Returns one entry per part: sheet index and the position of its lower left
+ * corner on that sheet, with `turned` set when the part was rotated a quarter
+ * turn to fit.
+ */
+export function frcShelfPack(items is array, sheetW is ValueWithUnits,
+    sheetH is ValueWithUnits, gap is ValueWithUnits, allowTurn is boolean) returns array
+{
+    var order = [];
+    for (var i = 0; i < size(items); i += 1)
+        order = append(order, i);
+    order = sort(order, function(a, b)
+        {
+            return (items[b].height - items[a].height) / meter;
+        });
+
+    var out = makeArray(size(items), {});
+    var sheet = 0;
+    var shelfY = 0 * meter;
+    var shelfH = 0 * meter;
+    var cursor = 0 * meter;
+    for (var oi = 0; oi < size(order); oi += 1)
+    {
+        const i = order[oi];
+        var w = items[i].width;
+        var h = items[i].height;
+        var turned = false;
+        // A quarter turn is free, so take it whenever the part does not fit
+        // the sheet as it arrived, whichever dimension is the one that does
+        // not fit, or whenever it makes the shelf shorter. Testing only the
+        // height missed the part that is short enough and too wide, and a
+        // long thin plate landing wide side out is the ordinary way to get
+        // one, because `frcPlateExtents` takes its in-plane x from the world
+        // axis furthest from the plate normal and not from the longer side.
+        if (allowTurn && (h > sheetH || w > sheetW
+                    || (h > w && h <= sheetW && w <= sheetH)))
+        {
+            const t = w;
+            w = h;
+            h = t;
+            turned = true;
+        }
+        if (w > sheetW || h > sheetH)
+        {
+            out[i] = { "sheet" : -1, "x" : 0 * meter, "y" : 0 * meter, "turned" : turned };
+            continue;
+        }
+        if (cursor + w > sheetW)
+        {
+            // Next shelf, and a new sheet if this one is full.
+            shelfY = shelfY + shelfH + gap;
+            cursor = 0 * meter;
+            shelfH = 0 * meter;
+            if (shelfY + h > sheetH)
+            {
+                sheet += 1;
+                shelfY = 0 * meter;
+            }
+        }
+        out[i] = { "sheet" : sheet, "x" : cursor, "y" : shelfY, "turned" : turned };
+        cursor = cursor + w + gap;
+        shelfH = max(shelfH, h);
+    }
+    return out;
+}
+
+export function frcSheetLayoutBuild(context is Context, id is Id, definition is map)
+{
+    const bodies = evaluateQuery(context, definition.bodies);
+    if (size(bodies) == 0)
+        throw regenError("Select the parts to lay out.", ["bodies"]);
+    if (size(bodies) > 150)
+        throw regenError("That is more parts than one layout should carry. Split the selection.", ["bodies"], definition.bodies);
+
+    // Pattern and mirror support. The picked parts are what every copy is
+    // measured and placed from, so they are the reference the pattern
+    // transform is measured against.
+    const remainderTransform = getRemainderPatternTransform(context,
+        { "references" : definition.bodies });
+
+    const dims = (definition.sheet == FRCSheetSize.CUSTOM)
+        ? [definition.sheetWidth, definition.sheetLength] : frcSheetDims(definition.sheet);
+    const margin = definition.margin;
+    const gap = definition.gap;
+    const usableW = dims[0] - 2 * margin;
+    const usableH = dims[1] - 2 * margin;
+    if (usableW <= 0 * inch || usableH <= 0 * inch)
+        throw regenError("The edge margin uses up the whole sheet. Reduce the margin or choose a larger sheet.", ["margin"]);
+
+    var info = [];
+    for (var i = 0; i < size(bodies); i += 1)
+        info = append(info, frcPlateExtents(context, bodies[i]));
+
+    // Parts of different thickness cannot come off the same sheet, so each
+    // thickness is packed on its own and the sheets are laid out in a row.
+    var groups = {};
+    for (var i = 0; i < size(bodies); i += 1)
+    {
+        const key = definition.byThickness
+            ? ("" ~ roundToPrecision(info[i].thickness / inch, 3)) : "all";
+        if (groups[key] == undefined)
+            groups[key] = [];
+        groups[key] = append(groups[key], i);
+    }
+
+    var column = 0 * inch;
+    var sheetRects = [];
+    var placed = 0;
+    var dropped = 0;
+    var rows = "";
+
+    for (var key, idxs in groups)
+    {
+        var items = [];
+        for (var i in idxs)
+            items = append(items, { "width" : info[i].width, "height" : info[i].height });
+        const spots = frcShelfPack(items, usableW, usableH, gap, definition.allowTurn);
+        // With grouping off there is one group and its key is a word rather
+        // than a thickness, so the " in" that reads correctly after a
+        // thickness has to come off it.
+        const label = definition.byThickness ? (key ~ " in") : "Mixed";
+        var sheets = 0;
+        var used = 0 * inch * inch;
+        for (var k = 0; k < size(idxs); k += 1)
+        {
+            const i = idxs[k];
+            const s = spots[k];
+            if (s.sheet < 0)
+            {
+                dropped += 1;
+                continue;
+            }
+            sheets = max(sheets, s.sheet + 1);
+            used = used + info[i].width * info[i].height;
+
+            const bx = info[i].bounds;
+            const cs = info[i].cSys;
+            const yA = cross(cs.zAxis, cs.xAxis);
+            // Anchor the part at its own lower left corner, lying on its face.
+            const corner = cs.origin + cs.xAxis * bx.minCorner[0] + yA * bx.minCorner[1]
+                + cs.zAxis * bx.minCorner[2];
+            const anchor = coordSystem(corner, cs.xAxis, cs.zAxis);
+
+            const sheetOffset = vector(column + s.sheet * (dims[0] + 2 * margin) + margin,
+                margin, 0 * inch);
+            var pos = sheetOffset + vector(s.x, s.y, 0 * inch);
+            var xDir = vector(1, 0, 0);
+            if (s.turned)
+            {
+                // A quarter turn sends the part's own x along world y, so its
+                // lower left corner has to start a part-height further along.
+                pos = pos + vector(info[i].height, 0 * inch, 0 * inch);
+                xDir = vector(0, 1, 0);
+            }
+            const target = coordSystem(pos, xDir, vector(0, 0, 1));
+
+            const cid = id + ("p" ~ i);
+            opPattern(context, cid, { "entities" : bodies[i],
+                        "transforms" : [identityTransform()], "instanceNames" : ["c"] });
+            const copyQ = qCreatedBy(cid, EntityType.BODY);
+            opTransform(context, id + ("t" ~ i), { "bodies" : copyQ,
+                        "transform" : toWorld(target) * fromWorld(anchor) });
+            // No material is written on the copies. That is still deliberate,
+            // but not for the reason this comment used to give. It argued
+            // that the appearance being overwritten here proved the copy
+            // arrives carrying the seed's properties. It proves nothing: the
+            // layout color has to be set whether the copy came in wearing the
+            // part's color or the studio default, so this block reads the
+            // same either way. Whether opPattern carries a material across is
+            // not settled anywhere in this library, and there is no in-context
+            // read to settle it with, because getProperty on the current
+            // context is refused inside a custom feature.
+            //
+            // It does not have to be settled, because the number a wrong guess
+            // would corrupt is not read that way. frcWeighGroups in
+            // FRC Hardware Geometry weighs every body at its group's material,
+            // or at the reading dialog's material when it is in no group. Its
+            // one attempt to read a part's own material is that same refused
+            // getProperty, documented there as failing on every part. So
+            // Weight Budget and Center of Mass weigh these copies at the
+            // reader's dialog density whether the copies inherit or not, and a
+            // material written here would move neither report by a gram.
+            //
+            // What a material would reach is Onshape's own parts list and mass
+            // properties, which read the assigned property directly. If the
+            // copy inherits, those are already right, and right per part,
+            // which is more than this feature could manage: a sheet grouped by
+            // thickness is grouped that way precisely because one thickness
+            // can hold more than one stock, and a single written material
+            // would flatten aluminum and polycarbonate into whichever was
+            // guessed. If the copy does not inherit, the honest answer is
+            // still not a guess. So nothing is written either way. A reader
+            // who can run Onshape settles it in one look: nest two parts of
+            // different materials and read the copies in the parts list. If
+            // they come back blank, the place to act is frcWeighGroups, not
+            // here, because that is where the density is chosen.
+            //
+            // The exposure worth knowing about is not the density anyway, it
+            // is the count. Every copy duplicates a part that is already in
+            // the studio, and Weight Budget weighs qAllModifiableSolidBodies,
+            // so a layout left in place adds the whole nested set to the robot
+            // mass a second time. That holds at any density, and no property
+            // written here changes it.
+            //
+            // The color is the one thing worth changing. These are export
+            // artifacts, not parts, so they take the layout color and follow
+            // the studio scheme with it. The alpha stays at 1 because a nest
+            // is read looking straight down at it with nothing behind it.
+            try silent
+            {
+                setProperty(context, { "entities" : copyQ, "propertyType" : PropertyType.NAME,
+                            "value" : "Layout " ~ label ~ ", Sheet " ~ (s.sheet + 1) });
+                setProperty(context, { "entities" : copyQ,
+                            "propertyType" : PropertyType.APPEARANCE,
+                            "value" : frcTeamColorA(context, FRCPartClass.LAYOUT,
+                                color(0.35, 0.55, 0.80, 1), 1) });
+            }
+            placed += 1;
+        }
+        for (var si = 0; si < sheets; si += 1)
+            sheetRects = append(sheetRects,
+                vector(column + si * (dims[0] + 2 * margin), 0 * inch));
+        const area = sheets * dims[0] * dims[1];
+        rows = rows ~ label ~ ", " ~ size(idxs) ~ " parts on " ~ sheets
+            ~ (sheets == 1 ? " sheet" : " sheets") ~ ", "
+            ~ roundToPrecision(100 * used / max(area, 1e-9 * inch * inch), 1) ~ "% of the stock used. ";
+        column = column + sheets * (dims[0] + 2 * margin) + 2 * dims[0] / 10;
+    }
+
+    if (definition.showSheets && size(sheetRects) > 0)
+    {
+        // The sheet outlines, so the nesting can be checked against the stock
+        // it has to come out of.
+        const sk = newSketchOnPlane(context, id + "sh", { "sketchPlane" : XY_PLANE });
+        for (var i = 0; i < size(sheetRects); i += 1)
+            skRectangle(sk, "s" ~ i, { "firstCorner" : vector(sheetRects[i][0], sheetRects[i][1]),
+                        "secondCorner" : vector(sheetRects[i][0] + dims[0],
+                            sheetRects[i][1] + dims[1]) });
+        skSolve(sk);
+    }
+
+    // Every measurement above is read off the original parts rather than off
+    // the copies, so the copies and the sheet outlines move once, here.
+    transformResultIfNecessary(context, id, remainderTransform);
+
+    var lines = "" ~ placed ~ " of " ~ size(bodies) ~ " parts laid out. ";
+    if (dropped > 0)
+        lines ~= "NOTE " ~ dropped ~ " part" ~ (dropped == 1 ? " is" : "s are")
+            ~ " too big for the sheet; use a larger one. ";
+    lines ~= rows;
+    // Every copy is a second body with the same volume as a part already in
+    // the studio, and FRC Weight Budget's fallback group is every solid body
+    // in the Part Studio. It cannot tell a copy from an original: getProperty
+    // returns undefined inside a custom feature, so the weigh cannot read
+    // these bodies' names or their materials to exclude them. Nothing this
+    // feature writes onto a copy can be seen from there. So the only place
+    // the double count can be headed off is here, in front of the person who
+    // made the copies and can delete them.
+    lines ~= "Delete the copies before weighing: FRC Weight Budget counts them "
+        ~ "as extra parts and reports the robot twice as heavy. On a router, "
+        ~ "gap at least twice the cutter diameter.";
+    reportFeatureInfo(context, id, lines);
+}
+
+// ############################# TEARDROP HOLE ############################
+
+/**
+ * How far a printed wall may lean away from the build direction and still
+ * hold itself up. Slicers publish the same number as their maximum overhang,
+ * and nearly all of them ship set to 45 degrees, which is where this starts.
+ * It is a rule of thumb and not a vendor figure. The angle a given printer
+ * really holds depends on its cooling and its layer height, so a team should
+ * set this from a test print. The point on a teardrop stands
+ * r (1 / sin over - 1) above the top of the bore, which reaches the hole's
+ * own width of 2 r when sin over is 1/3, that is 19.47 degrees. The range
+ * stops a little below that crossover, at 15 degrees, where the point is
+ * already 2.86 r tall.
+ */
+export const FRC_OVERHANG_BOUNDS = { (degree) : [15, 45, 80], (radian) : 0.7854 } as AngleBoundSpec;
+
+export enum FRCTeardropMode
+{
+    annotation { "Name" : "Convert existing holes" } CONVERT,
+    annotation { "Name" : "New holes at points" }    NEW
+}
+
+export enum FRCTeardropShape
+{
+    annotation { "Name" : "Teardrop, pointed" }   POINT,
+    annotation { "Name" : "Teardrop, cut flat" }  FLAT,
+    annotation { "Name" : "Keyhole with a slot" } KEYHOLE
+}
+
+/**
+ * The widest half slot a keyhole of bore radius `r` can carry and still have
+ * a shoulder to retain a screw head on.
+ *
+ * A keyhole holds by the ledge either side of the slot, so the slot has to be
+ * meaningfully narrower than the bore rather than merely narrower than it. A
+ * slot four thousandths under the bore leaves four thousandths of ledge and
+ * retains nothing, which is a stadium slot with extra steps. Two floors set
+ * the ledge. It has to be printable, which is `frcMinFloor` for a print, the
+ * thinnest material this library will leave. It also has to scale, or the
+ * same four thousandths would pass on a two inch bore, so an eighth of the
+ * bore diameter, `0.25 * r`, is the proportional floor.
+ *
+ * The caller clamps to this rather than throwing, so the feature stays
+ * buildable on any combination of hole size, slot width and print
+ * compensation, and reports the clamp when it bites. A bore too small to
+ * carry any slot at all returns a value at or below zero, which the caller
+ * turns into an error naming the hole.
+ */
+export function frcKeyholeSlotLimit(r is ValueWithUnits) returns ValueWithUnits
+{
+    return r - max(frcMinFloor(FRCProcess.PRINTED), 0.25 * r);
+}
+
+/**
+ * One hole profile, drawn as a single closed loop in a sketch whose y axis is
+ * the build direction, centered on `c`.
+ *
+ * A round hole printed with its axis lying flat has to bridge its own roof:
+ * the last layers before the top of the bore have nothing under them, so they
+ * sag into it. A teardrop replaces everything above the point where the bore
+ * leans further than `over` from the build direction with two straight flanks
+ * at exactly that angle. The flanks are tangent to the bore, so they leave it
+ * where it stops being printable and nowhere earlier, and they meet in a point
+ * r / sin(over) above the center. Nothing in the cut then overhangs further
+ * than the printer can hold up.
+ *
+ * FLAT cuts that point off level with the top of the original bore. It leaves
+ * a roof 2 r (1 - sin over) / cos over wide to bridge, which is flat and short
+ * and prints far better than the bore's own roof does, and in exchange the
+ * hole stays within the height of the bore. It does not stay inside the
+ * bore's circle: the two roof corners sit sqrt(half^2 + r^2) out from the
+ * center, which is 1.08 r at the default 45 degrees and 1.26 r at the
+ * 15 degree bound. It is still what a hole close to an outside face wants,
+ * because a point would stand r / sin over clear of the center, 1.41 r at
+ * 45 degrees and 3.86 r at 15, and break out much further.
+ *
+ * KEYHOLE is not a bridging shape. It is the bore with a constant width slot
+ * running off it along the build direction, so a screw head passes through the
+ * bore and its shank then slides along the slot. What retains the head is the
+ * shoulder left either side of the slot, so the slot is narrowed to leave a
+ * real one when the width asked for would not. See `frcKeyholeSlotLimit`.
+ *
+ * Every profile starts from the major arc, the one through the bottom of the
+ * hole, so no part of the loop ever touches another part of it. Closing the
+ * top over the minor arc instead would put the roof and the arc together at a
+ * single point and hand the sketch solver a figure of eight.
+ */
+export function frcTeardropRegion(sk is Sketch, tag is string, c is Vector,
+    r is ValueWithUnits, shape is FRCTeardropShape, over is ValueWithUnits,
+    slotHalf is ValueWithUnits, travel is ValueWithUnits)
+{
+    const bottom = c + vector(0 * inch, -r);
+    if (shape == FRCTeardropShape.KEYHOLE)
+    {
+        // Where the two walls of the slot cross the bore. The ratio is taken
+        // first so the square root is of a plain number and not of an area.
+        const k = slotHalf / r;
+        const hj = r * sqrt(1 - k * k);
+        const right = c + vector(slotHalf, hj);
+        const left = c + vector(-slotHalf, hj);
+        skArc(sk, tag ~ "a", { "start" : right, "mid" : bottom, "end" : left });
+        skLineSegment(sk, tag ~ "l1", { "start" : left,
+                    "end" : c + vector(-slotHalf, travel) });
+        skArc(sk, tag ~ "b", { "start" : c + vector(-slotHalf, travel),
+                    "mid" : c + vector(0 * inch, travel + slotHalf),
+                    "end" : c + vector(slotHalf, travel) });
+        skLineSegment(sk, tag ~ "l2", { "start" : c + vector(slotHalf, travel),
+                    "end" : right });
+        return;
+    }
+    const left = c + vector(-r * cos(over), r * sin(over));
+    const right = c + vector(r * cos(over), r * sin(over));
+    skArc(sk, tag ~ "a", { "start" : left, "mid" : bottom, "end" : right });
+    if (shape == FRCTeardropShape.POINT)
+    {
+        const apex = c + vector(0 * inch, r / sin(over));
+        skLineSegment(sk, tag ~ "l1", { "start" : right, "end" : apex });
+        skLineSegment(sk, tag ~ "l2", { "start" : apex, "end" : left });
+        return;
+    }
+    // The flat is drawn where the two flanks have reached the top of the bore.
+    const half = r * (1 - sin(over)) / cos(over);
+    skLineSegment(sk, tag ~ "l1", { "start" : right, "end" : c + vector(half, r) });
+    skLineSegment(sk, tag ~ "l2", { "start" : c + vector(half, r),
+                "end" : c + vector(-half, r) });
+    skLineSegment(sk, tag ~ "l3", { "start" : c + vector(-half, r), "end" : left });
+}
+
+/**
+ * The cutter is always the whole hole, bore included, and never the cap on its
+ * own. A cap alone would meet the existing bore wall along the two tangent
+ * lines, and a boolean that touches its target along a line is the kind that
+ * leaves slivers behind. A cutter that carries the bore with it meets that
+ * wall face to face instead, and the bore half of it removes nothing, because
+ * that material has already gone.
+ */
+export function frcTeardropHoleBuild(context is Context, id is Id, definition is map)
+{
+    const shape = definition.shape;
+    // Only the parameters the dialog is showing can be read. One behind a
+    // precondition branch that is switched off arrives undefined, and it is
+    // the arithmetic on it, not the read itself, that fails the feature.
+    const over = (shape == FRCTeardropShape.KEYHOLE) ? 45 * degree : definition.overhang;
+    const slotWant = (shape == FRCTeardropShape.KEYHOLE)
+        ? definition.slotWidth / 2 : 0 * inch;
+    // The width actually cut. Each branch narrows it to whatever the bore it
+    // is working on can leave a retaining shoulder on, so the slot width in
+    // the dialog is a request and not a promise.
+    var slotHalf = slotWant;
+    var slotCut = false;
+    const travel = (shape == FRCTeardropShape.KEYHOLE) ? definition.travel : 0 * inch;
+
+    // The build direction, and with it the way the point and the slot face.
+    // Nothing picked means straight up, which is how the part sits on the bed
+    // unless the team turned it over in the slicer.
+    var up = frcPickFrame(context, definition.upFace, XY_PLANE).normal;
+    if (definition.flipUp)
+        up = -up;
+
+    var lines = "";
+    var made = 0;
+    var widest = 0 * inch;
+    // Bore radii, not diameters. The narrowest is what a keyhole slot has to
+    // suit, since one slot width serves every hole in the selection.
+    var narrowest = 0 * inch;
+
+    if (definition.mode == FRCTeardropMode.CONVERT)
+    {
+        const faces = evaluateQuery(context, definition.holeFaces);
+        if (size(faces) == 0)
+            throw regenError("Select the round faces of the holes you want reshaped.", ["holeFaces"]);
+        if (size(faces) > 60)
+            throw regenError("That is more holes than one feature should reshape at once. Split the selection.", ["holeFaces"], definition.holeFaces);
+
+        // Pattern and mirror support. The picked holes are what anchor every
+        // cut in space, so they are the reference the pattern transform is
+        // measured against.
+        const remainderTransform = getRemainderPatternTransform(context,
+            { "references" : definition.holeFaces });
+
+        // Every hole is measured before any of them is cut. A subtraction
+        // moves the faces around it, so a face picked in the dialog can stop
+        // resolving once the first cut has gone in, and reading all of them
+        // up front keeps the last hole as measurable as the first.
+        var holes = [];
+        var owners = [];
+        var skipped = 0;
+        for (var f in faces)
+        {
+            var cyl = undefined;
+            try silent
+            {
+                const s = evSurfaceDefinition(context, { "face" : f });
+                if (s is Cylinder)
+                    cyl = s;
+            }
+            if (cyl == undefined)
+            {
+                skipped += 1;
+                continue;
+            }
+            const axis = cyl.coordSystem.zAxis;
+            // A hole bored along the build direction prints as a stack of
+            // rings. It has no roof to bridge and no side for the point to sit
+            // on, so there is nothing here to do to it.
+            const side = up - dot(up, axis) * axis;
+            if (norm(side) < 0.05)
+            {
+                skipped += 1;
+                continue;
+            }
+            const upHere = side / norm(side);
+            if (shape == FRCTeardropShape.KEYHOLE)
+            {
+                // The slot is narrowed after the loop to suit the smallest
+                // bore in the set, so the only width this has to refuse is a
+                // bore that cannot carry a retaining shoulder at all.
+                if (frcKeyholeSlotLimit(cyl.radius) < 1e-4 * meter)
+                    throw regenError("One of those holes is too small to leave a shoulder either side of a keyhole slot. Drop it from the selection, or reshape a larger hole.", ["holeFaces"], f);
+                if (travel < cyl.radius)
+                    throw regenError("The keyhole slot has to run further than the hole radius. Increase the travel.", ["travel"], f);
+            }
+            // Length and radius of the bore from one measurement, taken in the
+            // hole's own frame: x along the bore, z along the build direction.
+            // The radius is read off the surface itself rather than off the
+            // box, because a bore broken by a slot or a pocket has a narrower
+            // box than it has a diameter.
+            var bb = undefined;
+            try silent
+            {
+                bb = evBox3d(context, { "topology" : f,
+                            "cSys" : coordSystem(cyl.coordSystem.origin, axis, upHere),
+                            "tight" : true });
+            }
+            if (bb == undefined)
+            {
+                skipped += 1;
+                continue;
+            }
+            holes = append(holes, { "origin" : cyl.coordSystem.origin, "axis" : axis,
+                        "up" : upHere, "radius" : cyl.radius,
+                        "lo" : bb.minCorner[0], "hi" : bb.maxCorner[0] });
+            owners = append(owners, qOwnerBody(f));
+            widest = max(widest, cyl.radius);
+        }
+        if (size(holes) == 0)
+            throw regenError("None of those holes can take a teardrop. A hole bored along the build direction has no roof to bridge.", ["holeFaces"], definition.holeFaces);
+
+        // One slot width serves the whole selection, so it is sized to the
+        // narrowest bore in it. Sizing each hole to itself would put a
+        // different slot on every hole off one dialog field.
+        if (shape == FRCTeardropShape.KEYHOLE)
+        {
+            narrowest = holes[0].radius;
+            for (var h in holes)
+                narrowest = min(narrowest, h.radius);
+            // The limit rises with the radius, so the narrowest bore sets it.
+            const cap = frcKeyholeSlotLimit(narrowest);
+            if (slotWant > cap)
+            {
+                slotHalf = cap;
+                slotCut = true;
+            }
+        }
+
+        // Resolved now, while the parts are still whole, and deduplicated in
+        // the same call, since a union asked for its entities lists each body
+        // once however many of its faces were picked.
+        const targets = qUnion(evaluateQuery(context, qUnion(owners)));
+
+        // The cutter runs the measured length of the bore and no further. A
+        // blind hole must not come out any deeper than it went in, and the
+        // length in the tight box is the deepest the bore itself reaches.
+        for (var i = 0; i < size(holes); i += 1)
+        {
+            const h = holes[i];
+            const sid = id + ("c" ~ i);
+            const sk = newSketchOnPlane(context, sid, { "sketchPlane" :
+                        plane(h.origin + h.axis * h.lo, h.axis, cross(h.up, h.axis)) });
+            frcTeardropRegion(sk, "t", vector(0, 0) * inch, h.radius, shape, over,
+                slotHalf, travel);
+            skSolve(sk);
+            opExtrude(context, id + ("x" ~ i), { "entities" : qSketchRegion(sid, false),
+                        "direction" : h.axis, "endBound" : BoundingType.BLIND,
+                        "endDepth" : h.hi - h.lo });
+        }
+
+        var tools = [];
+        for (var i = 0; i < size(holes); i += 1)
+        {
+            const q = qCreatedBy(id + ("x" ~ i), EntityType.BODY);
+            if (size(evaluateQuery(context, q)) > 0)
+                tools = append(tools, q);
+        }
+        if (size(tools) == 0)
+            throw regenError("The teardrop cutters came out empty. Check that the holes you picked are round bores through a solid part.", ["holeFaces"], definition.holeFaces);
+
+        // The move goes on before the subtraction, not after it. A subtraction
+        // consumes the cutters, so a transform at the end of the feature would
+        // find none of this feature's own bodies left to move.
+        transformResultIfNecessary(context, id, remainderTransform);
+
+        try
+        {
+            opBoolean(context, id + "sub", { "tools" : qUnion(tools), "targets" : targets,
+                        "operationType" : BooleanOperationType.SUBTRACTION });
+        }
+        catch
+        {
+            throw regenError("The teardrops could not be cut out of these parts. Check that every hole you picked is a bore in a solid part.", ["holeFaces"], definition.holeFaces);
+        }
+        made = size(tools);
+        lines ~= "Reshaped " ~ made ~ " of " ~ size(faces) ~ " holes, up to "
+            ~ frcInches(2 * widest) ~ " across. ";
+        if (skipped > 0)
+            lines ~= "NOTE " ~ skipped ~ " were skipped, bored up the build axis. ";
+    }
+    else
+    {
+        const tf = evaluateQuery(context, definition.targetFace);
+        if (size(tf) == 0)
+            throw regenError("Select the flat face the holes go into.", ["targetFace"]);
+        const spots = evaluateQuery(context, definition.locations);
+        if (size(spots) == 0)
+            throw regenError("Pick the points where the holes go.", ["locations"]);
+        if (size(spots) > 200)
+            throw regenError("That is more holes than one feature should cut at once. Split the selection.", ["locations"], definition.locations);
+
+        // Pattern and mirror support. The picked face is what anchors the new
+        // holes in space, so it is the reference the pattern transform is
+        // measured against.
+        const remainderTransform = getRemainderPatternTransform(context,
+            { "references" : definition.targetFace });
+
+        const pl = evPlane(context, { "face" : tf[0] });
+        const bodyQ = qOwnerBody(tf[0]);
+        const stock = frcMaterialDepth(context, bodyQ, frcFaceCSys(pl));
+
+        // The hole runs into the picked face, so the build direction has to
+        // lie in that face for the hole to have a roof at all.
+        const axis = -pl.normal;
+        const side = up - dot(up, axis) * axis;
+        if (norm(side) < 0.05)
+            throw regenError("A hole into this face would run along the build direction, so it has no roof to bridge. Pick a side face instead.", ["targetFace"], definition.targetFace);
+        const upHere = side / norm(side);
+
+        // A fastener size off the library table is already a clearance or a
+        // tap size, so it takes no fit allowance, which is the rule Hole
+        // follows. It still takes the printer compensation: this feature only
+        // ever cuts printed parts, and a printed hole comes out under size
+        // whichever way its diameter was chosen.
+        const nominal = definition.customSize
+            ? definition.holeDiameter : frcHoleDiameter(definition.holeSize);
+        const allowance = definition.customSize
+            ? frcFitAllowance(definition.fit, FRCProcess.PRINTED, definition.printerComp)
+            : definition.printerComp;
+        const dia = nominal + allowance;
+        if (dia < 1e-5 * meter)
+            throw regenError("That fit leaves the hole at zero diameter or less. Increase the diameter, or choose a looser fit.", ["holeDiameter"]);
+        widest = dia / 2;
+        narrowest = dia / 2;
+        if (shape == FRCTeardropShape.KEYHOLE)
+        {
+            // The slot is narrowed to whatever leaves a retaining shoulder,
+            // so only a bore too small for any slot is an error here. That
+            // keeps the shipped defaults building whatever the hole size and
+            // the print compensation are set to, instead of leaving the
+            // feature a few thousandths from throwing.
+            const cap = frcKeyholeSlotLimit(dia / 2);
+            if (cap < 1e-4 * meter)
+                throw regenError("That hole is too small to leave a shoulder either side of a keyhole slot. Use a larger hole.",
+                    (definition.customSize ? ["holeDiameter"] : ["holeSize"]));
+            if (slotWant > cap)
+            {
+                slotHalf = cap;
+                slotCut = true;
+            }
+            if (travel < dia / 2)
+                throw regenError("The keyhole slot has to run further than the hole radius. Increase the travel.", ["travel"]);
+        }
+
+        // Sunk from a little above the face so the cut always starts cleanly
+        // in the material, and turned so that the sketch y axis is the build
+        // direction, which is the frame the profile is drawn in.
+        const lift = 0.02 * inch;
+        const skPlane = plane(pl.origin + pl.normal * lift, pl.normal,
+            cross(upHere, pl.normal));
+        const skY = cross(skPlane.normal, skPlane.x);
+        const sk = newSketchOnPlane(context, id + "s", { "sketchPlane" : skPlane });
+        for (var i = 0; i < size(spots); i += 1)
+        {
+            var p3 = vector(0, 0, 0) * inch;
+            var got = false;
+            try silent
+            {
+                p3 = evVertexPoint(context, { "vertex" : spots[i] });
+                got = true;
+            }
+            if (!got)
+                continue;
+            const rel = p3 - skPlane.origin;
+            frcTeardropRegion(sk, "t" ~ i,
+                vector(dot(rel, skPlane.x), dot(rel, skY)), dia / 2, shape, over,
+                slotHalf, travel);
+            made += 1;
+        }
+        skSolve(sk);
+        if (made == 0)
+            throw regenError("Those points could not be read. Pick vertices or sketch points.", ["locations"], definition.locations);
+        opExtrude(context, id + "x", { "entities" : qSketchRegion(id + "s", false),
+                    "direction" : -pl.normal, "endBound" : BoundingType.BLIND,
+                    "endDepth" : (definition.throughAll ? stock + 0.1 * inch
+                            : definition.holeDepth) + lift });
+
+        // The move goes on before the subtraction, not after it. A subtraction
+        // consumes the cutters, so a transform at the end of the feature would
+        // find none of this feature's own bodies left to move.
+        transformResultIfNecessary(context, id, remainderTransform);
+
+        try
+        {
+            opBoolean(context, id + "sub", { "tools" : qCreatedBy(id + "x", EntityType.BODY),
+                        "targets" : bodyQ, "operationType" : BooleanOperationType.SUBTRACTION });
+        }
+        catch
+        {
+            throw regenError("The holes did not land on the part. Check that the points sit on the face you picked.", ["locations"], definition.locations);
+        }
+        lines ~= "Cut " ~ made ~ " holes at " ~ frcInches(dia)
+            ~ (definition.customSize ? ". "
+                : (", which includes " ~ frcThou(allowance)
+                    ~ " for print shrink. "));
+    }
+
+    // Published back to the dialog so the feature can name itself by how many
+    // holes it actually shaped.
+    setFeatureComputedParameter(context, id, { "name" : "holes", "value" : made });
+
+    if (shape == FRCTeardropShape.KEYHOLE)
+    {
+        if (slotCut)
+            lines ~= "The slot was narrowed to " ~ frcInches(2 * slotHalf)
+                ~ " from " ~ frcInches(2 * slotWant)
+                ~ " to leave a shoulder on the smallest bore. ";
+        // The shoulder, not the slot, is what holds a screw head, so it is
+        // the figure a keyhole is judged on. It is quoted on the narrowest
+        // bore, which is the one with the least of it.
+        lines ~= "The shoulder that holds the screw head is "
+            ~ frcInches(narrowest - slotHalf) ~ " each side. The slot roof is an "
+            ~ "arch of the slot's own radius, not a flat bridge, so its crown is "
+            ~ "unsupported too; print it with the hole face down on the bed.";
+    }
+    else
+    {
+        if (shape == FRCTeardropShape.POINT)
+            lines ~= "The point adds " ~ frcInches(widest * (1 / sin(over) - 1))
+                ~ " above the bore and leaves no bridge to span. ";
+        else
+            lines ~= "The flat roof spans "
+                ~ frcInches(2 * widest * (1 - sin(over)) / cos(over))
+                ~ " unsupported. ";
+        lines ~= "The overhang angle is a rule of thumb; most slicers assume "
+            ~ "45 deg, so set it from your own test print.";
+    }
+    reportFeatureInfo(context, id, lines);
+}
