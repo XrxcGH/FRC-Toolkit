@@ -9,7 +9,7 @@ import os
 import re
 import time
 
-RENDERS = r"C:\Users\ericj\Documents\FRC Toolkit\_renders"
+RENDERS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CATS = [
     ("mech",   "Mechanism"),

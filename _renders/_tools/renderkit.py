@@ -54,7 +54,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon, Circle, Rectangle
 from matplotlib.lines import Line2D
 
-RENDERS = r"C:\Users\ericj\Documents\FRC Toolkit\_renders"
+RENDERS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 FIGSIZE = (13.0, 9.75)          # 2080 x 1560 at 160 dpi
 DPI = 160

@@ -24,7 +24,7 @@ import os
 import re
 import sys
 
-LIB = r"C:\Users\ericj\Documents\FRC Toolkit"
+LIB = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TABS = [
     "FRC Core.txt",
